@@ -21,6 +21,7 @@ pub struct InstallReceipt {
     pub artifact_url: Option<String>,
     pub artifact_sha256: Option<String>,
     pub cache_path: Option<String>,
+    pub exposed_bins: Vec<String>,
     pub install_status: String,
     pub installed_at_unix: u64,
 }
@@ -197,6 +198,9 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     if let Some(cache_path) = &receipt.cache_path {
         payload.push_str(&format!("cache_path={}\n", cache_path));
     }
+    for exposed_bin in &receipt.exposed_bins {
+        payload.push_str(&format!("exposed_bin={}\n", exposed_bin));
+    }
     payload.push_str(&format!("install_status={}\n", receipt.install_status));
     payload.push_str(&format!(
         "installed_at_unix={}\n",
@@ -311,6 +315,10 @@ pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallR
             .with_context(|| format!("failed to remove package dir: {}", package_dir.display()))?;
     }
 
+    for exposed_bin in &receipt.exposed_bins {
+        remove_exposed_binary(layout, exposed_bin)?;
+    }
+
     fs::remove_file(&receipt_path).with_context(|| {
         format!(
             "failed to remove install receipt: {}",
@@ -336,6 +344,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut artifact_url = None;
     let mut artifact_sha256 = None;
     let mut cache_path = None;
+    let mut exposed_bins = Vec::new();
     let mut install_status = None;
     let mut installed_at_unix = None;
 
@@ -350,6 +359,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
             "artifact_url" => artifact_url = Some(v.to_string()),
             "artifact_sha256" => artifact_sha256 = Some(v.to_string()),
             "cache_path" => cache_path = Some(v.to_string()),
+            "exposed_bin" => exposed_bins.push(v.to_string()),
             "install_status" => install_status = Some(v.to_string()),
             "installed_at_unix" => {
                 installed_at_unix = Some(v.parse().context("installed_at_unix must be u64")?)
@@ -365,9 +375,95 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         artifact_url,
         artifact_sha256,
         cache_path,
+        exposed_bins,
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
         installed_at_unix: installed_at_unix.context("missing installed_at_unix")?,
     })
+}
+
+pub fn bin_path(layout: &PrefixLayout, binary_name: &str) -> PathBuf {
+    let mut file_name = binary_name.to_string();
+    if cfg!(windows) {
+        file_name.push_str(".cmd");
+    }
+    layout.bin_dir().join(file_name)
+}
+
+pub fn expose_binary(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    binary_name: &str,
+    binary_rel_path: &str,
+) -> Result<()> {
+    let source_rel = validated_relative_binary_path(binary_rel_path)?;
+    let source_path = install_root.join(source_rel);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "declared binary path '{}' was not found in install root: {}",
+            binary_rel_path,
+            source_path.display()
+        ));
+    }
+
+    let destination = bin_path(layout, binary_name);
+    if destination.exists() {
+        fs::remove_file(&destination).with_context(|| {
+            format!(
+                "failed to replace existing binary entry: {}",
+                destination.display()
+            )
+        })?;
+    }
+
+    create_binary_entry(&source_path, &destination)
+}
+
+pub fn remove_exposed_binary(layout: &PrefixLayout, binary_name: &str) -> Result<()> {
+    let destination = bin_path(layout, binary_name);
+    if !destination.exists() {
+        return Ok(());
+    }
+
+    fs::remove_file(&destination)
+        .with_context(|| format!("failed to remove exposed binary: {}", destination.display()))?;
+    Ok(())
+}
+
+fn validated_relative_binary_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!("binary path must be relative: {}", path));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("binary path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("binary path must not include '..': {}", path));
+    }
+    Ok(relative)
+}
+
+fn create_binary_entry(source_path: &Path, destination: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source_path, destination).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                destination.display(),
+                source_path.display()
+            )
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        let shim = format!("@echo off\r\n\"{}\" %*\r\n", source_path.display());
+        fs::write(destination, shim.as_bytes())
+            .with_context(|| format!("failed to write shim: {}", destination.display()))
+    }
 }
 
 fn make_tmp_dir(layout: &PrefixLayout, prefix: &str) -> Result<PathBuf> {
@@ -629,8 +725,9 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_receipt, read_pin, remove_pin, strip_rel_components, uninstall_package,
-        write_install_receipt, write_pin, InstallReceipt, PrefixLayout, UninstallStatus,
+        expose_binary, parse_receipt, read_pin, remove_exposed_binary, remove_pin,
+        strip_rel_components, uninstall_package, write_install_receipt, write_pin, InstallReceipt,
+        PrefixLayout, UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -647,10 +744,30 @@ mod tests {
 
     #[test]
     fn parse_new_receipt_shape() {
-        let raw = "name=fd\nversion=10.2.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\ninstall_status=installed\ninstalled_at_unix=123\n";
+        let raw = "name=fd\nversion=10.2.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_status=installed\ninstalled_at_unix=123\n";
         let receipt = parse_receipt(raw).expect("must parse");
         assert_eq!(receipt.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
+        assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
+    }
+
+    #[test]
+    fn expose_and_remove_binary_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo"), b"#!/bin/sh\n").expect("must write binary");
+
+        expose_binary(&layout, &package_dir, "demo", "demo").expect("must expose binary");
+
+        let exposed_path = layout.bin_dir().join("demo");
+        assert!(exposed_path.exists());
+
+        remove_exposed_binary(&layout, "demo").expect("must remove binary");
+        assert!(!exposed_path.exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
@@ -681,6 +798,7 @@ mod tests {
                 artifact_url: None,
                 artifact_sha256: None,
                 cache_path: None,
+                exposed_bins: Vec::new(),
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
             },
@@ -722,6 +840,7 @@ mod tests {
                 artifact_url: None,
                 artifact_sha256: None,
                 cache_path: None,
+                exposed_bins: Vec::new(),
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
             },

@@ -53,6 +53,12 @@ impl ArchiveType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactBinary {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Artifact {
     pub target: String,
     pub url: String,
@@ -62,6 +68,8 @@ pub struct Artifact {
     pub archive: Option<String>,
     pub strip_components: Option<u32>,
     pub artifact_root: Option<String>,
+    #[serde(default)]
+    pub binaries: Vec<ArtifactBinary>,
 }
 
 impl Artifact {
@@ -121,6 +129,10 @@ zlib = ">=1.2.0, <2.0.0"
 target = "x86_64-unknown-linux-gnu"
 url = "https://example.test/ripgrep-14.1.0-x86_64-unknown-linux-gnu.tar.zst"
 sha256 = "abc123"
+
+[[artifacts.binaries]]
+name = "rg"
+path = "ripgrep"
 "#;
 
         let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
@@ -128,6 +140,9 @@ sha256 = "abc123"
         assert_eq!(parsed.version.to_string(), "14.1.0");
         assert!(parsed.dependencies.contains_key("zlib"));
         assert_eq!(parsed.artifacts.len(), 1);
+        assert_eq!(parsed.artifacts[0].binaries.len(), 1);
+        assert_eq!(parsed.artifacts[0].binaries[0].name, "rg");
+        assert_eq!(parsed.artifacts[0].binaries[0].path, "ripgrep");
     }
 
     #[test]

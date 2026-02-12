@@ -38,6 +38,7 @@ Default user prefixes:
 
 - `search` and `info` query the local registry index.
 - `install` resolves a package version and target artifact, downloads to cache, verifies SHA-256, extracts into `<prefix>/pkgs/<name>/<version>`, and writes an install receipt.
+- `install` exposes declared binaries into `<prefix>/bin/` (symlinks on Unix, `.cmd` shims on Windows) and hard-fails on collisions.
 - `install` supports:
   - `--target <triple>` to override host target selection.
   - `--force-redownload` to bypass artifact cache.
@@ -49,5 +50,4 @@ Default user prefixes:
 ## Deferred Items
 
 - Dependency graph install (currently direct package only).
-- Binary exposure (`bin` symlinks/shims).
 - Dependency-aware uninstall and cache pruning.

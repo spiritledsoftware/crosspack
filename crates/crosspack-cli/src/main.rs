@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -6,9 +7,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
-    current_unix_timestamp, default_user_prefix, install_from_artifact, read_install_receipts,
-    read_pin, remove_file_if_exists, uninstall_package, write_install_receipt, write_pin,
-    InstallReceipt, PrefixLayout, UninstallStatus,
+    bin_path, current_unix_timestamp, default_user_prefix, expose_binary, install_from_artifact,
+    read_install_receipts, read_pin, remove_exposed_binary, remove_file_if_exists,
+    uninstall_package, write_install_receipt, write_pin, InstallReceipt, PrefixLayout,
+    UninstallStatus,
 };
 use crosspack_registry::RegistryIndex;
 use crosspack_security::verify_sha256_file;
@@ -258,6 +260,7 @@ struct InstallOutcome {
     download_status: &'static str,
     install_root: PathBuf,
     receipt_path: PathBuf,
+    exposed_bins: Vec<String>,
 }
 
 fn resolve_install(
@@ -318,6 +321,10 @@ fn install_resolved(
     resolved: &ResolvedInstall,
     force_redownload: bool,
 ) -> Result<InstallOutcome> {
+    let receipts = read_install_receipts(layout)?;
+    let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
+    validate_binary_preflight(layout, &resolved.manifest.name, &exposed_bins, &receipts)?;
+
     let cache_path = layout.artifact_cache_path(
         &resolved.manifest.name,
         &resolved.manifest.version.to_string(),
@@ -346,6 +353,23 @@ fn install_resolved(
         resolved.artifact.artifact_root.as_deref(),
     )?;
 
+    for binary in &resolved.artifact.binaries {
+        expose_binary(layout, &install_root, &binary.name, &binary.path)?;
+    }
+
+    if let Some(previous_receipt) = receipts
+        .iter()
+        .find(|receipt| receipt.name == resolved.manifest.name)
+    {
+        for stale_bin in previous_receipt
+            .exposed_bins
+            .iter()
+            .filter(|old| !exposed_bins.contains(old))
+        {
+            remove_exposed_binary(layout, stale_bin)?;
+        }
+    }
+
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
         version: resolved.manifest.version.to_string(),
@@ -353,6 +377,7 @@ fn install_resolved(
         artifact_url: Some(resolved.artifact.url.clone()),
         artifact_sha256: Some(resolved.artifact.sha256.clone()),
         cache_path: Some(cache_path.display().to_string()),
+        exposed_bins: exposed_bins.clone(),
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
@@ -368,6 +393,7 @@ fn install_resolved(
         download_status,
         install_root,
         receipt_path,
+        exposed_bins,
     })
 }
 
@@ -384,7 +410,78 @@ fn print_install_outcome(outcome: &InstallOutcome) {
         outcome.download_status
     );
     println!("install_root: {}", outcome.install_root.display());
+    if !outcome.exposed_bins.is_empty() {
+        println!("exposed_bins: {}", outcome.exposed_bins.join(", "));
+    }
     println!("receipt: {}", outcome.receipt_path.display());
+}
+
+fn collect_declared_binaries(artifact: &Artifact) -> Result<Vec<String>> {
+    let mut names = Vec::with_capacity(artifact.binaries.len());
+    let mut seen = HashSet::new();
+    for binary in &artifact.binaries {
+        validate_binary_name(&binary.name)?;
+        if !seen.insert(binary.name.clone()) {
+            return Err(anyhow!(
+                "duplicate binary declaration '{}' for target '{}'",
+                binary.name,
+                artifact.target
+            ));
+        }
+        names.push(binary.name.clone());
+    }
+    Ok(names)
+}
+
+fn validate_binary_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(anyhow!("binary name must not be empty"));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(anyhow!(
+            "binary name must not contain path separators: {name}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_binary_preflight(
+    layout: &PrefixLayout,
+    package_name: &str,
+    desired_bins: &[String],
+    receipts: &[InstallReceipt],
+) -> Result<()> {
+    let owned_by_self: HashSet<&str> = receipts
+        .iter()
+        .find(|receipt| receipt.name == package_name)
+        .map(|receipt| receipt.exposed_bins.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    for desired in desired_bins {
+        for receipt in receipts {
+            if receipt.name == package_name {
+                continue;
+            }
+            if receipt.exposed_bins.iter().any(|bin| bin == desired) {
+                return Err(anyhow!(
+                    "binary '{}' is already owned by package '{}'",
+                    desired,
+                    receipt.name
+                ));
+            }
+        }
+
+        let path = bin_path(layout, desired);
+        if path.exists() && !owned_by_self.contains(desired.as_str()) {
+            return Err(anyhow!(
+                "binary '{}' at {} already exists and is not managed by crosspack",
+                desired,
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn load_pin_requirement(layout: &PrefixLayout, name: &str) -> Result<Option<VersionReq>> {
@@ -544,9 +641,11 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pin_spec, select_manifest_with_pin};
+    use super::{parse_pin_spec, select_manifest_with_pin, validate_binary_preflight};
     use crosspack_core::PackageManifest;
+    use crosspack_installer::{bin_path, InstallReceipt, PrefixLayout};
     use semver::VersionReq;
+    use std::fs;
 
     #[test]
     fn parse_pin_spec_requires_constraint() {
@@ -586,5 +685,60 @@ sha256 = "def"
         let selected =
             select_manifest_with_pin(&versions, &request, Some(&pin)).expect("must select");
         assert_eq!(selected.version.to_string(), "1.2.0");
+    }
+
+    #[test]
+    fn validate_binary_preflight_rejects_other_package_owner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let receipts = vec![InstallReceipt {
+            name: "fd".to_string(),
+            version: "10.0.0".to_string(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let err = validate_binary_preflight(&layout, "ripgrep", &["rg".to_string()], &receipts)
+            .expect_err("must reject conflict");
+        assert!(err.to_string().contains("already owned by package 'fd'"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_binary_preflight_rejects_unmanaged_existing_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let existing = bin_path(&layout, "rg");
+        fs::write(&existing, b"#!/bin/sh\n").expect("must write existing file");
+
+        let err = validate_binary_preflight(&layout, "ripgrep", &["rg".to_string()], &[])
+            .expect_err("must reject unmanaged file");
+        assert!(err
+            .to_string()
+            .contains("already exists and is not managed by crosspack"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    fn test_layout() -> PrefixLayout {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        path.push(format!(
+            "crosspack-cli-tests-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        PrefixLayout::new(path)
     }
 }

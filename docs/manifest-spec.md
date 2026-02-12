@@ -24,6 +24,12 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `archive` (optional): archive type override (`zip`, `tar.gz`, `tar.zst`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
+- `binaries` (optional): list of exposed commands for this artifact.
+
+### Artifact Binary Fields
+
+- `name`: exposed command name placed into `<prefix>/bin/`.
+- `path`: relative path inside extracted package content.
 
 ## Example
 
@@ -42,10 +48,18 @@ url = "https://packages.example/ripgrep-14.1.0-x86_64-unknown-linux-gnu.tar.zst"
 sha256 = "..."
 strip_components = 1
 
+[[artifacts.binaries]]
+name = "rg"
+path = "rg"
+
 [[artifacts]]
 target = "x86_64-pc-windows-msvc"
 url = "https://packages.example/ripgrep-14.1.0-x86_64-pc-windows-msvc.zip"
 sha256 = "..."
 archive = "zip"
 artifact_root = "ripgrep-14.1.0-x86_64-pc-windows-msvc"
+
+[[artifacts.binaries]]
+name = "rg"
+path = "rg.exe"
 ```

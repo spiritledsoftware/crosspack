@@ -12,7 +12,12 @@
 7. Extract archive into temporary state directory.
 8. Apply `strip_components` during staging copy.
 9. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
-10. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+10. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
+11. Expose declared binaries:
+   - Unix: symlink `<prefix>/bin/<name>` to installed package path.
+   - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
+12. Remove stale previously-owned binaries no longer declared for that package.
+13. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
 
 ## Receipt Fields
 
@@ -22,6 +27,7 @@
 - `artifact_url` (optional)
 - `artifact_sha256` (optional)
 - `cache_path` (optional)
+- `exposed_bin` (repeated, optional)
 - `install_status` (`installed`)
 - `installed_at_unix`
 
@@ -31,11 +37,11 @@
 - Unsupported archive type: install fails with actionable message.
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
+- Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
 
 ## Current Limits
 
 - Installs only the direct requested package (no dependency install yet).
-- Does not create `bin` symlinks/shims yet.
 - Upgrade does not yet resolve/install transitive dependencies.
 - Pin constraints are simple per-package semver requirements stored as files.
 
