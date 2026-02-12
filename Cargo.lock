@@ -134,8 +134,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crosspack-core",
  "crosspack-installer",
  "crosspack-registry",
+ "crosspack-resolver",
+ "crosspack-security",
+ "semver",
 ]
 
 [[package]]
@@ -153,6 +157,7 @@ name = "crosspack-installer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crosspack-core",
 ]
 
 [[package]]

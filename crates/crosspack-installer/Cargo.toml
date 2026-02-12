@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+crosspack-core = { path = "../crosspack-core" }

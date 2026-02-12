@@ -1,4 +1,4 @@
-# Manifest Specification (Draft v0.1)
+# Manifest Specification (Draft v0.2)
 
 Each package version is represented by a TOML manifest stored in the registry index.
 
@@ -21,7 +21,9 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
 - `signature` (optional in v0.1): detached signature reference.
-- `archive` (optional): archive type override.
+- `archive` (optional): archive type override (`zip`, `tar.gz`, `tar.zst`). If omitted, inferred from URL suffix.
+- `strip_components` (optional): number of leading path components to strip during extraction.
+- `artifact_root` (optional): expected top-level extracted path (validation hint).
 
 ## Example
 
@@ -38,9 +40,12 @@ pcre2 = ">=10.0, <11.0"
 target = "x86_64-unknown-linux-gnu"
 url = "https://packages.example/ripgrep-14.1.0-x86_64-unknown-linux-gnu.tar.zst"
 sha256 = "..."
+strip_components = 1
 
 [[artifacts]]
 target = "x86_64-pc-windows-msvc"
 url = "https://packages.example/ripgrep-14.1.0-x86_64-pc-windows-msvc.zip"
 sha256 = "..."
+archive = "zip"
+artifact_root = "ripgrep-14.1.0-x86_64-pc-windows-msvc"
 ```

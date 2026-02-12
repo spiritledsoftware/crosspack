@@ -11,5 +11,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+crosspack-core = { path = "../crosspack-core" }
 crosspack-installer = { path = "../crosspack-installer" }
 crosspack-registry = { path = "../crosspack-registry" }
+crosspack-resolver = { path = "../crosspack-resolver" }
+crosspack-security = { path = "../crosspack-security" }
+semver.workspace = true
