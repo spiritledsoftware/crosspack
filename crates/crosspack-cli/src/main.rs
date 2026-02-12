@@ -383,8 +383,8 @@ fn main() -> Result<()> {
                 println!("{line}");
             }
             println!(
-                "update summary: updated={} up-to-date={} failed={}",
-                report.updated, report.up_to_date, report.failed
+                "{}",
+                format_update_summary_line(report.updated, report.up_to_date, report.failed)
             );
             ensure_update_succeeded(report.failed)?;
         }
@@ -457,6 +457,10 @@ fn ensure_update_succeeded(failed: u32) -> Result<()> {
         return Err(anyhow!("source update failed"));
     }
     Ok(())
+}
+
+fn format_update_summary_line(updated: u32, up_to_date: u32, failed: u32) -> String {
+    format!("update summary: updated={updated} up-to-date={up_to_date} failed={failed}")
 }
 
 fn update_failure_reason_code(error: Option<&str>) -> String {
@@ -1110,9 +1114,9 @@ mod tests {
     use super::{
         build_update_report, build_upgrade_plans, build_upgrade_roots, determine_install_reason,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_update_succeeded,
-        format_registry_list_lines, format_uninstall_messages, parse_pin_spec,
-        select_manifest_with_pin, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, ResolvedInstall,
+        format_registry_list_lines, format_uninstall_messages, format_update_summary_line,
+        parse_pin_spec, select_manifest_with_pin, update_failure_reason_code,
+        validate_binary_preflight, Cli, CliRegistryKind, Commands, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1584,6 +1588,76 @@ sha256 = "def"
     }
 
     #[test]
+    fn cli_parses_registry_list_command() {
+        let cli =
+            Cli::try_parse_from(["crosspack", "registry", "list"]).expect("command must parse");
+
+        match cli.command {
+            Commands::Registry {
+                command: super::RegistryCommands::List,
+            } => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_registry_add_without_required_kind_flag() {
+        let err = Cli::try_parse_from([
+            "crosspack",
+            "registry",
+            "add",
+            "official",
+            "https://example.com/official.git",
+            "--priority",
+            "10",
+            "--fingerprint",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ])
+        .expect_err("missing --kind should fail");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--kind <KIND>"));
+    }
+
+    #[test]
+    fn cli_rejects_registry_add_when_priority_value_missing() {
+        let err = Cli::try_parse_from([
+            "crosspack",
+            "registry",
+            "add",
+            "official",
+            "https://example.com/official.git",
+            "--kind",
+            "git",
+            "--priority",
+            "--fingerprint",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ])
+        .expect_err("missing --priority value should fail");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--priority <PRIORITY>"));
+    }
+
+    #[test]
+    fn cli_rejects_registry_remove_without_name() {
+        let err = Cli::try_parse_from(["crosspack", "registry", "remove"])
+            .expect_err("missing remove name should fail");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("<NAME>"));
+    }
+
+    #[test]
+    fn cli_rejects_update_when_registry_value_missing() {
+        let err = Cli::try_parse_from(["crosspack", "update", "--registry"])
+            .expect_err("missing --registry value should fail");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("a value is required for '--registry <REGISTRY>'"));
+    }
+
+    #[test]
     fn cli_parses_update_with_multiple_registry_flags() {
         let cli = Cli::try_parse_from([
             "crosspack",
@@ -1669,6 +1743,12 @@ sha256 = "def"
     fn ensure_update_succeeded_returns_err_when_any_source_failed() {
         let err = ensure_update_succeeded(1).expect_err("must return err when failures exist");
         assert_eq!(err.to_string(), "source update failed");
+    }
+
+    #[test]
+    fn format_update_summary_line_matches_contract() {
+        let line = format_update_summary_line(2, 5, 1);
+        assert_eq!(line, "update summary: updated=2 up-to-date=5 failed=1");
     }
 
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
