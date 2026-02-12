@@ -433,7 +433,10 @@ fn derive_snapshot_id_from_full_git_sha(full_sha: &str) -> Result<String> {
         anyhow::bail!("git HEAD sha contains non-hex characters: '{normalized}'");
     }
 
-    Ok(normalized.chars().take(16).collect())
+    Ok(format!(
+        "git:{}",
+        normalized.chars().take(16).collect::<String>()
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1678,12 +1681,12 @@ mod tests {
     }
 
     #[test]
-    fn git_snapshot_id_derives_fixed_width_prefix_from_full_sha() {
+    fn git_snapshot_id_derives_source_prefixed_fixed_width_prefix_from_full_sha() {
         let full_sha = "0123456789abcdef0123456789abcdef01234567";
         let snapshot_id =
             derive_snapshot_id_from_full_git_sha(full_sha).expect("must derive snapshot id");
-        assert_eq!(snapshot_id, "0123456789abcdef");
-        assert_eq!(snapshot_id.len(), 16);
+        assert_eq!(snapshot_id, "git:0123456789abcdef");
+        assert_eq!(snapshot_id.len(), 20);
     }
 
     #[test]
