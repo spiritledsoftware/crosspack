@@ -178,6 +178,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
+ "crosspack-security",
+ "ed25519-dalek",
+ "hex",
 ]
 
 [[package]]

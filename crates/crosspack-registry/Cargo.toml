@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 crosspack-core = { path = "../crosspack-core" }
+crosspack-security = { path = "../crosspack-security" }
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
