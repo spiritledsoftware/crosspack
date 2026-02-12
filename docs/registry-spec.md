@@ -33,7 +33,8 @@ Examples:
 
 - Artifacts must include SHA-256 digests.
 - Registry metadata signing is strict and enabled by default.
-- The trusted public key is `registry.pub` at the registry root.
+- `registry.pub` at the registry root is the local trust anchor for that registry snapshot or mirror.
 - Each manifest must have a detached signature sidecar at `<version>.toml.sig`.
 - The sidecar format is hex-encoded detached signature bytes.
 - Operations that rely on registry metadata fail closed on signature or key errors.
+- If the entire registry root content is compromised (including `registry.pub`), this model does not provide authenticity guarantees for that compromised root.

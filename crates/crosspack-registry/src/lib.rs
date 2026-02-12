@@ -31,7 +31,10 @@ impl RegistryIndex {
             if entry.file_type()?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains(needle) {
-                    names.push(name);
+                    let manifests = self.package_versions(&name)?;
+                    if !manifests.is_empty() {
+                        names.push(name);
+                    }
                 }
             }
         }
@@ -125,6 +128,46 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::RegistryIndex;
+
+    #[test]
+    fn search_names_fails_when_registry_public_key_is_missing() {
+        let root = test_registry_root();
+        let package_dir = root.join("index").join("ripgrep");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(
+            package_dir.join("14.1.0.toml"),
+            manifest_toml("ripgrep", "14.1.0"),
+        )
+        .expect("must write manifest");
+
+        let index = RegistryIndex::open(&root);
+        let err = index
+            .search_names("rip")
+            .expect_err("must fail when registry.pub is missing");
+        assert!(err.to_string().contains("registry.pub"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_names_returns_matching_package_with_valid_signed_manifests() {
+        let root = test_registry_root();
+        let package_dir = root.join("index").join("ripgrep");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+
+        let signing_key = signing_key();
+        fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+            .expect("must write registry public key");
+        write_signed_manifest(&package_dir, &signing_key, "14.1.0");
+
+        let index = RegistryIndex::open(&root);
+        let names = index
+            .search_names("rip")
+            .expect("must load matching package names");
+        assert_eq!(names, vec!["ripgrep"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn package_versions_fails_when_registry_public_key_is_missing() {

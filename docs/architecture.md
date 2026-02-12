@@ -37,9 +37,10 @@ Default user prefixes:
 ## Current CLI Behavior
 
 - `search` and `info` query the local registry index.
-- Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root.
+- Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root, which acts as the local trust anchor for that registry snapshot or mirror.
 - Every version manifest requires a detached hex signature sidecar at `<version>.toml.sig`.
 - Metadata-dependent commands fail closed on missing or invalid registry key/signature material.
+- This trust model does not defend against compromise of the entire registry root content itself (for example, if both manifests and `registry.pub` are replaced together).
 - `install` resolves a transitive dependency graph with pin constraints, selects artifacts, downloads to cache, verifies SHA-256, extracts into `<prefix>/pkgs/<name>/<version>`, and writes install receipts.
 - `install` exposes declared binaries into `<prefix>/bin/` (symlinks on Unix, `.cmd` shims on Windows) and hard-fails on collisions.
 - `install` supports:
