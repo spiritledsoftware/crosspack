@@ -395,7 +395,6 @@ fn run_git_command(repo_root: &Path, args: &[&str], source_name: &str) -> Result
 fn git_head_snapshot_id(repo_root: &Path, source_name: &str) -> Result<String> {
     let output = Command::new("git")
         .arg("rev-parse")
-        .arg("--short=16")
         .arg("HEAD")
         .current_dir(repo_root)
         .output()
@@ -417,13 +416,24 @@ fn git_head_snapshot_id(repo_root: &Path, source_name: &str) -> Result<String> {
         .context("source-sync-failed: git rev-parse produced non-UTF-8 output")?
         .trim()
         .to_string();
-    if snapshot_id.is_empty() {
-        anyhow::bail!(
-            "source-sync-failed: source '{}' git rev-parse returned empty snapshot id",
+    derive_snapshot_id_from_full_git_sha(&snapshot_id).with_context(|| {
+        format!(
+            "source-sync-failed: source '{}' git rev-parse returned invalid HEAD sha",
             source_name
-        );
+        )
+    })
+}
+
+fn derive_snapshot_id_from_full_git_sha(full_sha: &str) -> Result<String> {
+    let normalized = full_sha.trim();
+    if normalized.len() < 16 {
+        anyhow::bail!("git HEAD sha too short for snapshot id: '{normalized}'");
     }
-    Ok(snapshot_id)
+    if !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        anyhow::bail!("git HEAD sha contains non-hex characters: '{normalized}'");
+    }
+
+    Ok(normalized.chars().take(16).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -975,8 +985,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        combine_replace_restore_errors, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
-        RegistrySourceStore, SourceUpdateStatus,
+        combine_replace_restore_errors, derive_snapshot_id_from_full_git_sha, RegistryIndex,
+        RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore, SourceUpdateStatus,
     };
 
     #[test]
@@ -1668,6 +1678,22 @@ mod tests {
     }
 
     #[test]
+    fn git_snapshot_id_derives_fixed_width_prefix_from_full_sha() {
+        let full_sha = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot_id =
+            derive_snapshot_id_from_full_git_sha(full_sha).expect("must derive snapshot id");
+        assert_eq!(snapshot_id, "0123456789abcdef");
+        assert_eq!(snapshot_id.len(), 16);
+    }
+
+    #[test]
+    fn git_snapshot_id_derivation_rejects_short_sha() {
+        let err = derive_snapshot_id_from_full_git_sha("0123456789abcde")
+            .expect_err("must reject sha values shorter than sixteen characters");
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
     fn rollback_replace_error_includes_restore_failure_context() {
         let replace_err = anyhow::anyhow!("replace failed");
         let restore_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
@@ -1964,7 +1990,6 @@ version = "{version}"
     fn git_head_short(repo_root: &Path) -> String {
         let output = Command::new("git")
             .arg("rev-parse")
-            .arg("--short=16")
             .arg("HEAD")
             .current_dir(repo_root)
             .output()
@@ -1974,10 +1999,12 @@ version = "{version}"
             "git rev-parse failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8(output.stdout)
+        let full_sha = String::from_utf8(output.stdout)
             .expect("git rev-parse output must be UTF-8")
             .trim()
-            .to_string()
+            .to_string();
+        derive_snapshot_id_from_full_git_sha(&full_sha)
+            .expect("git rev-parse output must be a valid full sha")
     }
 
     fn git_commit_all(repo_root: &Path, message: &str) {
