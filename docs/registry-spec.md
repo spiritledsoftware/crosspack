@@ -5,8 +5,8 @@ Crosspack starts with a Git-backed static index.
 ## Directory Shape
 
 ```text
+registry.pub
 index/
-  registry.pub
   <package-name>/
     <version>.toml
     <version>.toml.sig

@@ -29,7 +29,7 @@
      - set `install_reason=dependency` for transitive-only packages,
      - preserve existing `install_reason=root` when upgrading already-rooted packages.
 
-`upgrade` with no package argument runs a single global dependency solve across all installed roots.
+`upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 
 ## Receipt Fields
 
