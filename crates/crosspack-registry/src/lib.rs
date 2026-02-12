@@ -19,7 +19,7 @@ pub struct RegistrySourceRecord {
     pub kind: RegistrySourceKind,
     pub location: String,
     pub fingerprint: String,
-    pub priority: i32,
+    pub priority: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ impl RegistrySourceStore {
 
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed reading source state: {}", path.display()))?;
-        let mut state: RegistrySourceStateFile = toml::from_str(&content)
+        let mut state = parse_source_state_file(&content)
             .with_context(|| format!("failed parsing source state: {}", path.display()))?;
         sort_sources(&mut state.sources);
         Ok(state)
@@ -97,7 +97,9 @@ impl RegistrySourceStore {
         })?;
 
         let path = self.sources_file_path();
-        let content = toml::to_string(state)
+        let mut state = state.clone();
+        sort_sources(&mut state.sources);
+        let content = toml::to_string(&state)
             .with_context(|| format!("failed serializing source state: {}", path.display()))?;
         fs::write(&path, content)
             .with_context(|| format!("failed writing source state: {}", path.display()))
@@ -106,8 +108,35 @@ impl RegistrySourceStore {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RegistrySourceStateFile {
+    #[serde(default = "state_file_version")]
+    version: u32,
     #[serde(default)]
     sources: Vec<RegistrySourceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RegistrySourceStateFileCompat {
+    Versioned(RegistrySourceStateFile),
+    Legacy { sources: Vec<RegistrySourceRecord> },
+}
+
+fn parse_source_state_file(content: &str) -> Result<RegistrySourceStateFile> {
+    let state = toml::from_str::<RegistrySourceStateFileCompat>(content)?;
+    Ok(match state {
+        RegistrySourceStateFileCompat::Versioned(mut state) => {
+            state.version = state_file_version();
+            state
+        }
+        RegistrySourceStateFileCompat::Legacy { sources } => RegistrySourceStateFile {
+            version: state_file_version(),
+            sources,
+        },
+    })
+}
+
+fn state_file_version() -> u32 {
+    1
 }
 
 fn sort_sources(sources: &mut [RegistrySourceRecord]) {
@@ -119,14 +148,19 @@ fn sort_sources(sources: &mut [RegistrySourceRecord]) {
 }
 
 fn validate_source_name(name: &str) -> Result<()> {
-    if name.is_empty() {
+    if name.is_empty() || name.len() > 64 {
         anyhow::bail!("invalid source name: must not be empty");
     }
 
-    if !name
-        .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
-    {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("invalid source name: '{name}'");
+    };
+
+    let first_is_valid = first.is_ascii_lowercase() || first.is_ascii_digit();
+    let rest_is_valid =
+        chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_');
+    if !first_is_valid || !rest_is_valid {
         anyhow::bail!("invalid source name: '{name}'");
     }
 
@@ -295,6 +329,38 @@ mod tests {
     }
 
     #[test]
+    fn source_store_add_rejects_name_with_leading_separator() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        let err = store
+            .add_source(source_record("-bad", 10))
+            .expect_err("must reject invalid source name");
+        assert!(err.to_string().contains("invalid source name"));
+
+        let err = store
+            .add_source(source_record("_bad", 10))
+            .expect_err("must reject invalid source name");
+        assert!(err.to_string().contains("invalid source name"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_add_rejects_name_longer_than_sixty_four_characters() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        let too_long_name = "a".repeat(65);
+        let err = store
+            .add_source(source_record(&too_long_name, 10))
+            .expect_err("must reject invalid source name");
+        assert!(err.to_string().contains("invalid source name"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn source_store_add_rejects_invalid_fingerprint() {
         let root = test_registry_root();
         let store = RegistrySourceStore::new(&root);
@@ -340,6 +406,109 @@ mod tests {
             .remove_source("missing")
             .expect_err("must report missing source");
         assert!(err.to_string().contains("not found"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_writes_versioned_sorted_state_file() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        store
+            .add_source(source_record("zeta", 10))
+            .expect("must add source");
+        store
+            .add_source(source_record("alpha", 0))
+            .expect("must add source");
+        store
+            .add_source(source_record("beta", 10))
+            .expect("must add source");
+
+        let content = fs::read_to_string(root.join("sources.toml")).expect("must read state file");
+        let expected = concat!(
+            "version = 1\n",
+            "\n",
+            "[[sources]]\n",
+            "name = \"alpha\"\n",
+            "kind = \"git\"\n",
+            "location = \"https://example.com/alpha.git\"\n",
+            "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "priority = 0\n",
+            "\n",
+            "[[sources]]\n",
+            "name = \"beta\"\n",
+            "kind = \"git\"\n",
+            "location = \"https://example.com/beta.git\"\n",
+            "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "priority = 10\n",
+            "\n",
+            "[[sources]]\n",
+            "name = \"zeta\"\n",
+            "kind = \"git\"\n",
+            "location = \"https://example.com/zeta.git\"\n",
+            "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "priority = 10\n"
+        );
+        assert_eq!(content, expected);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_loads_unversioned_state_file_for_back_compat() {
+        let root = test_registry_root();
+        fs::create_dir_all(&root).expect("must create state root");
+        fs::write(
+            root.join("sources.toml"),
+            concat!(
+                "[[sources]]\n",
+                "name = \"zeta\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/zeta.git\"\n",
+                "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "priority = 10\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"alpha\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/alpha.git\"\n",
+                "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "priority = 0\n"
+            ),
+        )
+        .expect("must write legacy state file");
+
+        let store = RegistrySourceStore::new(&root);
+        let listed = store.list_sources().expect("must list sources");
+        let names: Vec<&str> = listed.iter().map(|record| record.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_rejects_negative_priority_in_legacy_state() {
+        let root = test_registry_root();
+        fs::create_dir_all(&root).expect("must create state root");
+        fs::write(
+            root.join("sources.toml"),
+            concat!(
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/official.git\"\n",
+                "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "priority = -1\n"
+            ),
+        )
+        .expect("must write legacy state file");
+
+        let store = RegistrySourceStore::new(&root);
+        let err = store
+            .list_sources()
+            .expect_err("must reject negative source priority");
+        assert!(err.to_string().contains("failed parsing source state"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -508,7 +677,7 @@ version = "{version}"
         hex::encode(signing_key.verifying_key().to_bytes())
     }
 
-    fn source_record(name: &str, priority: i32) -> RegistrySourceRecord {
+    fn source_record(name: &str, priority: u32) -> RegistrySourceRecord {
         RegistrySourceRecord {
             name: name.to_string(),
             kind: RegistrySourceKind::Git,
