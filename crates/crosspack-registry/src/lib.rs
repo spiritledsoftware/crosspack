@@ -183,7 +183,7 @@ impl RegistrySourceStore {
                 )
             })?;
             let actual_fingerprint = sha256_hex(&registry_pub_raw);
-            if actual_fingerprint != source.fingerprint_sha256 {
+            if !actual_fingerprint.eq_ignore_ascii_case(&source.fingerprint_sha256) {
                 anyhow::bail!(
                     "source-key-fingerprint-mismatch: source '{}' expected {}, got {}",
                     source.name,
@@ -195,7 +195,7 @@ impl RegistrySourceStore {
             verify_metadata_signature_policy(&staged_root, &source.name)?;
 
             let manifest_count = count_manifest_files(&staged_root.join("index"))?;
-            let snapshot_id = format!("fs:{actual_fingerprint}");
+            let snapshot_id = compute_filesystem_snapshot_id(&staged_root)?;
             let existing_snapshot_id = read_snapshot_id(
                 &self
                     .state_root
@@ -242,7 +242,15 @@ impl RegistrySourceStore {
             )
         }) {
             if had_existing {
-                let _ = fs::rename(&backup, &destination);
+                if let Err(restore_err) = fs::rename(&backup, &destination) {
+                    return Err(combine_replace_restore_errors(
+                        &source.name,
+                        &destination,
+                        &backup,
+                        err,
+                        restore_err,
+                    ));
+                }
             }
             return Err(err);
         }
@@ -252,7 +260,15 @@ impl RegistrySourceStore {
         {
             let _ = fs::remove_dir_all(&destination);
             if had_existing {
-                let _ = fs::rename(&backup, &destination);
+                if let Err(restore_err) = fs::rename(&backup, &destination) {
+                    return Err(combine_replace_restore_errors(
+                        &source.name,
+                        &destination,
+                        &backup,
+                        err,
+                        restore_err,
+                    ));
+                }
             }
             return Err(err);
         }
@@ -554,6 +570,85 @@ fn count_manifest_files(index_root: &Path) -> Result<u64> {
     Ok(count)
 }
 
+fn compute_filesystem_snapshot_id(staged_root: &Path) -> Result<String> {
+    let mut file_paths = collect_relative_file_paths(staged_root)?;
+    file_paths.sort();
+
+    let mut snapshot_input = Vec::new();
+    for relative_path in file_paths {
+        let normalized_path = normalize_path_for_snapshot(&relative_path);
+        let file_bytes = fs::read(staged_root.join(&relative_path)).with_context(|| {
+            format!(
+                "source-sync-failed: failed reading staged file for snapshot {}",
+                staged_root.join(&relative_path).display()
+            )
+        })?;
+        let file_digest = sha256_hex(&file_bytes);
+
+        snapshot_input.extend_from_slice(normalized_path.as_bytes());
+        snapshot_input.push(0);
+        snapshot_input.extend_from_slice(file_digest.as_bytes());
+        snapshot_input.push(0);
+    }
+
+    Ok(format!("fs:{}", sha256_hex(&snapshot_input)))
+}
+
+fn collect_relative_file_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    queue.push_back(root.to_path_buf());
+
+    while let Some(dir) = queue.pop_front() {
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed reading staged directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+
+            if file_type.is_dir() {
+                queue.push_back(path);
+            } else if file_type.is_file() {
+                let relative_path = path.strip_prefix(root).with_context(|| {
+                    format!(
+                        "failed deriving staged relative path {} from {}",
+                        path.display(),
+                        root.display()
+                    )
+                })?;
+                paths.push(relative_path.to_path_buf());
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
+fn normalize_path_for_snapshot(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn combine_replace_restore_errors(
+    source_name: &str,
+    destination: &Path,
+    backup: &Path,
+    replace_err: anyhow::Error,
+    restore_err: std::io::Error,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "source-sync-failed: source '{}' failed replacing cache {}: {:#}; failed restoring backup {}: {}",
+        source_name,
+        destination.display(),
+        replace_err,
+        backup.display(),
+        restore_err
+    )
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SourceSnapshotFile {
     version: u32,
@@ -732,14 +827,15 @@ impl RegistryIndex {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
-        SourceUpdateStatus,
+        combine_replace_restore_errors, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
+        RegistrySourceStore, SourceUpdateStatus,
     };
 
     #[test]
@@ -1185,6 +1281,33 @@ mod tests {
     }
 
     #[test]
+    fn update_filesystem_source_accepts_uppercase_configured_fingerprint() {
+        let root = test_registry_root();
+        let source_root = filesystem_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        store
+            .add_source(filesystem_source_record(
+                "local",
+                source_root
+                    .to_str()
+                    .expect("filesystem source path must be valid UTF-8"),
+                sha256_hex_bytes(&registry_pub).to_uppercase(),
+                0,
+            ))
+            .expect("must add source");
+
+        let results = store.update_sources(&[]).expect("must update source");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, SourceUpdateStatus::Updated);
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn update_filesystem_source_preserves_existing_cache_on_failure() {
         let root = test_registry_root();
         let source_root = filesystem_source_fixture();
@@ -1235,6 +1358,68 @@ mod tests {
 
         let _ = fs::remove_dir_all(&source_root);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_filesystem_source_reports_updated_when_manifest_changes_with_same_key() {
+        let root = test_registry_root();
+        let source_root = filesystem_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let fingerprint = sha256_hex_bytes(&registry_pub);
+        store
+            .add_source(filesystem_source_record(
+                "local",
+                source_root
+                    .to_str()
+                    .expect("filesystem source path must be valid UTF-8"),
+                fingerprint,
+                0,
+            ))
+            .expect("must add source");
+
+        let first = store
+            .update_sources(&[])
+            .expect("first update must succeed");
+        assert_eq!(first[0].status, SourceUpdateStatus::Updated);
+
+        rewrite_signed_manifest_with_extra_field(
+            &source_root
+                .join("index")
+                .join("ripgrep")
+                .join("14.1.0.toml"),
+            &signing_key(),
+            "description = \"updated\"\n",
+        );
+
+        let second = store
+            .update_sources(&[])
+            .expect("second update must succeed");
+        assert_eq!(second[0].status, SourceUpdateStatus::Updated);
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rollback_replace_error_includes_restore_failure_context() {
+        let replace_err = anyhow::anyhow!("replace failed");
+        let restore_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+
+        let err = combine_replace_restore_errors(
+            "local",
+            Path::new("/tmp/cache/local"),
+            Path::new("/tmp/cache/.local-backup"),
+            replace_err,
+            restore_err,
+        );
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("failed replacing cache"));
+        assert!(rendered.contains("failed restoring backup"));
+        assert!(rendered.contains("denied"));
     }
 
     #[test]
@@ -1411,6 +1596,23 @@ mod tests {
             hex::encode(signature.to_bytes()),
         )
         .expect("must write signature sidecar");
+    }
+
+    fn rewrite_signed_manifest_with_extra_field(
+        manifest_path: &Path,
+        signing_key: &SigningKey,
+        extra_field: &str,
+    ) {
+        let mut manifest = fs::read_to_string(manifest_path).expect("must read manifest");
+        manifest.push_str(extra_field);
+        fs::write(manifest_path, manifest.as_bytes()).expect("must rewrite manifest");
+
+        let signature = signing_key.sign(manifest.as_bytes());
+        fs::write(
+            manifest_path.with_extension("toml.sig"),
+            hex::encode(signature.to_bytes()),
+        )
+        .expect("must rewrite signature sidecar");
     }
 
     fn manifest_toml(name: &str, version: &str) -> String {
