@@ -10,6 +10,112 @@ pub struct RegistryIndex {
     root: PathBuf,
 }
 
+impl RegistryIndex {
+    pub fn open(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
+        let index_root = self.root.join("index");
+        if !index_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut names = Vec::new();
+        for entry in fs::read_dir(index_root).context("failed to read registry index")? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains(needle) {
+                    names.push(name);
+                }
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
+        let package_dir = self.root.join("index").join(package);
+        if !package_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let trusted_key_path = self.root.join("registry.pub");
+        let trusted_public_key_hex = fs::read_to_string(&trusted_key_path).with_context(|| {
+            format!(
+                "failed to read trusted registry key: {}",
+                trusted_key_path.display()
+            )
+        })?;
+        let trusted_public_key_hex = trusted_public_key_hex.trim();
+        let key_identifier: String = trusted_public_key_hex.chars().take(16).collect();
+
+        let mut manifests = Vec::new();
+        for entry in fs::read_dir(&package_dir)
+            .with_context(|| format!("failed to read package directory: {package}"))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("toml") {
+                continue;
+            }
+
+            let manifest_bytes = fs::read(&path)
+                .with_context(|| format!("failed reading manifest: {}", path.display()))?;
+
+            let signature_path = path.with_extension("toml.sig");
+            let signature_hex = fs::read_to_string(&signature_path).with_context(|| {
+                format!(
+                    "failed reading manifest signature for key {}: {}",
+                    key_identifier,
+                    signature_path.display()
+                )
+            })?;
+            let signature_hex = signature_hex.trim();
+
+            let signature_is_valid = verify_ed25519_signature_hex(
+                &manifest_bytes,
+                trusted_public_key_hex,
+                signature_hex,
+            )
+            .with_context(|| {
+                format!(
+                    "failed verifying manifest signature for key {}: {}",
+                    key_identifier,
+                    signature_path.display()
+                )
+            })?;
+            if !signature_is_valid {
+                anyhow::bail!(
+                    "invalid manifest signature for key {}: manifest {}, signature {}",
+                    key_identifier,
+                    path.display(),
+                    signature_path.display()
+                );
+            }
+
+            let content = String::from_utf8(manifest_bytes)
+                .with_context(|| format!("manifest is not valid UTF-8: {}", path.display()))?;
+            let manifest = PackageManifest::from_toml_str(&content)
+                .with_context(|| format!("failed parsing manifest: {}", path.display()))?;
+            manifests.push(manifest);
+        }
+
+        manifests.sort_by(|a, b| b.version.cmp(&a.version));
+        Ok(manifests)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -156,111 +262,5 @@ version = "{version}"
             nanos
         ));
         path
-    }
-}
-
-impl RegistryIndex {
-    pub fn open(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
-        let index_root = self.root.join("index");
-        if !index_root.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut names = Vec::new();
-        for entry in fs::read_dir(index_root).context("failed to read registry index")? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains(needle) {
-                    names.push(name);
-                }
-            }
-        }
-
-        names.sort();
-        Ok(names)
-    }
-
-    pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
-        let package_dir = self.root.join("index").join(package);
-        if !package_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let trusted_key_path = self.root.join("registry.pub");
-        let trusted_public_key_hex = fs::read_to_string(&trusted_key_path).with_context(|| {
-            format!(
-                "failed to read trusted registry key: {}",
-                trusted_key_path.display()
-            )
-        })?;
-        let trusted_public_key_hex = trusted_public_key_hex.trim();
-        let key_identifier: String = trusted_public_key_hex.chars().take(16).collect();
-
-        let mut manifests = Vec::new();
-        for entry in fs::read_dir(&package_dir)
-            .with_context(|| format!("failed to read package directory: {package}"))?
-        {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-
-            let path = entry.path();
-            if path.extension().and_then(|v| v.to_str()) != Some("toml") {
-                continue;
-            }
-
-            let manifest_bytes = fs::read(&path)
-                .with_context(|| format!("failed reading manifest: {}", path.display()))?;
-
-            let signature_path = path.with_extension("toml.sig");
-            let signature_hex = fs::read_to_string(&signature_path).with_context(|| {
-                format!(
-                    "failed reading manifest signature for key {}: {}",
-                    key_identifier,
-                    signature_path.display()
-                )
-            })?;
-            let signature_hex = signature_hex.trim();
-
-            let signature_is_valid = verify_ed25519_signature_hex(
-                &manifest_bytes,
-                trusted_public_key_hex,
-                signature_hex,
-            )
-            .with_context(|| {
-                format!(
-                    "failed verifying manifest signature for key {}: {}",
-                    key_identifier,
-                    signature_path.display()
-                )
-            })?;
-            if !signature_is_valid {
-                anyhow::bail!(
-                    "invalid manifest signature for key {}: manifest {}, signature {}",
-                    key_identifier,
-                    path.display(),
-                    signature_path.display()
-                );
-            }
-
-            let content = String::from_utf8(manifest_bytes)
-                .with_context(|| format!("manifest is not valid UTF-8: {}", path.display()))?;
-            let manifest = PackageManifest::from_toml_str(&content)
-                .with_context(|| format!("failed parsing manifest: {}", path.display()))?;
-            manifests.push(manifest);
-        }
-
-        manifests.sort_by(|a, b| b.version.cmp(&a.version));
-        Ok(manifests)
     }
 }
