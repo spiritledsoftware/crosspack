@@ -868,6 +868,17 @@ pub struct RegistryIndex {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfiguredRegistryIndex {
+    sources: Vec<ConfiguredSnapshotSource>,
+}
+
+#[derive(Debug, Clone)]
+struct ConfiguredSnapshotSource {
+    name: String,
+    index: RegistryIndex,
+}
+
 impl RegistryIndex {
     pub fn open(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -977,6 +988,116 @@ impl RegistryIndex {
     }
 }
 
+impl ConfiguredRegistryIndex {
+    pub fn open(state_root: impl Into<PathBuf>) -> Result<Self> {
+        let state_root = state_root.into();
+        let sources_path = state_root.join("sources.toml");
+        let has_sources_file = sources_path.exists();
+        let state = if has_sources_file {
+            let content = fs::read_to_string(&sources_path).with_context(|| {
+                format!(
+                    "failed reading configured registry sources: {}",
+                    sources_path.display()
+                )
+            })?;
+            parse_source_state_file(&content).with_context(|| {
+                format!(
+                    "failed parsing configured registry sources: {}",
+                    sources_path.display()
+                )
+            })?
+        } else {
+            RegistrySourceStateFile::default()
+        };
+
+        let mut enabled_sources: Vec<RegistrySourceRecord> = state
+            .sources
+            .into_iter()
+            .filter(|source| source.enabled)
+            .collect();
+        let enabled_count = enabled_sources.len();
+        sort_sources(&mut enabled_sources);
+
+        let mut configured = Vec::new();
+        for source in enabled_sources {
+            let cache_root = state_root.join("cache").join(&source.name);
+            if !source_has_ready_snapshot(&cache_root)? {
+                continue;
+            }
+            configured.push(ConfiguredSnapshotSource {
+                name: source.name,
+                index: RegistryIndex::open(cache_root),
+            });
+        }
+
+        if !configured.is_empty() {
+            return Ok(Self {
+                sources: configured,
+            });
+        }
+
+        if !has_sources_file || enabled_count == 0 {
+            return Ok(Self {
+                sources: Vec::new(),
+            });
+        }
+
+        anyhow::bail!("no ready snapshot exists for enabled sources")
+    }
+
+    pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
+        let mut deduped = HashSet::new();
+        for source in &self.sources {
+            for name in source.index.search_names(needle)? {
+                deduped.insert(name);
+            }
+        }
+
+        let mut names: Vec<String> = deduped.into_iter().collect();
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
+        for source in &self.sources {
+            let manifests = source.index.package_versions(package).with_context(|| {
+                format!(
+                    "failed loading package '{package}' from configured source '{}'",
+                    source.name
+                )
+            })?;
+            if !manifests.is_empty() {
+                return Ok(manifests);
+            }
+        }
+        Ok(Vec::new())
+    }
+}
+
+fn source_has_ready_snapshot(cache_root: &Path) -> Result<bool> {
+    let snapshot_path = cache_root.join("snapshot.json");
+    let content = match fs::read_to_string(&snapshot_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed reading source snapshot metadata: {}",
+                    snapshot_path.display()
+                )
+            });
+        }
+    };
+
+    let snapshot: SourceSnapshotFile = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "failed parsing source snapshot metadata: {}",
+            snapshot_path.display()
+        )
+    })?;
+    Ok(snapshot.status == "ready")
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -988,8 +1109,9 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        combine_replace_restore_errors, derive_snapshot_id_from_full_git_sha, RegistryIndex,
-        RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore, SourceUpdateStatus,
+        combine_replace_restore_errors, derive_snapshot_id_from_full_git_sha,
+        ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
+        RegistrySourceStore, SourceUpdateStatus,
     };
 
     #[test]
@@ -1764,6 +1886,110 @@ mod tests {
     }
 
     #[test]
+    fn configured_index_package_versions_prefers_higher_priority_source() {
+        let state_root = test_registry_root();
+        let store = RegistrySourceStore::new(&state_root);
+
+        store
+            .add_source(source_record("fallback", 10))
+            .expect("must add fallback source");
+        store
+            .add_source(source_record("preferred", 0))
+            .expect("must add preferred source");
+
+        let fallback_key = SigningKey::from_bytes(&[11u8; 32]);
+        let preferred_key = SigningKey::from_bytes(&[13u8; 32]);
+        write_ready_snapshot_cache(&state_root, "fallback", &fallback_key, &["14.0.0"]);
+        write_ready_snapshot_cache(&state_root, "preferred", &preferred_key, &["14.1.0"]);
+
+        let index = ConfiguredRegistryIndex::open(&state_root).expect("must open configured index");
+        let manifests = index
+            .package_versions("ripgrep")
+            .expect("must read package from highest precedence source");
+
+        let versions: Vec<String> = manifests
+            .iter()
+            .map(|manifest| manifest.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["14.1.0"]);
+
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn configured_index_package_versions_uses_name_tiebreaker() {
+        let state_root = test_registry_root();
+        let store = RegistrySourceStore::new(&state_root);
+
+        store
+            .add_source(source_record("beta", 1))
+            .expect("must add beta source");
+        store
+            .add_source(source_record("alpha", 1))
+            .expect("must add alpha source");
+
+        let beta_key = SigningKey::from_bytes(&[17u8; 32]);
+        let alpha_key = SigningKey::from_bytes(&[19u8; 32]);
+        write_ready_snapshot_cache(&state_root, "beta", &beta_key, &["14.0.0"]);
+        write_ready_snapshot_cache(&state_root, "alpha", &alpha_key, &["14.2.0"]);
+
+        let index = ConfiguredRegistryIndex::open(&state_root).expect("must open configured index");
+        let manifests = index
+            .package_versions("ripgrep")
+            .expect("must apply source-name tie-breaker");
+
+        let versions: Vec<String> = manifests
+            .iter()
+            .map(|manifest| manifest.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["14.2.0"]);
+
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn configured_index_search_names_deduplicates_across_sources() {
+        let state_root = test_registry_root();
+        let store = RegistrySourceStore::new(&state_root);
+
+        store
+            .add_source(source_record("one", 0))
+            .expect("must add first source");
+        store
+            .add_source(source_record("two", 1))
+            .expect("must add second source");
+
+        let first_key = SigningKey::from_bytes(&[23u8; 32]);
+        let second_key = SigningKey::from_bytes(&[29u8; 32]);
+        write_ready_snapshot_cache(&state_root, "one", &first_key, &["14.1.0"]);
+        write_ready_snapshot_cache(&state_root, "two", &second_key, &["14.0.0"]);
+
+        let index = ConfiguredRegistryIndex::open(&state_root).expect("must open configured index");
+        let names = index
+            .search_names("rip")
+            .expect("must deduplicate package names");
+        assert_eq!(names, vec!["ripgrep"]);
+
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn configured_index_fails_when_no_ready_snapshot_exists() {
+        let state_root = test_registry_root();
+        let store = RegistrySourceStore::new(&state_root);
+
+        store
+            .add_source(source_record("official", 0))
+            .expect("must add source");
+
+        let err = ConfiguredRegistryIndex::open(&state_root)
+            .expect_err("must fail when no enabled source has a ready snapshot");
+        assert!(err.to_string().contains("no ready snapshot"));
+
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
     fn search_names_returns_matching_package_with_valid_signed_manifests() {
         let root = test_registry_root();
         let package_dir = root.join("index").join("ripgrep");
@@ -2043,6 +2269,37 @@ version = "{version}"
 
     fn sha256_hex_bytes(bytes: &[u8]) -> String {
         crosspack_security::sha256_hex(bytes)
+    }
+
+    fn write_ready_snapshot_cache(
+        state_root: &Path,
+        source_name: &str,
+        signing_key: &SigningKey,
+        versions: &[&str],
+    ) {
+        let cache_root = state_root.join("cache").join(source_name);
+        let package_dir = cache_root.join("index").join("ripgrep");
+        fs::create_dir_all(&package_dir).expect("must create package directory in cache");
+        fs::write(cache_root.join("registry.pub"), public_key_hex(signing_key))
+            .expect("must write registry key for cache source");
+
+        for version in versions {
+            write_signed_manifest(&package_dir, signing_key, version);
+        }
+
+        let snapshot = serde_json::json!({
+            "version": 1,
+            "source": source_name,
+            "snapshot_id": format!("fs:{source_name}"),
+            "updated_at_unix": 1,
+            "manifest_count": versions.len(),
+            "status": "ready"
+        });
+        fs::write(
+            cache_root.join("snapshot.json"),
+            serde_json::to_string_pretty(&snapshot).expect("must serialize snapshot"),
+        )
+        .expect("must write snapshot metadata");
     }
 
     fn test_registry_root() -> PathBuf {
