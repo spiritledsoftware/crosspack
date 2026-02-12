@@ -91,6 +91,19 @@ impl RegistrySourceStore {
         self.save_state(&state)
     }
 
+    pub fn remove_source_with_cache_purge(&self, name: &str, purge_cache: bool) -> Result<()> {
+        self.remove_source(name)?;
+        if purge_cache {
+            let cache_path = self.state_root.join("cache").join(name);
+            if cache_path.exists() {
+                fs::remove_dir_all(&cache_path).with_context(|| {
+                    format!("failed purging source cache: {}", cache_path.display())
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn update_sources(&self, target_names: &[String]) -> Result<Vec<SourceUpdateResult>> {
         let state = self.load_state()?;
         let selected = select_update_sources(&state.sources, target_names)?;
@@ -1226,6 +1239,67 @@ mod tests {
             .remove_source("missing")
             .expect_err("must report missing source");
         assert!(err.to_string().contains("not found"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_remove_with_cache_purge_removes_source_cache_directory() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+        store
+            .add_source(source_record("official", 1))
+            .expect("must add source");
+
+        let cache_path = root.join("cache").join("official");
+        fs::create_dir_all(&cache_path).expect("must create cache path");
+        fs::write(cache_path.join("snapshot.json"), "{}").expect("must write cache fixture file");
+
+        store
+            .remove_source_with_cache_purge("official", true)
+            .expect("must remove source and cache");
+
+        assert!(!cache_path.exists(), "cache path must be removed");
+        assert!(
+            store
+                .list_sources()
+                .expect("must list sources")
+                .into_iter()
+                .all(|source| source.name != "official"),
+            "source must be removed from source state"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_remove_without_cache_purge_keeps_source_cache_directory() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+        store
+            .add_source(source_record("official", 1))
+            .expect("must add source");
+
+        let cache_path = root.join("cache").join("official");
+        fs::create_dir_all(&cache_path).expect("must create cache path");
+        fs::write(cache_path.join("snapshot.json"), "{}").expect("must write cache fixture file");
+
+        store
+            .remove_source_with_cache_purge("official", false)
+            .expect("must remove source and keep cache");
+
+        assert!(
+            cache_path.exists(),
+            "cache path must remain when purge disabled"
+        );
+        assert!(
+            store
+                .list_sources()
+                .expect("must list sources")
+                .into_iter()
+                .all(|source| source.name != "official"),
+            "source must be removed from source state"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

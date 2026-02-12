@@ -14,7 +14,7 @@ use crosspack_installer::{
 };
 use crosspack_registry::{
     RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
-    SourceUpdateStatus,
+    SourceUpdateResult, SourceUpdateStatus,
 };
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
@@ -367,15 +367,7 @@ fn main() -> Result<()> {
                     }
                 }
                 RegistryCommands::Remove { name, purge_cache } => {
-                    store.remove_source(&name)?;
-                    if purge_cache {
-                        let cache_path = source_state_root.join("cache").join(&name);
-                        if cache_path.exists() {
-                            std::fs::remove_dir_all(&cache_path).with_context(|| {
-                                format!("failed purging source cache: {}", cache_path.display())
-                            })?;
-                        }
-                    }
+                    store.remove_source_with_cache_purge(&name, purge_cache)?;
                 }
             }
         }
@@ -386,33 +378,15 @@ fn main() -> Result<()> {
             let store = RegistrySourceStore::new(&source_state_root);
             let results = store.update_sources(&registry)?;
 
-            let mut updated = 0_u32;
-            let mut up_to_date = 0_u32;
-            let mut failed = 0_u32;
-            for result in results {
-                match result.status {
-                    SourceUpdateStatus::Updated => {
-                        updated += 1;
-                        println!("{}: updated", result.name);
-                    }
-                    SourceUpdateStatus::UpToDate => {
-                        up_to_date += 1;
-                        println!("{}: up-to-date", result.name);
-                    }
-                    SourceUpdateStatus::Failed => {
-                        failed += 1;
-                        if let Some(error) = result.error {
-                            println!("{}: failed ({error})", result.name);
-                        } else {
-                            println!("{}: failed", result.name);
-                        }
-                    }
-                }
+            let report = build_update_report(&results);
+            for line in report.lines {
+                println!("{line}");
             }
             println!(
                 "update summary: updated={} up-to-date={} failed={}",
-                updated, up_to_date, failed
+                report.updated, report.up_to_date, report.failed
             );
+            ensure_update_succeeded(report.failed)?;
         }
         Commands::Doctor => {
             let prefix = default_user_prefix()?;
@@ -437,6 +411,71 @@ fn main() -> Result<()> {
 
 fn registry_state_root(layout: &PrefixLayout) -> PathBuf {
     layout.state_dir().join("registry")
+}
+
+struct UpdateReport {
+    lines: Vec<String>,
+    updated: u32,
+    up_to_date: u32,
+    failed: u32,
+}
+
+fn build_update_report(results: &[SourceUpdateResult]) -> UpdateReport {
+    let mut updated = 0_u32;
+    let mut up_to_date = 0_u32;
+    let mut failed = 0_u32;
+    let mut lines = Vec::with_capacity(results.len());
+
+    for result in results {
+        match result.status {
+            SourceUpdateStatus::Updated => {
+                updated += 1;
+                lines.push(format!("{}: updated", result.name));
+            }
+            SourceUpdateStatus::UpToDate => {
+                up_to_date += 1;
+                lines.push(format!("{}: up-to-date", result.name));
+            }
+            SourceUpdateStatus::Failed => {
+                failed += 1;
+                let reason = update_failure_reason_code(result.error.as_deref());
+                lines.push(format!("{}: failed (reason={reason})", result.name));
+            }
+        }
+    }
+
+    UpdateReport {
+        lines,
+        updated,
+        up_to_date,
+        failed,
+    }
+}
+
+fn ensure_update_succeeded(failed: u32) -> Result<()> {
+    if failed > 0 {
+        return Err(anyhow!("source update failed"));
+    }
+    Ok(())
+}
+
+fn update_failure_reason_code(error: Option<&str>) -> String {
+    let Some(error) = error else {
+        return "unknown".to_string();
+    };
+
+    for segment in error.split(':') {
+        let candidate = segment.trim();
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch == '-' || ch.is_ascii_digit())
+        {
+            return candidate.to_string();
+        }
+    }
+
+    "unknown".to_string()
 }
 
 fn format_registry_list_lines(mut sources: Vec<RegistrySourceRecord>) -> Vec<String> {
@@ -1069,17 +1108,20 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_upgrade_plans, build_upgrade_roots, determine_install_reason,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, format_registry_list_lines,
-        format_uninstall_messages, parse_pin_spec, select_manifest_with_pin,
-        validate_binary_preflight, Cli, CliRegistryKind, Commands, ResolvedInstall,
+        build_update_report, build_upgrade_plans, build_upgrade_roots, determine_install_reason,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_update_succeeded,
+        format_registry_list_lines, format_uninstall_messages, parse_pin_spec,
+        select_manifest_with_pin, update_failure_reason_code, validate_binary_preflight, Cli,
+        CliRegistryKind, Commands, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
         bin_path, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
     };
-    use crosspack_registry::{RegistrySourceKind, RegistrySourceRecord};
+    use crosspack_registry::{
+        RegistrySourceKind, RegistrySourceRecord, SourceUpdateResult, SourceUpdateStatus,
+    };
     use semver::VersionReq;
     use std::fs;
 
@@ -1587,6 +1629,46 @@ sha256 = "def"
         let lines = format_registry_list_lines(sources);
         assert_eq!(lines[0], "alpha\tfilesystem\t1\t/tmp/alpha");
         assert_eq!(lines[1], "zeta\tgit\t10\thttps://example.test/zeta.git");
+    }
+
+    #[test]
+    fn update_failure_reason_code_prefers_deterministic_reason_prefix() {
+        let reason = update_failure_reason_code(Some(
+            "source-sync-failed: source 'official' git fetch failed: fatal: bad object",
+        ));
+        assert_eq!(reason, "source-sync-failed");
+    }
+
+    #[test]
+    fn update_failure_reason_code_falls_back_to_unknown_for_unstructured_error() {
+        let reason = update_failure_reason_code(Some("failed to sync source with weird error"));
+        assert_eq!(reason, "unknown");
+    }
+
+    #[test]
+    fn build_update_report_formats_failed_result_with_reason_code_only() {
+        let results = vec![SourceUpdateResult {
+            name: "official".to_string(),
+            status: SourceUpdateStatus::Failed,
+            snapshot_id: String::new(),
+            error: Some(
+                "source-metadata-invalid: source 'official' package 'ripgrep' failed signature validation: nested detail"
+                    .to_string(),
+            ),
+        }];
+
+        let report = build_update_report(&results);
+        assert_eq!(
+            report.lines,
+            vec!["official: failed (reason=source-metadata-invalid)"]
+        );
+        assert_eq!(report.failed, 1);
+    }
+
+    #[test]
+    fn ensure_update_succeeded_returns_err_when_any_source_failed() {
+        let err = ensure_update_succeeded(1).expect_err("must return err when failures exist");
+        assert_eq!(err.to_string(), "source update failed");
     }
 
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
