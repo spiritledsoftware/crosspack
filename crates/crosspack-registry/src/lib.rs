@@ -18,7 +18,10 @@ pub struct RegistrySourceRecord {
     pub name: String,
     pub kind: RegistrySourceKind,
     pub location: String,
-    pub fingerprint: String,
+    #[serde(alias = "fingerprint")]
+    pub fingerprint_sha256: String,
+    #[serde(default = "source_enabled_default")]
+    pub enabled: bool,
     pub priority: u32,
 }
 
@@ -36,7 +39,7 @@ impl RegistrySourceStore {
 
     pub fn add_source(&self, source: RegistrySourceRecord) -> Result<()> {
         validate_source_name(&source.name)?;
-        validate_source_fingerprint(&source.fingerprint)?;
+        validate_source_fingerprint(&source.fingerprint_sha256)?;
 
         let mut state = self.load_state()?;
         if state
@@ -106,7 +109,7 @@ impl RegistrySourceStore {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RegistrySourceStateFile {
     #[serde(default = "state_file_version")]
     version: u32,
@@ -119,6 +122,15 @@ struct RegistrySourceStateFile {
 enum RegistrySourceStateFileCompat {
     Versioned(RegistrySourceStateFile),
     Legacy { sources: Vec<RegistrySourceRecord> },
+}
+
+impl Default for RegistrySourceStateFile {
+    fn default() -> Self {
+        Self {
+            version: state_file_version(),
+            sources: Vec::new(),
+        }
+    }
 }
 
 fn parse_source_state_file(content: &str) -> Result<RegistrySourceStateFile> {
@@ -137,6 +149,10 @@ fn parse_source_state_file(content: &str) -> Result<RegistrySourceStateFile> {
 
 fn state_file_version() -> u32 {
     1
+}
+
+fn source_enabled_default() -> bool {
+    true
 }
 
 fn sort_sources(sources: &mut [RegistrySourceRecord]) {
@@ -366,7 +382,7 @@ mod tests {
         let store = RegistrySourceStore::new(&root);
 
         let mut record = source_record("official", 10);
-        record.fingerprint = "xyz".to_string();
+        record.fingerprint_sha256 = "xyz".to_string();
         let err = store
             .add_source(record)
             .expect_err("must reject invalid fingerprint");
@@ -433,21 +449,24 @@ mod tests {
             "name = \"alpha\"\n",
             "kind = \"git\"\n",
             "location = \"https://example.com/alpha.git\"\n",
-            "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "enabled = true\n",
             "priority = 0\n",
             "\n",
             "[[sources]]\n",
             "name = \"beta\"\n",
             "kind = \"git\"\n",
             "location = \"https://example.com/beta.git\"\n",
-            "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "enabled = true\n",
             "priority = 10\n",
             "\n",
             "[[sources]]\n",
             "name = \"zeta\"\n",
             "kind = \"git\"\n",
             "location = \"https://example.com/zeta.git\"\n",
-            "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+            "enabled = true\n",
             "priority = 10\n"
         );
         assert_eq!(content, expected);
@@ -466,14 +485,14 @@ mod tests {
                 "name = \"zeta\"\n",
                 "kind = \"git\"\n",
                 "location = \"https://example.com/zeta.git\"\n",
-                "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
                 "priority = 10\n",
                 "\n",
                 "[[sources]]\n",
                 "name = \"alpha\"\n",
                 "kind = \"git\"\n",
                 "location = \"https://example.com/alpha.git\"\n",
-                "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
                 "priority = 0\n"
             ),
         )
@@ -498,7 +517,7 @@ mod tests {
                 "name = \"official\"\n",
                 "kind = \"git\"\n",
                 "location = \"https://example.com/official.git\"\n",
-                "fingerprint = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
                 "priority = -1\n"
             ),
         )
@@ -509,6 +528,59 @@ mod tests {
             .list_sources()
             .expect_err("must reject negative source priority");
         assert!(err.to_string().contains("failed parsing source state"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_defaults_enabled_to_true_when_missing_in_loaded_state() {
+        let root = test_registry_root();
+        fs::create_dir_all(&root).expect("must create state root");
+        fs::write(
+            root.join("sources.toml"),
+            concat!(
+                "version = 1\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/official.git\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "priority = 1\n"
+            ),
+        )
+        .expect("must write state file without enabled flag");
+
+        let store = RegistrySourceStore::new(&root);
+        store
+            .add_source(source_record("mirror", 2))
+            .expect("must add source");
+
+        let content = fs::read_to_string(root.join("sources.toml")).expect("must read state file");
+        assert!(
+            content.contains(
+                "name = \"official\"\nkind = \"git\"\nlocation = \"https://example.com/official.git\"\nfingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nenabled = true\npriority = 1\n"
+            ),
+            "expected missing enabled flag to default to true when persisted\n{content}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_first_write_from_empty_uses_version_one() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        store
+            .add_source(source_record("official", 0))
+            .expect("must add first source");
+
+        let content = fs::read_to_string(root.join("sources.toml")).expect("must read state file");
+        assert!(
+            content.starts_with("version = 1\n"),
+            "expected first write to persist version 1\n{content}"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -682,8 +754,9 @@ version = "{version}"
             name: name.to_string(),
             kind: RegistrySourceKind::Git,
             location: format!("https://example.com/{name}.git"),
-            fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            fingerprint_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
+            enabled: true,
             priority,
         }
     }
