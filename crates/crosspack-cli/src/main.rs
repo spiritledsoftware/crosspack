@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,11 +8,12 @@ use clap::{Parser, Subcommand};
 use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
     bin_path, current_unix_timestamp, default_user_prefix, expose_binary, install_from_artifact,
-    read_install_receipts, read_pin, remove_exposed_binary, remove_file_if_exists,
+    read_all_pins, read_install_receipts, remove_exposed_binary, remove_file_if_exists,
     uninstall_package, write_install_receipt, write_pin, InstallReceipt, PrefixLayout,
     UninstallStatus,
 };
 use crosspack_registry::RegistryIndex;
+use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
 use semver::{Version, VersionReq};
 
@@ -92,10 +93,13 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
-            let resolved =
-                resolve_install(&layout, &index, &name, &requirement, target.as_deref())?;
-            let outcome = install_resolved(&layout, &resolved, force_redownload)?;
-            print_install_outcome(&outcome);
+            let roots = vec![RootInstallRequest { name, requirement }];
+            let resolved = resolve_install_graph(&layout, &index, &roots, target.as_deref())?;
+            for package in &resolved {
+                let dependencies = build_dependency_receipts(package, &resolved);
+                let outcome = install_resolved(&layout, package, &dependencies, force_redownload)?;
+                print_install_outcome(&outcome);
+            }
         }
         Commands::Upgrade { spec } => {
             let root = cli.registry_root.unwrap_or_else(|| PathBuf::from("."));
@@ -120,12 +124,109 @@ fn main() -> Result<()> {
                         return Ok(());
                     };
 
-                    upgrade_single(&layout, &index, installed_receipt, &requirement, false)?;
+                    let roots = vec![RootInstallRequest {
+                        name: installed_receipt.name.clone(),
+                        requirement,
+                    }];
+                    let resolved = resolve_install_graph(
+                        &layout,
+                        &index,
+                        &roots,
+                        installed_receipt.target.as_deref(),
+                    )?;
+                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+                    for package in &resolved {
+                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
+                        {
+                            let old_version = Version::parse(&old.version).with_context(|| {
+                                format!(
+                                    "installed receipt for '{}' has invalid version: {}",
+                                    old.name, old.version
+                                )
+                            })?;
+                            if package.manifest.version <= old_version {
+                                println!(
+                                    "{} is up-to-date ({})",
+                                    package.manifest.name, old.version
+                                );
+                                continue;
+                            }
+                        }
+
+                        let dependencies = build_dependency_receipts(package, &resolved);
+                        let outcome = install_resolved(&layout, package, &dependencies, false)?;
+                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
+                        {
+                            println!(
+                                "upgraded {} from {} to {}",
+                                package.manifest.name, old.version, package.manifest.version
+                            );
+                        }
+                        println!("receipt: {}", outcome.receipt_path.display());
+                    }
                 }
                 None => {
-                    let requirement = VersionReq::STAR;
-                    for receipt in &receipts {
-                        upgrade_single(&layout, &index, receipt, &requirement, false)?;
+                    let roots = receipts
+                        .iter()
+                        .map(|receipt| RootInstallRequest {
+                            name: receipt.name.clone(),
+                            requirement: VersionReq::STAR,
+                        })
+                        .collect::<Vec<_>>();
+
+                    let mut targets = receipts
+                        .iter()
+                        .filter_map(|receipt| receipt.target.clone())
+                        .collect::<HashSet<_>>();
+                    let requested_target = if targets.len() > 1 {
+                        return Err(anyhow!(
+                            "upgrade across multiple installed targets is not yet supported"
+                        ));
+                    } else {
+                        targets.drain().next()
+                    };
+
+                    let resolved = resolve_install_graph(
+                        &layout,
+                        &index,
+                        &roots,
+                        requested_target.as_deref(),
+                    )?;
+                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+
+                    for package in &resolved {
+                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
+                        {
+                            let old_version = Version::parse(&old.version).with_context(|| {
+                                format!(
+                                    "installed receipt for '{}' has invalid version: {}",
+                                    old.name, old.version
+                                )
+                            })?;
+                            if package.manifest.version <= old_version {
+                                println!(
+                                    "{} is up-to-date ({})",
+                                    package.manifest.name, old.version
+                                );
+                                continue;
+                            }
+                        }
+
+                        let dependencies = build_dependency_receipts(package, &resolved);
+                        let outcome = install_resolved(&layout, package, &dependencies, false)?;
+                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
+                        {
+                            println!(
+                                "upgraded {} from {} to {}",
+                                package.manifest.name, old.version, package.manifest.version
+                            );
+                        } else {
+                            println!(
+                                "installed dependency {} {}",
+                                package.manifest.name, package.manifest.version
+                            );
+                        }
+                        println!("receipt: {}", outcome.receipt_path.display());
                     }
                 }
             }
@@ -225,6 +326,7 @@ fn parse_pin_spec(spec: &str) -> Result<(String, VersionReq)> {
     Ok((name.to_string(), requirement))
 }
 
+#[cfg(test)]
 fn select_manifest_with_pin<'a>(
     versions: &'a [PackageManifest],
     request_requirement: &VersionReq,
@@ -263,62 +365,80 @@ struct InstallOutcome {
     exposed_bins: Vec<String>,
 }
 
-fn resolve_install(
+#[derive(Debug, Clone)]
+struct RootInstallRequest {
+    name: String,
+    requirement: VersionReq,
+}
+
+fn resolve_install_graph(
     layout: &PrefixLayout,
     index: &RegistryIndex,
-    name: &str,
-    requirement: &VersionReq,
+    roots: &[RootInstallRequest],
     requested_target: Option<&str>,
-) -> Result<ResolvedInstall> {
-    let versions = index.package_versions(name)?;
-    let pin_requirement = load_pin_requirement(layout, name)?;
+) -> Result<Vec<ResolvedInstall>> {
+    let mut pins = BTreeMap::new();
+    for (name, raw_req) in read_all_pins(layout)? {
+        let parsed = VersionReq::parse(&raw_req)
+            .with_context(|| format!("invalid pin requirement for '{name}' in state: {raw_req}"))?;
+        pins.insert(name, parsed);
+    }
 
-    let manifest = select_manifest_with_pin(&versions, requirement, pin_requirement.as_ref())
-        .ok_or_else(|| {
-            if let Some(pin) = pin_requirement {
-                anyhow!(
-                    "no matching version found for {name} with request {} and pin {}",
-                    requirement,
-                    pin
-                )
-            } else {
-                anyhow!(
-                    "no matching version found for {name} with requirement {}",
-                    requirement
-                )
-            }
-        })?
-        .clone();
+    let root_reqs: Vec<RootRequirement> = roots
+        .iter()
+        .map(|root| RootRequirement {
+            name: root.name.clone(),
+            requirement: root.requirement.clone(),
+        })
+        .collect();
+
+    let graph = resolve_dependency_graph(&root_reqs, &pins, |package_name| {
+        index.package_versions(package_name)
+    })?;
 
     let resolved_target = requested_target
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| host_target_triple().to_string());
-    let artifact = manifest
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.target == resolved_target)
-        .ok_or_else(|| {
-            anyhow!(
-                "no artifact available for target {} in {} {}",
-                resolved_target,
-                manifest.name,
-                manifest.version
-            )
-        })?
-        .clone();
-    let archive_type = artifact.archive_type()?;
 
-    Ok(ResolvedInstall {
-        manifest,
-        artifact,
-        resolved_target,
-        archive_type,
-    })
+    graph
+        .install_order
+        .iter()
+        .map(|name| {
+            let manifest = graph
+                .manifests
+                .get(name)
+                .ok_or_else(|| anyhow!("resolver selected package missing from graph: {name}"))?
+                .clone();
+
+            let artifact = manifest
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.target == resolved_target)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no artifact available for target {} in {} {}",
+                        resolved_target,
+                        manifest.name,
+                        manifest.version
+                    )
+                })?
+                .clone();
+            let archive_type = artifact.archive_type()?;
+
+            Ok(ResolvedInstall {
+                manifest,
+                artifact,
+                resolved_target: resolved_target.clone(),
+                archive_type,
+            })
+        })
+        .collect()
 }
 
 fn install_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
+    dependency_receipts: &[String],
     force_redownload: bool,
 ) -> Result<InstallOutcome> {
     let receipts = read_install_receipts(layout)?;
@@ -373,6 +493,7 @@ fn install_resolved(
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
         version: resolved.manifest.version.to_string(),
+        dependencies: dependency_receipts.to_vec(),
         target: Some(resolved.resolved_target.clone()),
         artifact_url: Some(resolved.artifact.url.clone()),
         artifact_sha256: Some(resolved.artifact.sha256.clone()),
@@ -484,47 +605,58 @@ fn validate_binary_preflight(
     Ok(())
 }
 
-fn load_pin_requirement(layout: &PrefixLayout, name: &str) -> Result<Option<VersionReq>> {
-    let Some(raw) = read_pin(layout, name)? else {
-        return Ok(None);
-    };
-    let requirement = VersionReq::parse(&raw)
-        .with_context(|| format!("invalid pin requirement for '{name}' in state: {raw}"))?;
-    Ok(Some(requirement))
+fn build_dependency_receipts(
+    resolved: &ResolvedInstall,
+    selected: &[ResolvedInstall],
+) -> Vec<String> {
+    let mut deps = resolved
+        .manifest
+        .dependencies
+        .keys()
+        .filter_map(|name| {
+            selected
+                .iter()
+                .find(|candidate| candidate.manifest.name == *name)
+                .map(|candidate| {
+                    format!("{}@{}", candidate.manifest.name, candidate.manifest.version)
+                })
+        })
+        .collect::<Vec<_>>();
+    deps.sort();
+    deps
 }
 
-fn upgrade_single(
-    layout: &PrefixLayout,
-    index: &RegistryIndex,
-    receipt: &InstallReceipt,
-    request_requirement: &VersionReq,
-    force_redownload: bool,
+fn enforce_no_downgrades(
+    receipts: &[InstallReceipt],
+    resolved: &[ResolvedInstall],
+    operation: &str,
 ) -> Result<()> {
-    let current_version = Version::parse(&receipt.version).with_context(|| {
-        format!(
-            "installed receipt for '{}' has invalid version: {}",
-            receipt.name, receipt.version
-        )
-    })?;
+    for receipt in receipts {
+        let Some(candidate) = resolved
+            .iter()
+            .find(|entry| entry.manifest.name == receipt.name)
+        else {
+            continue;
+        };
 
-    let resolved = resolve_install(
-        layout,
-        index,
-        &receipt.name,
-        request_requirement,
-        receipt.target.as_deref(),
-    )?;
-    if resolved.manifest.version <= current_version {
-        println!("{} is up-to-date ({})", receipt.name, receipt.version);
-        return Ok(());
+        let current = Version::parse(&receipt.version).with_context(|| {
+            format!(
+                "installed receipt for '{}' has invalid version: {}",
+                receipt.name, receipt.version
+            )
+        })?;
+        if candidate.manifest.version < current {
+            return Err(anyhow!(
+                "{} would downgrade '{}' from {} to {}; run `crosspack install '{}@={}'` to perform an explicit downgrade",
+                operation,
+                receipt.name,
+                receipt.version,
+                candidate.manifest.version,
+                receipt.name,
+                candidate.manifest.version
+            ));
+        }
     }
-
-    let outcome = install_resolved(layout, &resolved, force_redownload)?;
-    println!(
-        "upgraded {} from {} to {}",
-        receipt.name, receipt.version, outcome.version
-    );
-    println!("receipt: {}", outcome.receipt_path.display());
     Ok(())
 }
 
@@ -641,8 +773,11 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pin_spec, select_manifest_with_pin, validate_binary_preflight};
-    use crosspack_core::PackageManifest;
+    use super::{
+        enforce_no_downgrades, parse_pin_spec, select_manifest_with_pin, validate_binary_preflight,
+        ResolvedInstall,
+    };
+    use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{bin_path, InstallReceipt, PrefixLayout};
     use semver::VersionReq;
     use std::fs;
@@ -695,6 +830,7 @@ sha256 = "def"
         let receipts = vec![InstallReceipt {
             name: "fd".to_string(),
             version: "10.0.0".to_string(),
+            dependencies: Vec::new(),
             target: None,
             artifact_url: None,
             artifact_sha256: None,
@@ -726,6 +862,66 @@ sha256 = "def"
             .contains("already exists and is not managed by crosspack"));
 
         let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn enforce_no_downgrades_rejects_lower_version() {
+        let receipts = vec![InstallReceipt {
+            name: "tool".to_string(),
+            version: "2.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+        let resolved = vec![resolved_install("tool", "1.9.0")];
+
+        let err = enforce_no_downgrades(&receipts, &resolved, "upgrade").expect_err("must fail");
+        assert!(err.to_string().contains("would downgrade 'tool'"));
+    }
+
+    #[test]
+    fn enforce_no_downgrades_allows_upgrade() {
+        let receipts = vec![InstallReceipt {
+            name: "tool".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+        let resolved = vec![resolved_install("tool", "1.2.0")];
+        enforce_no_downgrades(&receipts, &resolved, "upgrade").expect("must pass");
+    }
+
+    fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
+        let manifest = PackageManifest::from_toml_str(&format!(
+            r#"
+name = "{name}"
+version = "{version}"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/{name}-{version}.tar.zst"
+sha256 = "abc"
+"#
+        ))
+        .expect("manifest parse");
+        let artifact = manifest.artifacts[0].clone();
+
+        ResolvedInstall {
+            manifest,
+            artifact,
+            resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+            archive_type: ArchiveType::TarZst,
+        }
     }
 
     fn test_layout() -> PrefixLayout {

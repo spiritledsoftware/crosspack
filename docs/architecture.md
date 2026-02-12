@@ -37,17 +37,16 @@ Default user prefixes:
 ## Current CLI Behavior
 
 - `search` and `info` query the local registry index.
-- `install` resolves a package version and target artifact, downloads to cache, verifies SHA-256, extracts into `<prefix>/pkgs/<name>/<version>`, and writes an install receipt.
+- `install` resolves a transitive dependency graph with pin constraints, selects artifacts, downloads to cache, verifies SHA-256, extracts into `<prefix>/pkgs/<name>/<version>`, and writes install receipts.
 - `install` exposes declared binaries into `<prefix>/bin/` (symlinks on Unix, `.cmd` shims on Windows) and hard-fails on collisions.
 - `install` supports:
   - `--target <triple>` to override host target selection.
   - `--force-redownload` to bypass artifact cache.
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
-- `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed packages (`upgrade`) while honoring pins.
+- `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed packages (`upgrade`) with a global dependency solve while honoring pins.
 - `uninstall` removes installed package content by receipt and is idempotent when package is not installed.
 - `list` reads install receipts from `<prefix>/state/installed/`.
 
 ## Deferred Items
 
-- Dependency graph install (currently direct package only).
 - Dependency-aware uninstall and cache pruning.

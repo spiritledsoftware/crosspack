@@ -2,10 +2,13 @@
 
 `crosspack install <name[@constraint]>` executes this sequence:
 
-1. Resolve package version from registry manifests.
-2. Select artifact for requested target (`--target` or host triple).
+1. Resolve package graph from registry manifests:
+   - merge dependency constraints transitively,
+   - apply pin constraints to root and transitive packages,
+   - produce dependency-first install order.
+2. Select artifact for each resolved package for requested target (`--target` or host triple).
 3. Determine archive type (`artifact.archive` or infer from URL suffix).
-4. Resolve cache path at:
+4. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
 5. Download artifact if needed (or if `--force-redownload`).
 6. Verify artifact SHA-256 against manifest `sha256`.
@@ -19,6 +22,8 @@
 12. Remove stale previously-owned binaries no longer declared for that package.
 13. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
 
+`upgrade` with no package argument runs a single global dependency solve across all installed roots.
+
 ## Receipt Fields
 
 - `name`
@@ -28,6 +33,7 @@
 - `artifact_sha256` (optional)
 - `cache_path` (optional)
 - `exposed_bin` (repeated, optional)
+- `dependency` (repeated `name@version`, optional)
 - `install_status` (`installed`)
 - `installed_at_unix`
 
@@ -38,12 +44,12 @@
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
+- Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 
 ## Current Limits
 
-- Installs only the direct requested package (no dependency install yet).
-- Upgrade does not yet resolve/install transitive dependencies.
 - Pin constraints are simple per-package semver requirements stored as files.
+- Dependency-aware uninstall and orphan cleanup are not implemented yet.
 
 ## Upgrade and Pin
 

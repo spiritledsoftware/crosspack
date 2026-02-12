@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -17,6 +18,7 @@ pub struct PrefixLayout {
 pub struct InstallReceipt {
     pub name: String,
     pub version: String,
+    pub dependencies: Vec<String>,
     pub target: Option<String>,
     pub artifact_url: Option<String>,
     pub artifact_sha256: Option<String>,
@@ -186,6 +188,9 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     let mut payload = String::new();
     payload.push_str(&format!("name={}\n", receipt.name));
     payload.push_str(&format!("version={}\n", receipt.version));
+    for dependency in &receipt.dependencies {
+        payload.push_str(&format!("dependency={}\n", dependency));
+    }
     if let Some(target) = &receipt.target {
         payload.push_str(&format!("target={}\n", target));
     }
@@ -278,6 +283,41 @@ pub fn read_pin(layout: &PrefixLayout, name: &str) -> Result<Option<String>> {
     Ok(Some(trimmed))
 }
 
+pub fn read_all_pins(layout: &PrefixLayout) -> Result<BTreeMap<String, String>> {
+    let dir = layout.pins_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut pins = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read pin state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("pin") {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        let value = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read pin: {}", path.display()))?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        pins.insert(stem.to_string(), trimmed.to_string());
+    }
+
+    Ok(pins)
+}
+
 pub fn remove_pin(layout: &PrefixLayout, name: &str) -> Result<bool> {
     let pin_path = layout.pin_path(name);
     if !pin_path.exists() {
@@ -340,6 +380,7 @@ pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallR
 fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut name = None;
     let mut version = None;
+    let mut dependencies = Vec::new();
     let mut target = None;
     let mut artifact_url = None;
     let mut artifact_sha256 = None;
@@ -355,6 +396,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         match k {
             "name" => name = Some(v.to_string()),
             "version" => version = Some(v.to_string()),
+            "dependency" => dependencies.push(v.to_string()),
             "target" => target = Some(v.to_string()),
             "artifact_url" => artifact_url = Some(v.to_string()),
             "artifact_sha256" => artifact_sha256 = Some(v.to_string()),
@@ -371,6 +413,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     Ok(InstallReceipt {
         name: name.context("missing name")?,
         version: version.context("missing version")?,
+        dependencies,
         target,
         artifact_url,
         artifact_sha256,
@@ -725,7 +768,7 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        expose_binary, parse_receipt, read_pin, remove_exposed_binary, remove_pin,
+        expose_binary, parse_receipt, read_all_pins, read_pin, remove_exposed_binary, remove_pin,
         strip_rel_components, uninstall_package, write_install_receipt, write_pin, InstallReceipt,
         PrefixLayout, UninstallStatus,
     };
@@ -738,14 +781,16 @@ mod tests {
         let receipt = parse_receipt(raw).expect("must parse");
         assert_eq!(receipt.name, "fd");
         assert_eq!(receipt.version, "10.2.0");
+        assert!(receipt.dependencies.is_empty());
         assert_eq!(receipt.install_status, "installed");
         assert!(receipt.target.is_none());
     }
 
     #[test]
     fn parse_new_receipt_shape() {
-        let raw = "name=fd\nversion=10.2.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_status=installed\ninstalled_at_unix=123\n";
+        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_status=installed\ninstalled_at_unix=123\n";
         let receipt = parse_receipt(raw).expect("must parse");
+        assert_eq!(receipt.dependencies, vec!["zlib@2.1.0", "pcre2@10.44.0"]);
         assert_eq!(receipt.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
         assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
@@ -794,6 +839,7 @@ mod tests {
             &InstallReceipt {
                 name: "demo".to_string(),
                 version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
                 target: None,
                 artifact_url: None,
                 artifact_sha256: None,
@@ -836,6 +882,7 @@ mod tests {
             &InstallReceipt {
                 name: "demo".to_string(),
                 version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
                 target: None,
                 artifact_url: None,
                 artifact_sha256: None,
@@ -932,6 +979,21 @@ mod tests {
         assert!(removed);
         let pin = read_pin(&layout, "ripgrep").expect("must read pin");
         assert!(pin.is_none());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_all_pins_reads_multiple_pin_files() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_pin(&layout, "ripgrep", "^14").expect("pin ripgrep");
+        write_pin(&layout, "fd", "^10").expect("pin fd");
+
+        let pins = read_all_pins(&layout).expect("must read pins");
+        assert_eq!(pins.get("ripgrep").map(String::as_str), Some("^14"));
+        assert_eq!(pins.get("fd").map(String::as_str), Some("^10"));
 
         let _ = fs::remove_dir_all(layout.prefix());
     }

@@ -172,6 +172,7 @@ dependencies = [
 name = "crosspack-resolver"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "crosspack-core",
  "semver",
 ]
