@@ -1,0 +1,15 @@
+[package]
+name = "crosspack-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "crosspack"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crosspack-installer = { path = "../crosspack-installer" }
+crosspack-registry = { path = "../crosspack-registry" }

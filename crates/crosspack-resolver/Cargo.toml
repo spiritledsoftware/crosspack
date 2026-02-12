@@ -1,0 +1,9 @@
+[package]
+name = "crosspack-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crosspack-core = { path = "../crosspack-core" }
+semver.workspace = true
