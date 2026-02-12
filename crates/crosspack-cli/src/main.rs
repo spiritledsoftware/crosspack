@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
     bin_path, current_unix_timestamp, default_user_prefix, expose_binary, install_from_artifact,
@@ -12,7 +12,10 @@ use crosspack_installer::{
     uninstall_package, write_install_receipt, write_pin, InstallReason, InstallReceipt,
     PrefixLayout, UninstallResult, UninstallStatus,
 };
-use crosspack_registry::RegistryIndex;
+use crosspack_registry::{
+    RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
+    SourceUpdateStatus,
+};
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
 use semver::{Version, VersionReq};
@@ -54,8 +57,51 @@ enum Commands {
     Pin {
         spec: String,
     },
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommands,
+    },
+    Update {
+        #[arg(long = "registry")]
+        registry: Vec<String>,
+    },
     Doctor,
     InitShell,
+}
+
+#[derive(Subcommand, Debug)]
+enum RegistryCommands {
+    Add {
+        name: String,
+        location: String,
+        #[arg(long)]
+        kind: CliRegistryKind,
+        #[arg(long)]
+        priority: u32,
+        #[arg(long)]
+        fingerprint: String,
+    },
+    List,
+    Remove {
+        name: String,
+        #[arg(long)]
+        purge_cache: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum CliRegistryKind {
+    Git,
+    Filesystem,
+}
+
+impl From<CliRegistryKind> for RegistrySourceKind {
+    fn from(value: CliRegistryKind) -> Self {
+        match value {
+            CliRegistryKind::Git => RegistrySourceKind::Git,
+            CliRegistryKind::Filesystem => RegistrySourceKind::Filesystem,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -291,6 +337,83 @@ fn main() -> Result<()> {
             println!("pinned {name} to {requirement}");
             println!("pin: {}", pin_path.display());
         }
+        Commands::Registry { command } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            let source_state_root = registry_state_root(&layout);
+            let store = RegistrySourceStore::new(&source_state_root);
+
+            match command {
+                RegistryCommands::Add {
+                    name,
+                    location,
+                    kind,
+                    priority,
+                    fingerprint,
+                } => {
+                    store.add_source(RegistrySourceRecord {
+                        name,
+                        kind: kind.into(),
+                        location,
+                        fingerprint_sha256: fingerprint,
+                        enabled: true,
+                        priority,
+                    })?;
+                }
+                RegistryCommands::List => {
+                    let sources = store.list_sources()?;
+                    for line in format_registry_list_lines(sources) {
+                        println!("{line}");
+                    }
+                }
+                RegistryCommands::Remove { name, purge_cache } => {
+                    store.remove_source(&name)?;
+                    if purge_cache {
+                        let cache_path = source_state_root.join("cache").join(&name);
+                        if cache_path.exists() {
+                            std::fs::remove_dir_all(&cache_path).with_context(|| {
+                                format!("failed purging source cache: {}", cache_path.display())
+                            })?;
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Update { registry } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            let source_state_root = registry_state_root(&layout);
+            let store = RegistrySourceStore::new(&source_state_root);
+            let results = store.update_sources(&registry)?;
+
+            let mut updated = 0_u32;
+            let mut up_to_date = 0_u32;
+            let mut failed = 0_u32;
+            for result in results {
+                match result.status {
+                    SourceUpdateStatus::Updated => {
+                        updated += 1;
+                        println!("{}: updated", result.name);
+                    }
+                    SourceUpdateStatus::UpToDate => {
+                        up_to_date += 1;
+                        println!("{}: up-to-date", result.name);
+                    }
+                    SourceUpdateStatus::Failed => {
+                        failed += 1;
+                        if let Some(error) = result.error {
+                            println!("{}: failed ({error})", result.name);
+                        } else {
+                            println!("{}: failed", result.name);
+                        }
+                    }
+                }
+            }
+            println!(
+                "update summary: updated={} up-to-date={} failed={}",
+                updated, up_to_date, failed
+            );
+        }
         Commands::Doctor => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -310,6 +433,32 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn registry_state_root(layout: &PrefixLayout) -> PathBuf {
+    layout.state_dir().join("registry")
+}
+
+fn format_registry_list_lines(mut sources: Vec<RegistrySourceRecord>) -> Vec<String> {
+    sources.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    sources
+        .into_iter()
+        .map(|source| {
+            let kind = match source.kind {
+                RegistrySourceKind::Git => "git",
+                RegistrySourceKind::Filesystem => "filesystem",
+            };
+            format!(
+                "{}\t{}\t{}\t{}",
+                source.name, kind, source.priority, source.location
+            )
+        })
+        .collect()
 }
 
 fn parse_spec(spec: &str) -> Result<(String, VersionReq)> {
@@ -921,13 +1070,16 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 mod tests {
     use super::{
         build_upgrade_plans, build_upgrade_roots, determine_install_reason,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, format_uninstall_messages,
-        parse_pin_spec, select_manifest_with_pin, validate_binary_preflight, ResolvedInstall,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, format_registry_list_lines,
+        format_uninstall_messages, parse_pin_spec, select_manifest_with_pin,
+        validate_binary_preflight, Cli, CliRegistryKind, Commands, ResolvedInstall,
     };
+    use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
         bin_path, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
     };
+    use crosspack_registry::{RegistrySourceKind, RegistrySourceRecord};
     use semver::VersionReq;
     use std::fs;
 
@@ -1324,6 +1476,117 @@ sha256 = "def"
         let lines = format_uninstall_messages(&result);
         assert_eq!(lines[0], "uninstalled app 1.0.0");
         assert_eq!(lines[1], "pruned orphan dependencies: shared, zlib");
+    }
+
+    #[test]
+    fn cli_parses_registry_add_command() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "registry",
+            "add",
+            "official",
+            "https://example.com/official.git",
+            "--kind",
+            "git",
+            "--priority",
+            "10",
+            "--fingerprint",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Registry {
+                command:
+                    super::RegistryCommands::Add {
+                        name,
+                        location,
+                        kind,
+                        priority,
+                        fingerprint,
+                    },
+            } => {
+                assert_eq!(name, "official");
+                assert_eq!(location, "https://example.com/official.git");
+                assert_eq!(kind, CliRegistryKind::Git);
+                assert_eq!(priority, 10);
+                assert_eq!(
+                    fingerprint,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_registry_remove_with_purge_cache() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "registry",
+            "remove",
+            "official",
+            "--purge-cache",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Registry {
+                command: super::RegistryCommands::Remove { name, purge_cache },
+            } => {
+                assert_eq!(name, "official");
+                assert!(purge_cache);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_update_with_multiple_registry_flags() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "update",
+            "--registry",
+            "official",
+            "--registry",
+            "mirror",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Update { registry } => {
+                assert_eq!(registry, vec!["official", "mirror"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registry_list_output_is_sorted() {
+        let sources = vec![
+            RegistrySourceRecord {
+                name: "zeta".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://example.test/zeta.git".to_string(),
+                fingerprint_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                enabled: true,
+                priority: 10,
+            },
+            RegistrySourceRecord {
+                name: "alpha".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/alpha".to_string(),
+                fingerprint_sha256:
+                    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+                enabled: true,
+                priority: 1,
+            },
+        ];
+
+        let lines = format_registry_list_lines(sources);
+        assert_eq!(lines[0], "alpha\tfilesystem\t1\t/tmp/alpha");
+        assert_eq!(lines[1], "zeta\tgit\t10\thttps://example.test/zeta.git");
     }
 
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
