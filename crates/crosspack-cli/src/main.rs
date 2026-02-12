@@ -180,70 +180,83 @@ fn main() -> Result<()> {
                     }
                 }
                 None => {
-                    let roots = build_upgrade_roots(&receipts);
-                    if roots.is_empty() {
+                    let plans = build_upgrade_plans(&receipts);
+                    if plans.is_empty() {
                         println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
                         return Ok(());
                     }
-                    let root_names = roots
+
+                    let mut grouped_resolved = Vec::new();
+                    for plan in &plans {
+                        let resolved = resolve_install_graph(
+                            &layout,
+                            &index,
+                            &plan.roots,
+                            plan.target.as_deref(),
+                        )?;
+                        enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+                        grouped_resolved.push(resolved);
+                    }
+
+                    let overlap_check = grouped_resolved
                         .iter()
-                        .map(|root| root.name.clone())
+                        .zip(plans.iter())
+                        .map(|(resolved, plan)| {
+                            (
+                                plan.target.as_deref(),
+                                resolved
+                                    .iter()
+                                    .map(|package| package.manifest.name.clone())
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
                         .collect::<Vec<_>>();
+                    enforce_disjoint_multi_target_upgrade(&overlap_check)?;
 
-                    let mut targets = receipts
-                        .iter()
-                        .filter_map(|receipt| receipt.target.clone())
-                        .collect::<HashSet<_>>();
-                    let requested_target = if targets.len() > 1 {
-                        return Err(anyhow!(
-                            "upgrade across multiple installed targets is not yet supported"
-                        ));
-                    } else {
-                        targets.drain().next()
-                    };
-
-                    let resolved = resolve_install_graph(
-                        &layout,
-                        &index,
-                        &roots,
-                        requested_target.as_deref(),
-                    )?;
-                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
-
-                    for package in &resolved {
-                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
-                        {
-                            let old_version = Version::parse(&old.version).with_context(|| {
-                                format!(
-                                    "installed receipt for '{}' has invalid version: {}",
-                                    old.name, old.version
-                                )
-                            })?;
-                            if package.manifest.version <= old_version {
-                                println!(
-                                    "{} is up-to-date ({})",
-                                    package.manifest.name, old.version
-                                );
-                                continue;
+                    for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
+                        for package in resolved {
+                            if let Some(old) =
+                                receipts.iter().find(|r| r.name == package.manifest.name)
+                            {
+                                let old_version =
+                                    Version::parse(&old.version).with_context(|| {
+                                        format!(
+                                            "installed receipt for '{}' has invalid version: {}",
+                                            old.name, old.version
+                                        )
+                                    })?;
+                                if package.manifest.version <= old_version {
+                                    println!(
+                                        "{} is up-to-date ({})",
+                                        package.manifest.name, old.version
+                                    );
+                                    continue;
+                                }
                             }
-                        }
 
-                        let dependencies = build_dependency_receipts(package, &resolved);
-                        let outcome =
-                            install_resolved(&layout, package, &dependencies, &root_names, false)?;
-                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
-                        {
-                            println!(
-                                "upgraded {} from {} to {}",
-                                package.manifest.name, old.version, package.manifest.version
-                            );
-                        } else {
-                            println!(
-                                "installed dependency {} {}",
-                                package.manifest.name, package.manifest.version
-                            );
+                            let dependencies = build_dependency_receipts(package, resolved);
+                            let outcome = install_resolved(
+                                &layout,
+                                package,
+                                &dependencies,
+                                &plan.root_names,
+                                false,
+                            )?;
+                            if let Some(old) =
+                                receipts.iter().find(|r| r.name == package.manifest.name)
+                            {
+                                println!(
+                                    "upgraded {} from {} to {}",
+                                    package.manifest.name, old.version, package.manifest.version
+                                );
+                            } else {
+                                println!(
+                                    "installed dependency {} {}",
+                                    package.manifest.name, package.manifest.version
+                                );
+                            }
+                            println!("receipt: {}", outcome.receipt_path.display());
                         }
-                        println!("receipt: {}", outcome.receipt_path.display());
                     }
                 }
             }
@@ -373,6 +386,13 @@ struct InstallOutcome {
 struct RootInstallRequest {
     name: String,
     requirement: VersionReq,
+}
+
+#[derive(Debug, Clone)]
+struct UpgradePlan {
+    target: Option<String>,
+    roots: Vec<RootInstallRequest>,
+    root_names: Vec<String>,
 }
 
 fn resolve_install_graph(
@@ -651,6 +671,7 @@ fn determine_install_reason(
     InstallReason::Dependency
 }
 
+#[cfg(test)]
 fn build_upgrade_roots(receipts: &[InstallReceipt]) -> Vec<RootInstallRequest> {
     receipts
         .iter()
@@ -660,6 +681,68 @@ fn build_upgrade_roots(receipts: &[InstallReceipt]) -> Vec<RootInstallRequest> {
             requirement: VersionReq::STAR,
         })
         .collect()
+}
+
+fn build_upgrade_plans(receipts: &[InstallReceipt]) -> Vec<UpgradePlan> {
+    let mut grouped_roots: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
+
+    for receipt in receipts {
+        if receipt.install_reason != InstallReason::Root {
+            continue;
+        }
+        grouped_roots
+            .entry(receipt.target.clone())
+            .or_default()
+            .push(receipt.name.clone());
+    }
+
+    grouped_roots
+        .into_iter()
+        .map(|(target, mut root_names)| {
+            root_names.sort();
+            root_names.dedup();
+
+            let roots = root_names
+                .iter()
+                .map(|name| RootInstallRequest {
+                    name: name.clone(),
+                    requirement: VersionReq::STAR,
+                })
+                .collect::<Vec<_>>();
+
+            UpgradePlan {
+                target,
+                roots,
+                root_names,
+            }
+        })
+        .collect()
+}
+
+fn enforce_disjoint_multi_target_upgrade(
+    resolved_by_target: &[(Option<&str>, Vec<String>)],
+) -> Result<()> {
+    let mut package_targets = BTreeMap::new();
+
+    for (target, packages) in resolved_by_target {
+        let target_name = target.unwrap_or("host-default").to_string();
+        for package in packages {
+            if let Some(previous_target) =
+                package_targets.insert(package.clone(), target_name.clone())
+            {
+                if previous_target != target_name {
+                    return Err(anyhow!(
+                        "upgrade cannot safely process package '{}' across multiple targets ({} and {}); install state is currently keyed by package name. Use separate prefixes for cross-target installs.",
+                        package,
+                        previous_target,
+                        target_name
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn format_uninstall_messages(result: &UninstallResult) -> Vec<String> {
@@ -837,9 +920,9 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_upgrade_roots, determine_install_reason, enforce_no_downgrades,
-        format_uninstall_messages, parse_pin_spec, select_manifest_with_pin,
-        validate_binary_preflight, ResolvedInstall,
+        build_upgrade_plans, build_upgrade_roots, determine_install_reason,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, format_uninstall_messages,
+        parse_pin_spec, select_manifest_with_pin, validate_binary_preflight, ResolvedInstall,
     };
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
@@ -1077,6 +1160,138 @@ sha256 = "def"
 
         let roots = build_upgrade_roots(&receipts);
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn build_upgrade_plans_groups_roots_by_target() {
+        let receipts = vec![
+            InstallReceipt {
+                name: "linux-tool".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+            InstallReceipt {
+                name: "mac-tool".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("aarch64-apple-darwin".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        ];
+
+        let plans = build_upgrade_plans(&receipts);
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].target.as_deref(), Some("aarch64-apple-darwin"));
+        assert_eq!(plans[0].root_names, vec!["mac-tool"]);
+        assert_eq!(plans[1].target.as_deref(), Some("x86_64-unknown-linux-gnu"));
+        assert_eq!(plans[1].root_names, vec!["linux-tool"]);
+    }
+
+    #[test]
+    fn build_upgrade_plans_ignores_dependency_receipts() {
+        let receipts = vec![
+            InstallReceipt {
+                name: "app".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: vec!["shared@1.0.0".to_string()],
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+            InstallReceipt {
+                name: "shared".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                install_reason: InstallReason::Dependency,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        ];
+
+        let plans = build_upgrade_plans(&receipts);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].root_names, vec!["app"]);
+        assert_eq!(plans[0].roots.len(), 1);
+        assert_eq!(plans[0].roots[0].name, "app");
+    }
+
+    #[test]
+    fn build_upgrade_plans_is_empty_when_no_roots_installed() {
+        let receipts = vec![InstallReceipt {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let plans = build_upgrade_plans(&receipts);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn enforce_disjoint_multi_target_upgrade_rejects_overlapping_package_names() {
+        let err = enforce_disjoint_multi_target_upgrade(&[
+            (
+                Some("x86_64-unknown-linux-gnu"),
+                vec!["shared".to_string(), "linux-tool".to_string()],
+            ),
+            (
+                Some("aarch64-apple-darwin"),
+                vec!["shared".to_string(), "mac-tool".to_string()],
+            ),
+        ])
+        .expect_err("overlap must fail");
+
+        assert!(err
+            .to_string()
+            .contains("cannot safely process package 'shared'"));
+        assert!(err.to_string().contains("separate prefixes"));
+    }
+
+    #[test]
+    fn enforce_disjoint_multi_target_upgrade_allows_disjoint_package_sets() {
+        enforce_disjoint_multi_target_upgrade(&[
+            (
+                Some("x86_64-unknown-linux-gnu"),
+                vec!["linux-tool".to_string(), "linux-lib".to_string()],
+            ),
+            (
+                Some("aarch64-apple-darwin"),
+                vec!["mac-tool".to_string(), "mac-lib".to_string()],
+            ),
+        ])
+        .expect("disjoint groups must pass");
     }
 
     #[test]

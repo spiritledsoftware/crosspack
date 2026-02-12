@@ -74,5 +74,6 @@
 - `crosspack pin <name@constraint>` writes a pin at `<prefix>/state/pins/<name>.pin`.
 - `crosspack install` and `crosspack upgrade` both enforce pin constraints during version selection.
 - `crosspack upgrade <name[@constraint]>` upgrades one installed package if a newer compatible version exists.
-- `crosspack upgrade` upgrades all installed packages, preserving target triples from receipts.
+- `crosspack upgrade` upgrades all installed root packages with one global solve per target group, preserving each group's target triple from receipts.
+- `crosspack upgrade` fails if grouped solves would touch the same package name across different targets; with current package-name keyed state, use separate prefixes for cross-target installs.
 - If a package is already current (or only older/equal versions match constraints), upgrade reports it as up to date.

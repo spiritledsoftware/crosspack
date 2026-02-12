@@ -153,6 +153,7 @@ Follow existing patterns already in this repository.
 ## Team Workflow Preferences
 
 - Commit immediately after finishing each feature implementation (after verification passes).
+- Do not ask whether to commit after implementation; commit directly once verification passes.
 - If an agent says it will "note" a standing preference, record it here in `AGENTS.md` rather than only acknowledging it in chat.
 
 ### Mandatory Note-Taking Protocol

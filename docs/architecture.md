@@ -43,7 +43,8 @@ Default user prefixes:
   - `--target <triple>` to override host target selection.
   - `--force-redownload` to bypass artifact cache.
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
-- `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed packages (`upgrade`) with a global dependency solve while honoring pins.
+- `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
+- Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
