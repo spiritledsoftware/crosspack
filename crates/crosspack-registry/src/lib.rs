@@ -1,6 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -153,11 +154,7 @@ impl RegistrySourceStore {
     fn update_source(&self, source: &RegistrySourceRecord) -> Result<(SourceUpdateStatus, String)> {
         match source.kind {
             RegistrySourceKind::Filesystem => self.update_filesystem_source(source),
-            RegistrySourceKind::Git => anyhow::bail!(
-                "source-sync-failed: source '{}' kind '{}' is not yet supported",
-                source.name,
-                "git"
-            ),
+            RegistrySourceKind::Git => self.update_git_source(source),
         }
     }
 
@@ -165,13 +162,77 @@ impl RegistrySourceStore {
         &self,
         source: &RegistrySourceRecord,
     ) -> Result<(SourceUpdateStatus, String)> {
-        let source_path = PathBuf::from(&source.location);
         let staged_root = self
             .state_root
             .join(format!("tmp-{}-{}", source.name, unique_suffix()));
 
+        let source_path = PathBuf::from(&source.location);
+        if let Err(err) = copy_source_to_temp(&source_path, &staged_root, &source.name) {
+            let _ = fs::remove_dir_all(&staged_root);
+            return Err(err);
+        }
+
+        let snapshot_id = match compute_filesystem_snapshot_id(&staged_root) {
+            Ok(snapshot_id) => snapshot_id,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&staged_root);
+                return Err(err);
+            }
+        };
+
+        self.finalize_staged_source_update(source, staged_root, snapshot_id)
+    }
+
+    fn update_git_source(
+        &self,
+        source: &RegistrySourceRecord,
+    ) -> Result<(SourceUpdateStatus, String)> {
+        let staged_root = self
+            .state_root
+            .join(format!("tmp-{}-{}", source.name, unique_suffix()));
+        let destination = self.state_root.join("cache").join(&source.name);
+
+        let prepare_result = if destination.exists() {
+            copy_source_to_temp(&destination, &staged_root, &source.name).and_then(|_| {
+                run_git_command(
+                    &staged_root,
+                    &["fetch", "--prune", "--", source.location.as_str()],
+                    &source.name,
+                )?;
+                run_git_command(
+                    &staged_root,
+                    &["reset", "--hard", "FETCH_HEAD"],
+                    &source.name,
+                )?;
+                Ok(())
+            })
+        } else {
+            run_git_clone(&source.location, &staged_root, &source.name)
+        };
+
+        if let Err(err) = prepare_result {
+            let _ = fs::remove_dir_all(&staged_root);
+            return Err(err);
+        }
+
+        let snapshot_id = match git_head_snapshot_id(&staged_root, &source.name) {
+            Ok(snapshot_id) => snapshot_id,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&staged_root);
+                return Err(err);
+            }
+        };
+
+        self.finalize_staged_source_update(source, staged_root, snapshot_id)
+    }
+
+    fn finalize_staged_source_update(
+        &self,
+        source: &RegistrySourceRecord,
+        staged_root: PathBuf,
+        snapshot_id: String,
+    ) -> Result<(SourceUpdateStatus, String)> {
         let pipeline_result = (|| -> Result<(String, u64, Option<String>)> {
-            copy_source_to_temp(&source_path, &staged_root, &source.name)?;
             validate_staged_registry_layout(&staged_root, &source.name)?;
 
             let registry_pub_path = staged_root.join("registry.pub");
@@ -195,7 +256,6 @@ impl RegistrySourceStore {
             verify_metadata_signature_policy(&staged_root, &source.name)?;
 
             let manifest_count = count_manifest_files(&staged_root.join("index"))?;
-            let snapshot_id = compute_filesystem_snapshot_id(&staged_root)?;
             let existing_snapshot_id = read_snapshot_id(
                 &self
                     .state_root
@@ -284,6 +344,86 @@ impl RegistrySourceStore {
         };
         Ok((status, snapshot_id))
     }
+}
+
+fn run_git_clone(location: &str, destination: &Path, source_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .arg("clone")
+        .arg("--")
+        .arg(location)
+        .arg(destination)
+        .output()
+        .with_context(|| {
+            format!(
+                "source-sync-failed: source '{}' failed launching git clone",
+                source_name
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "source-sync-failed: source '{}' git clone failed: {}",
+            source_name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn run_git_command(repo_root: &Path, args: &[&str], source_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "source-sync-failed: source '{}' failed launching git {}",
+                source_name,
+                args.join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "source-sync-failed: source '{}' git {} failed: {}",
+            source_name,
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn git_head_snapshot_id(repo_root: &Path, source_name: &str) -> Result<String> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--short=16")
+        .arg("HEAD")
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "source-sync-failed: source '{}' failed launching git rev-parse",
+                source_name
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "source-sync-failed: source '{}' git rev-parse failed: {}",
+            source_name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let snapshot_id = String::from_utf8(output.stdout)
+        .context("source-sync-failed: git rev-parse produced non-UTF-8 output")?
+        .trim()
+        .to_string();
+    if snapshot_id.is_empty() {
+        anyhow::bail!(
+            "source-sync-failed: source '{}' git rev-parse returned empty snapshot id",
+            source_name
+        );
+    }
+    Ok(snapshot_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,6 +969,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use ed25519_dalek::{Signer, SigningKey};
@@ -1404,6 +1545,129 @@ mod tests {
     }
 
     #[test]
+    fn update_git_source_clones_and_records_snapshot_id() {
+        let root = test_registry_root();
+        let source_root = git_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        store
+            .add_source(git_source_record(
+                "origin",
+                source_root
+                    .to_str()
+                    .expect("git source path must be valid UTF-8"),
+                sha256_hex_bytes(&registry_pub),
+                0,
+            ))
+            .expect("must add source");
+
+        let expected_snapshot_id = git_head_short(&source_root);
+        let results = store.update_sources(&[]).expect("must update source");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, SourceUpdateStatus::Updated);
+        assert_eq!(results[0].snapshot_id, expected_snapshot_id);
+
+        let cache_root = root.join("cache").join("origin");
+        assert!(cache_root.join("registry.pub").exists());
+        assert!(cache_root.join("index").exists());
+        assert_eq!(git_head_short(&cache_root), expected_snapshot_id);
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_git_source_fetches_new_commit() {
+        let root = test_registry_root();
+        let source_root = git_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        store
+            .add_source(git_source_record(
+                "origin",
+                source_root
+                    .to_str()
+                    .expect("git source path must be valid UTF-8"),
+                sha256_hex_bytes(&registry_pub),
+                0,
+            ))
+            .expect("must add source");
+
+        let first = store
+            .update_sources(&[])
+            .expect("first update must succeed");
+        assert_eq!(first[0].status, SourceUpdateStatus::Updated);
+
+        rewrite_signed_manifest_with_extra_field(
+            &source_root
+                .join("index")
+                .join("ripgrep")
+                .join("14.1.0.toml"),
+            &signing_key(),
+            "description = \"updated\"\n",
+        );
+        git_commit_all(&source_root, "update ripgrep manifest");
+
+        let expected_snapshot_id = git_head_short(&source_root);
+        let second = store
+            .update_sources(&[])
+            .expect("second update must succeed");
+        assert_eq!(second[0].status, SourceUpdateStatus::Updated);
+        assert_eq!(second[0].snapshot_id, expected_snapshot_id);
+
+        let cached_manifest = fs::read_to_string(
+            root.join("cache")
+                .join("origin")
+                .join("index")
+                .join("ripgrep")
+                .join("14.1.0.toml"),
+        )
+        .expect("must read cached manifest");
+        assert!(cached_manifest.contains("description = \"updated\""));
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_git_source_returns_up_to_date_when_revision_unchanged() {
+        let root = test_registry_root();
+        let source_root = git_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        store
+            .add_source(git_source_record(
+                "origin",
+                source_root
+                    .to_str()
+                    .expect("git source path must be valid UTF-8"),
+                sha256_hex_bytes(&registry_pub),
+                0,
+            ))
+            .expect("must add source");
+
+        let first = store
+            .update_sources(&[])
+            .expect("first update must succeed");
+        assert_eq!(first[0].status, SourceUpdateStatus::Updated);
+
+        let second = store
+            .update_sources(&[])
+            .expect("second update must succeed");
+        assert_eq!(second[0].status, SourceUpdateStatus::UpToDate);
+        assert_eq!(second[0].snapshot_id, first[0].snapshot_id);
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn rollback_replace_error_includes_restore_failure_context() {
         let replace_err = anyhow::anyhow!("replace failed");
         let restore_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
@@ -1643,6 +1907,22 @@ version = "{version}"
         }
     }
 
+    fn git_source_record(
+        name: &str,
+        location: &str,
+        fingerprint_sha256: String,
+        priority: u32,
+    ) -> RegistrySourceRecord {
+        RegistrySourceRecord {
+            name: name.to_string(),
+            kind: RegistrySourceKind::Git,
+            location: location.to_string(),
+            fingerprint_sha256,
+            enabled: true,
+            priority,
+        }
+    }
+
     fn filesystem_source_record(
         name: &str,
         location: &str,
@@ -1671,6 +1951,64 @@ version = "{version}"
         write_signed_manifest(&package_dir, &signing_key, "14.1.0");
 
         root
+    }
+
+    fn git_source_fixture() -> PathBuf {
+        let root = filesystem_source_fixture();
+        git_run(&root, &["init"]);
+        git_run(&root, &["add", "."]);
+        git_commit_all(&root, "initial registry snapshot");
+        root
+    }
+
+    fn git_head_short(repo_root: &Path) -> String {
+        let output = Command::new("git")
+            .arg("rev-parse")
+            .arg("--short=16")
+            .arg("HEAD")
+            .current_dir(repo_root)
+            .output()
+            .expect("git must run rev-parse");
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git rev-parse output must be UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    fn git_commit_all(repo_root: &Path, message: &str) {
+        git_run(repo_root, &["add", "."]);
+        git_run(
+            repo_root,
+            &[
+                "-c",
+                "user.name=Crosspack Tests",
+                "-c",
+                "user.email=crosspack-tests@example.com",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    fn git_run(repo_root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git command must execute");
+        assert!(
+            output.status.success(),
+            "git command failed: git {}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn sha256_hex_bytes(bytes: &[u8]) -> String {
