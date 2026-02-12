@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crosspack_core::PackageManifest;
-use crosspack_security::verify_ed25519_signature_hex;
+use crosspack_security::{sha256_hex, verify_ed25519_signature_hex};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,21 @@ pub struct RegistrySourceRecord {
 #[derive(Debug, Clone)]
 pub struct RegistrySourceStore {
     state_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceUpdateStatus {
+    Updated,
+    UpToDate,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceUpdateResult {
+    pub name: String,
+    pub status: SourceUpdateStatus,
+    pub snapshot_id: String,
+    pub error: Option<String>,
 }
 
 impl RegistrySourceStore {
@@ -74,6 +90,31 @@ impl RegistrySourceStore {
         self.save_state(&state)
     }
 
+    pub fn update_sources(&self, target_names: &[String]) -> Result<Vec<SourceUpdateResult>> {
+        let state = self.load_state()?;
+        let selected = select_update_sources(&state.sources, target_names)?;
+
+        let mut results = Vec::with_capacity(selected.len());
+        for source in selected {
+            match self.update_source(&source) {
+                Ok((status, snapshot_id)) => results.push(SourceUpdateResult {
+                    name: source.name,
+                    status,
+                    snapshot_id,
+                    error: None,
+                }),
+                Err(err) => results.push(SourceUpdateResult {
+                    name: source.name,
+                    status: SourceUpdateStatus::Failed,
+                    snapshot_id: String::new(),
+                    error: Some(format!("{err:#}")),
+                }),
+            }
+        }
+
+        Ok(results)
+    }
+
     fn sources_file_path(&self) -> PathBuf {
         self.state_root.join("sources.toml")
     }
@@ -107,6 +148,125 @@ impl RegistrySourceStore {
             .with_context(|| format!("failed serializing source state: {}", path.display()))?;
         fs::write(&path, content)
             .with_context(|| format!("failed writing source state: {}", path.display()))
+    }
+
+    fn update_source(&self, source: &RegistrySourceRecord) -> Result<(SourceUpdateStatus, String)> {
+        match source.kind {
+            RegistrySourceKind::Filesystem => self.update_filesystem_source(source),
+            RegistrySourceKind::Git => anyhow::bail!(
+                "source-sync-failed: source '{}' kind '{}' is not yet supported",
+                source.name,
+                "git"
+            ),
+        }
+    }
+
+    fn update_filesystem_source(
+        &self,
+        source: &RegistrySourceRecord,
+    ) -> Result<(SourceUpdateStatus, String)> {
+        let source_path = PathBuf::from(&source.location);
+        let staged_root = self
+            .state_root
+            .join(format!("tmp-{}-{}", source.name, unique_suffix()));
+
+        let pipeline_result = (|| -> Result<(String, u64, Option<String>)> {
+            copy_source_to_temp(&source_path, &staged_root, &source.name)?;
+            validate_staged_registry_layout(&staged_root, &source.name)?;
+
+            let registry_pub_path = staged_root.join("registry.pub");
+            let registry_pub_raw = fs::read(&registry_pub_path).with_context(|| {
+                format!(
+                    "source-sync-failed: source '{}' failed reading {}",
+                    source.name,
+                    registry_pub_path.display()
+                )
+            })?;
+            let actual_fingerprint = sha256_hex(&registry_pub_raw);
+            if actual_fingerprint != source.fingerprint_sha256 {
+                anyhow::bail!(
+                    "source-key-fingerprint-mismatch: source '{}' expected {}, got {}",
+                    source.name,
+                    source.fingerprint_sha256,
+                    actual_fingerprint
+                );
+            }
+
+            verify_metadata_signature_policy(&staged_root, &source.name)?;
+
+            let manifest_count = count_manifest_files(&staged_root.join("index"))?;
+            let snapshot_id = format!("fs:{actual_fingerprint}");
+            let existing_snapshot_id = read_snapshot_id(
+                &self
+                    .state_root
+                    .join("cache")
+                    .join(&source.name)
+                    .join("snapshot.json"),
+            );
+            Ok((snapshot_id, manifest_count, existing_snapshot_id))
+        })();
+
+        if let Err(err) = pipeline_result {
+            let _ = fs::remove_dir_all(&staged_root);
+            return Err(err);
+        }
+
+        let (snapshot_id, manifest_count, existing_snapshot_id) = pipeline_result?;
+        let cache_root = self.state_root.join("cache");
+        fs::create_dir_all(&cache_root).with_context(|| {
+            format!(
+                "source-sync-failed: source '{}' failed creating cache root {}",
+                source.name,
+                cache_root.display()
+            )
+        })?;
+        let destination = cache_root.join(&source.name);
+        let backup = cache_root.join(format!(".{}-backup-{}", source.name, unique_suffix()));
+        let had_existing = destination.exists();
+
+        if had_existing {
+            fs::rename(&destination, &backup).with_context(|| {
+                format!(
+                    "source-sync-failed: source '{}' failed backing up cache {}",
+                    source.name,
+                    destination.display()
+                )
+            })?;
+        }
+
+        if let Err(err) = fs::rename(&staged_root, &destination).with_context(|| {
+            format!(
+                "source-sync-failed: source '{}' failed replacing cache {}",
+                source.name,
+                destination.display()
+            )
+        }) {
+            if had_existing {
+                let _ = fs::rename(&backup, &destination);
+            }
+            return Err(err);
+        }
+
+        if let Err(err) =
+            write_snapshot_file(&destination, &source.name, &snapshot_id, manifest_count)
+        {
+            let _ = fs::remove_dir_all(&destination);
+            if had_existing {
+                let _ = fs::rename(&backup, &destination);
+            }
+            return Err(err);
+        }
+
+        if had_existing {
+            let _ = fs::remove_dir_all(&backup);
+        }
+
+        let status = if existing_snapshot_id.as_deref() == Some(snapshot_id.as_str()) {
+            SourceUpdateStatus::UpToDate
+        } else {
+            SourceUpdateStatus::Updated
+        };
+        Ok((status, snapshot_id))
     }
 }
 
@@ -224,6 +384,235 @@ fn validate_loaded_sources(sources: &[RegistrySourceRecord]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn select_update_sources(
+    sources: &[RegistrySourceRecord],
+    target_names: &[String],
+) -> Result<Vec<RegistrySourceRecord>> {
+    if target_names.is_empty() {
+        return Ok(sources.to_vec());
+    }
+
+    let known_names: HashSet<&str> = sources.iter().map(|source| source.name.as_str()).collect();
+    for name in target_names {
+        if !known_names.contains(name.as_str()) {
+            anyhow::bail!("source-not-found: source '{}' not found", name);
+        }
+    }
+
+    let target_set: HashSet<&str> = target_names.iter().map(String::as_str).collect();
+    Ok(sources
+        .iter()
+        .filter(|source| target_set.contains(source.name.as_str()))
+        .cloned()
+        .collect())
+}
+
+fn copy_source_to_temp(source_path: &Path, staged_root: &Path, source_name: &str) -> Result<()> {
+    if !source_path.exists() {
+        anyhow::bail!(
+            "source-sync-failed: source '{}' path does not exist: {}",
+            source_name,
+            source_path.display()
+        );
+    }
+
+    copy_dir_recursive(source_path, staged_root).with_context(|| {
+        format!(
+            "source-sync-failed: source '{}' failed copying from {}",
+            source_name,
+            source_path.display()
+        )
+    })
+}
+
+fn copy_dir_recursive(source_root: &Path, destination_root: &Path) -> Result<()> {
+    if !source_root.is_dir() {
+        anyhow::bail!(
+            "source location is not a directory: {}",
+            source_root.display()
+        );
+    }
+
+    if destination_root.exists() {
+        fs::remove_dir_all(destination_root).with_context(|| {
+            format!(
+                "failed clearing temp directory {}",
+                destination_root.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(destination_root).with_context(|| {
+        format!(
+            "failed creating temp directory {}",
+            destination_root.display()
+        )
+    })?;
+
+    let mut queue: VecDeque<(PathBuf, PathBuf)> = VecDeque::new();
+    queue.push_back((source_root.to_path_buf(), destination_root.to_path_buf()));
+
+    while let Some((from_dir, to_dir)) = queue.pop_front() {
+        for entry in fs::read_dir(&from_dir)
+            .with_context(|| format!("failed reading source directory {}", from_dir.display()))?
+        {
+            let entry = entry?;
+            let from_path = entry.path();
+            let to_path = to_dir.join(entry.file_name());
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                fs::create_dir_all(&to_path)
+                    .with_context(|| format!("failed creating directory {}", to_path.display()))?;
+                queue.push_back((from_path, to_path));
+            } else if file_type.is_file() {
+                fs::copy(&from_path, &to_path).with_context(|| {
+                    format!(
+                        "failed copying file from {} to {}",
+                        from_path.display(),
+                        to_path.display()
+                    )
+                })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_staged_registry_layout(staged_root: &Path, source_name: &str) -> Result<()> {
+    let registry_pub = staged_root.join("registry.pub");
+    if !registry_pub.is_file() {
+        anyhow::bail!(
+            "source-snapshot-missing: source '{}' missing registry.pub in {}",
+            source_name,
+            staged_root.display()
+        );
+    }
+
+    let index_root = staged_root.join("index");
+    if !index_root.is_dir() {
+        anyhow::bail!(
+            "source-snapshot-missing: source '{}' missing index/ in {}",
+            source_name,
+            staged_root.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn verify_metadata_signature_policy(staged_root: &Path, source_name: &str) -> Result<()> {
+    let index_root = staged_root.join("index");
+    for entry in fs::read_dir(&index_root).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed reading index {}",
+            source_name,
+            index_root.display()
+        )
+    })? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let package = entry.file_name().to_string_lossy().to_string();
+        RegistryIndex::open(staged_root)
+            .package_versions(&package)
+            .with_context(|| {
+                format!(
+                    "source-metadata-invalid: source '{}' package '{}' failed signature validation",
+                    source_name, package
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+fn count_manifest_files(index_root: &Path) -> Result<u64> {
+    let mut count = 0_u64;
+    let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    queue.push_back(index_root.to_path_buf());
+
+    while let Some(dir) = queue.pop_front() {
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed reading index directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                queue.push_back(path);
+            } else if file_type.is_file()
+                && path.extension().and_then(|value| value.to_str()) == Some("toml")
+            {
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SourceSnapshotFile {
+    version: u32,
+    source: String,
+    snapshot_id: String,
+    updated_at_unix: u64,
+    manifest_count: u64,
+    status: String,
+}
+
+fn write_snapshot_file(
+    cache_root: &Path,
+    source_name: &str,
+    snapshot_id: &str,
+    manifest_count: u64,
+) -> Result<()> {
+    let snapshot_path = cache_root.join("snapshot.json");
+    let snapshot = SourceSnapshotFile {
+        version: 1,
+        source: source_name.to_string(),
+        snapshot_id: snapshot_id.to_string(),
+        updated_at_unix: current_unix_timestamp(),
+        manifest_count,
+        status: "ready".to_string(),
+    };
+    let content = serde_json::to_string_pretty(&snapshot).with_context(|| {
+        format!(
+            "source-sync-failed: source '{}' failed serializing snapshot {}",
+            source_name,
+            snapshot_path.display()
+        )
+    })?;
+    fs::write(&snapshot_path, content).with_context(|| {
+        format!(
+            "source-sync-failed: source '{}' failed writing snapshot {}",
+            source_name,
+            snapshot_path.display()
+        )
+    })
+}
+
+fn read_snapshot_id(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let parsed = serde_json::from_str::<SourceSnapshotFile>(&content).ok()?;
+    Some(parsed.snapshot_id)
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 #[derive(Debug, Clone)]
@@ -348,7 +737,10 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
 
-    use super::{RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore};
+    use super::{
+        RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
+        SourceUpdateStatus,
+    };
 
     #[test]
     fn source_store_add_rejects_duplicate_name() {
@@ -718,6 +1110,162 @@ mod tests {
     }
 
     #[test]
+    fn update_filesystem_source_writes_ready_snapshot() {
+        let root = test_registry_root();
+        let source_root = filesystem_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        store
+            .add_source(filesystem_source_record(
+                "local",
+                source_root
+                    .to_str()
+                    .expect("filesystem source path must be valid UTF-8"),
+                sha256_hex_bytes(&registry_pub),
+                0,
+            ))
+            .expect("must add source");
+
+        let results = store.update_sources(&[]).expect("must update source");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "local");
+        assert_eq!(results[0].status, SourceUpdateStatus::Updated);
+
+        let cache_root = root.join("cache").join("local");
+        assert!(cache_root.join("registry.pub").exists());
+        assert!(cache_root.join("index").exists());
+
+        let snapshot_path = cache_root.join("snapshot.json");
+        let snapshot_content =
+            fs::read_to_string(&snapshot_path).expect("must write snapshot.json");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&snapshot_content).expect("must parse snapshot.json");
+        assert_eq!(snapshot["source"], "local");
+        assert_eq!(snapshot["status"], "ready");
+        assert_eq!(snapshot["manifest_count"], 1);
+        assert_eq!(snapshot["snapshot_id"], results[0].snapshot_id.as_str());
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_filesystem_source_fails_on_fingerprint_mismatch() {
+        let root = test_registry_root();
+        let source_root = filesystem_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        store
+            .add_source(filesystem_source_record(
+                "local",
+                source_root
+                    .to_str()
+                    .expect("filesystem source path must be valid UTF-8"),
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+                0,
+            ))
+            .expect("must add source");
+
+        let results = store
+            .update_sources(&[])
+            .expect("update API must report per-source failure");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+        assert!(results[0]
+            .error
+            .as_deref()
+            .expect("must include error message")
+            .contains("source-key-fingerprint-mismatch"));
+        assert!(!root.join("cache").join("local").exists());
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_filesystem_source_preserves_existing_cache_on_failure() {
+        let root = test_registry_root();
+        let source_root = filesystem_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let fingerprint = sha256_hex_bytes(&registry_pub);
+        store
+            .add_source(filesystem_source_record(
+                "local",
+                source_root
+                    .to_str()
+                    .expect("filesystem source path must be valid UTF-8"),
+                fingerprint,
+                0,
+            ))
+            .expect("must add source");
+
+        let first = store
+            .update_sources(&[])
+            .expect("must update source initially");
+        assert_eq!(first[0].status, SourceUpdateStatus::Updated);
+
+        fs::remove_file(
+            source_root
+                .join("index")
+                .join("ripgrep")
+                .join("14.1.0.toml.sig"),
+        )
+        .expect("must remove signature to force verification failure");
+
+        let second = store
+            .update_sources(&[])
+            .expect("update API must report per-source failure");
+        assert_eq!(second[0].status, SourceUpdateStatus::Failed);
+
+        let cached_signature = root
+            .join("cache")
+            .join("local")
+            .join("index")
+            .join("ripgrep")
+            .join("14.1.0.toml.sig");
+        assert!(
+            cached_signature.exists(),
+            "must preserve previous verified cache on update failure"
+        );
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_unknown_source_returns_source_not_found() {
+        let root = test_registry_root();
+        let source_root = filesystem_source_fixture();
+        let store = RegistrySourceStore::new(&root);
+
+        let registry_pub =
+            fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        store
+            .add_source(filesystem_source_record(
+                "local",
+                source_root
+                    .to_str()
+                    .expect("filesystem source path must be valid UTF-8"),
+                sha256_hex_bytes(&registry_pub),
+                0,
+            ))
+            .expect("must add source");
+
+        let err = store
+            .update_sources(&[String::from("missing")])
+            .expect_err("must reject unknown source names");
+        assert!(err.to_string().contains("source-not-found"));
+
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn search_names_fails_when_registry_public_key_is_missing() {
         let root = test_registry_root();
         let package_dir = root.join("index").join("ripgrep");
@@ -891,6 +1439,40 @@ version = "{version}"
             enabled: true,
             priority,
         }
+    }
+
+    fn filesystem_source_record(
+        name: &str,
+        location: &str,
+        fingerprint_sha256: String,
+        priority: u32,
+    ) -> RegistrySourceRecord {
+        RegistrySourceRecord {
+            name: name.to_string(),
+            kind: RegistrySourceKind::Filesystem,
+            location: location.to_string(),
+            fingerprint_sha256,
+            enabled: true,
+            priority,
+        }
+    }
+
+    fn filesystem_source_fixture() -> PathBuf {
+        let root = test_registry_root();
+        let package_dir = root.join("index").join("ripgrep");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+
+        let signing_key = signing_key();
+        let public_key_hex = public_key_hex(&signing_key);
+        fs::write(root.join("registry.pub"), public_key_hex.as_bytes())
+            .expect("must write registry public key");
+        write_signed_manifest(&package_dir, &signing_key, "14.1.0");
+
+        root
+    }
+
+    fn sha256_hex_bytes(bytes: &[u8]) -> String {
+        crosspack_security::sha256_hex(bytes)
     }
 
     fn test_registry_root() -> PathBuf {
