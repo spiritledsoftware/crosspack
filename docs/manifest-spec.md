@@ -20,11 +20,20 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `url`: artifact download location.
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
-- `signature` (optional in v0.1): detached signature reference.
+- `signature` (optional in v0.1): artifact-level detached signature reference.
 - `archive` (optional): archive type override (`zip`, `tar.gz`, `tar.zst`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
+
+## Registry Metadata Signing
+
+- Registry metadata signing is strict and enabled by default.
+- The trusted registry key file is `registry.pub` at the registry root.
+- Every manifest file `<version>.toml` must have a detached sidecar signature file `<version>.toml.sig`.
+- Sidecar signatures are stored as hex-encoded detached signature bytes.
+- Commands that rely on registry metadata fail closed on missing/invalid key or signature material.
+- `artifact.signature` is separate from registry metadata sidecar signatures and applies only to downloaded artifacts.
 
 ### Artifact Binary Fields
 

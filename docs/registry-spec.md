@@ -6,13 +6,16 @@ Crosspack starts with a Git-backed static index.
 
 ```text
 index/
+  registry.pub
   <package-name>/
     <version>.toml
+    <version>.toml.sig
 ```
 
 Examples:
 
 - `index/ripgrep/14.1.0.toml`
+- `index/ripgrep/14.1.0.toml.sig`
 - `index/fd/10.2.0.toml`
 
 ## Sync Strategy
@@ -29,4 +32,8 @@ Examples:
 ## Security Baseline
 
 - Artifacts must include SHA-256 digests.
-- Registry metadata signing is required before v0.1 release.
+- Registry metadata signing is strict and enabled by default.
+- The trusted public key is `registry.pub` at the registry root.
+- Each manifest must have a detached signature sidecar at `<version>.toml.sig`.
+- The sidecar format is hex-encoded detached signature bytes.
+- Operations that rely on registry metadata fail closed on signature or key errors.

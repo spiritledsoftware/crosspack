@@ -2,28 +2,32 @@
 
 `crosspack install <name[@constraint]>` executes this sequence:
 
-1. Resolve package graph from registry manifests:
+1. Verify registry metadata before resolution:
+   - trust `registry.pub` from the registry root,
+   - require `<version>.toml.sig` detached sidecar for each manifest,
+   - verify sidecar signatures from hex-encoded signature data.
+2. Resolve package graph from registry manifests:
    - merge dependency constraints transitively,
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
-2. Select artifact for each resolved package for requested target (`--target` or host triple).
-3. Determine archive type (`artifact.archive` or infer from URL suffix).
-4. For each resolved package, resolve cache path at:
+3. Select artifact for each resolved package for requested target (`--target` or host triple).
+4. Determine archive type (`artifact.archive` or infer from URL suffix).
+5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
-5. Download artifact if needed (or if `--force-redownload`).
-6. Verify artifact SHA-256 against manifest `sha256`.
-7. Extract archive into temporary state directory.
-8. Apply `strip_components` during staging copy.
-9. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
-10. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
-11. Expose declared binaries:
-   - Unix: symlink `<prefix>/bin/<name>` to installed package path.
-   - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
-12. Remove stale previously-owned binaries no longer declared for that package.
-13. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
-    - set `install_reason=root` for requested roots,
-    - set `install_reason=dependency` for transitive-only packages,
-    - preserve existing `install_reason=root` when upgrading already-rooted packages.
+6. Download artifact if needed (or if `--force-redownload`).
+7. Verify artifact SHA-256 against manifest `sha256`.
+8. Extract archive into temporary state directory.
+9. Apply `strip_components` during staging copy.
+10. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
+11. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
+12. Expose declared binaries:
+    - Unix: symlink `<prefix>/bin/<name>` to installed package path.
+    - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
+13. Remove stale previously-owned binaries no longer declared for that package.
+14. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+     - set `install_reason=root` for requested roots,
+     - set `install_reason=dependency` for transitive-only packages,
+     - preserve existing `install_reason=root` when upgrading already-rooted packages.
 
 `upgrade` with no package argument runs a single global dependency solve across all installed roots.
 
@@ -44,6 +48,7 @@
 ## Failure Handling
 
 - Checksum mismatch: cached artifact is removed and install fails.
+- Registry key/signature validation failure: install/upgrade and other metadata-dependent operations fail closed.
 - Unsupported archive type: install fails with actionable message.
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
