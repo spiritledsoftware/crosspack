@@ -38,3 +38,11 @@ Examples:
 - The sidecar format is hex-encoded detached signature bytes.
 - Operations that rely on registry metadata fail closed on signature or key errors.
 - If the entire registry root content is compromised (including `registry.pub`), this model does not provide authenticity guarantees for that compromised root.
+
+## Planned Source Management Extensions
+
+The current layout describes a single registry root. Planned v0.3 source management adds multiple configured sources, local snapshot caching, and explicit key fingerprint pinning.
+
+- Source configuration and CLI workflow: `docs/source-management-spec.md`.
+- Dependency policy behavior that builds on source precedence: `docs/dependency-policy-spec.md`.
+- Transactional install/upgrade behavior that binds to one snapshot id: `docs/transaction-rollback-spec.md`.

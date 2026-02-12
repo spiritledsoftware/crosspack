@@ -57,3 +57,11 @@ Default user prefixes:
 ## Deferred Items
 
 - Multi-profile uninstall policies beyond root/dependency receipts.
+
+## Milestone Specs (Planned)
+
+The next architecture milestones are specified in dedicated docs. These are design targets and are not fully implemented yet.
+
+- Source management, trust pinning, and snapshot updates: `docs/source-management-spec.md`.
+- Dependency policy (`provides`, `conflicts`, `replaces`) and provider resolution: `docs/dependency-policy-spec.md`.
+- Transaction journal, rollback, and crash recovery: `docs/transaction-rollback-spec.md`.

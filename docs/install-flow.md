@@ -6,6 +6,7 @@
    - trust `registry.pub` from the registry root,
    - require `<version>.toml.sig` detached sidecar for each manifest,
    - verify sidecar signatures from hex-encoded signature data.
+   - planned v0.3 extension: resolve from verified local source snapshots (see `docs/source-management-spec.md`).
 2. Resolve package graph from registry manifests:
    - merge dependency constraints transitively,
    - apply pin constraints to root and transitive packages,
@@ -82,3 +83,11 @@
 - `crosspack upgrade` upgrades all installed root packages with one solve per target group, preserving each group's target triple from receipts.
 - `crosspack upgrade` fails if grouped solves would touch the same package name across different targets; with current package-name keyed state, use separate prefixes for cross-target installs.
 - If a package is already current (or only older/equal versions match constraints), upgrade reports it as up to date.
+
+## Forward-Looking Extensions
+
+The current flow is the v0.2 baseline. Planned extensions are specified in:
+
+- Source-management and snapshot update behavior: `docs/source-management-spec.md`.
+- Dependency policy and replacement/provider behavior: `docs/dependency-policy-spec.md`.
+- Transaction journal, rollback, and crash recovery behavior: `docs/transaction-rollback-spec.md`.

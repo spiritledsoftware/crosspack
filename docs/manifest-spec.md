@@ -35,6 +35,15 @@ Each package version is represented by a TOML manifest stored in the registry in
 - Commands that rely on registry metadata fail closed on missing/invalid key or signature material.
 - `artifact.signature` is separate from registry metadata sidecar signatures and applies only to downloaded artifacts.
 
+## Planned Policy Extensions
+
+The following schema and policy additions are planned but not part of the v0.2 baseline:
+
+- v0.4 dependency policy fields (`provides`, `conflicts`, `replaces`): `docs/dependency-policy-spec.md`.
+- v0.5 optional artifact signature enforcement policy details: `docs/transaction-rollback-spec.md`.
+
+Until these milestones land, manifests should use the current v0.2 field set documented above.
+
 ### Artifact Binary Fields
 
 - `name`: exposed command name placed into `<prefix>/bin/`.
