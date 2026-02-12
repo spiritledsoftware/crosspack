@@ -992,22 +992,27 @@ impl ConfiguredRegistryIndex {
     pub fn open(state_root: impl Into<PathBuf>) -> Result<Self> {
         let state_root = state_root.into();
         let sources_path = state_root.join("sources.toml");
-        let has_sources_file = sources_path.exists();
-        let state = if has_sources_file {
-            let content = fs::read_to_string(&sources_path).with_context(|| {
-                format!(
-                    "failed reading configured registry sources: {}",
-                    sources_path.display()
-                )
-            })?;
-            parse_source_state_file(&content).with_context(|| {
-                format!(
-                    "failed parsing configured registry sources: {}",
-                    sources_path.display()
-                )
-            })?
-        } else {
-            RegistrySourceStateFile::default()
+        let (state, has_sources_file) = match fs::read_to_string(&sources_path) {
+            Ok(content) => {
+                let state = parse_source_state_file(&content).with_context(|| {
+                    format!(
+                        "failed parsing configured registry sources: {}",
+                        sources_path.display()
+                    )
+                })?;
+                (state, true)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                (RegistrySourceStateFile::default(), false)
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed reading configured registry sources: {}",
+                        sources_path.display()
+                    )
+                });
+            }
         };
 
         let mut enabled_sources: Vec<RegistrySourceRecord> = state
@@ -1985,6 +1990,21 @@ mod tests {
         let err = ConfiguredRegistryIndex::open(&state_root)
             .expect_err("must fail when no enabled source has a ready snapshot");
         assert!(err.to_string().contains("no ready snapshot"));
+
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn configured_index_open_fails_when_sources_file_is_unreadable() {
+        let state_root = test_registry_root();
+        fs::create_dir_all(state_root.join("sources.toml"))
+            .expect("must make sources path unreadable");
+
+        let err = ConfiguredRegistryIndex::open(&state_root)
+            .expect_err("must fail when sources state cannot be read");
+        assert!(err
+            .to_string()
+            .contains("failed reading configured registry sources"));
 
         let _ = fs::remove_dir_all(&state_root);
     }
