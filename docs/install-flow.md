@@ -21,6 +21,9 @@
    - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
 12. Remove stale previously-owned binaries no longer declared for that package.
 13. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+    - set `install_reason=root` for requested roots,
+    - set `install_reason=dependency` for transitive-only packages,
+    - preserve existing `install_reason=root` when upgrading already-rooted packages.
 
 `upgrade` with no package argument runs a single global dependency solve across all installed roots.
 
@@ -34,6 +37,7 @@
 - `cache_path` (optional)
 - `exposed_bin` (repeated, optional)
 - `dependency` (repeated `name@version`, optional)
+- `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
 - `installed_at_unix`
 
@@ -46,10 +50,24 @@
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 
+## Uninstall Flow
+
+`crosspack uninstall <name>` executes this sequence:
+
+1. Read all receipts and build a dependency graph from receipt dependencies.
+2. Compute reachability from all remaining root receipts.
+3. If target package is still reachable from any remaining root, block uninstall and report sorted blocking roots.
+4. Otherwise remove the requested package and prune orphaned dependency closure no longer reachable from any remaining root.
+5. For all removed packages:
+   - remove package directories and exposed binaries,
+   - remove receipt files,
+   - collect cache paths from receipts.
+6. Remove cache files that are no longer referenced by any remaining receipt.
+7. Return deterministic uninstall result including status, pruned dependency names, and blocking roots (if blocked).
+
 ## Current Limits
 
 - Pin constraints are simple per-package semver requirements stored as files.
-- Dependency-aware uninstall and orphan cleanup are not implemented yet.
 
 ## Upgrade and Pin
 

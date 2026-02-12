@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -24,8 +24,32 @@ pub struct InstallReceipt {
     pub artifact_sha256: Option<String>,
     pub cache_path: Option<String>,
     pub exposed_bins: Vec<String>,
+    pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallReason {
+    Root,
+    Dependency,
+}
+
+impl InstallReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Dependency => "dependency",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "root" => Ok(Self::Root),
+            "dependency" => Ok(Self::Dependency),
+            _ => Err(anyhow!("invalid install_reason: {value}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +57,7 @@ pub enum UninstallStatus {
     NotInstalled,
     Uninstalled,
     RepairedStaleState,
+    BlockedByDependents,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +65,8 @@ pub struct UninstallResult {
     pub name: String,
     pub version: Option<String>,
     pub status: UninstallStatus,
+    pub pruned_dependencies: Vec<String>,
+    pub blocked_by_roots: Vec<String>,
 }
 
 impl PrefixLayout {
@@ -206,6 +233,10 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     for exposed_bin in &receipt.exposed_bins {
         payload.push_str(&format!("exposed_bin={}\n", exposed_bin));
     }
+    payload.push_str(&format!(
+        "install_reason={}\n",
+        receipt.install_reason.as_str()
+    ));
     payload.push_str(&format!("install_status={}\n", receipt.install_status));
     payload.push_str(&format!(
         "installed_at_unix={}\n",
@@ -330,51 +361,126 @@ pub fn remove_pin(layout: &PrefixLayout, name: &str) -> Result<bool> {
 }
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
-    let receipt_path = layout.receipt_path(name);
-    if !receipt_path.exists() {
+    let receipts = read_install_receipts(layout)?;
+    let Some(target_receipt) = receipts
+        .iter()
+        .find(|receipt| receipt.name == name)
+        .cloned()
+    else {
         return Ok(UninstallResult {
             name: name.to_string(),
             version: None,
             status: UninstallStatus::NotInstalled,
+            pruned_dependencies: Vec::new(),
+            blocked_by_roots: Vec::new(),
+        });
+    };
+
+    let receipt_map: HashMap<String, InstallReceipt> = receipts
+        .iter()
+        .cloned()
+        .map(|receipt| (receipt.name.clone(), receipt))
+        .collect();
+    let dependencies = dependency_map(&receipt_map);
+
+    let remaining_roots = receipt_map
+        .values()
+        .filter(|receipt| receipt.name != name)
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .map(|receipt| receipt.name.clone())
+        .collect::<Vec<_>>();
+    let reachable = reachable_packages(&remaining_roots, &dependencies);
+
+    if reachable.contains(name) {
+        let mut blocked_by_roots = remaining_roots
+            .iter()
+            .filter(|root| package_reachable(root, name, &dependencies))
+            .cloned()
+            .collect::<Vec<_>>();
+        blocked_by_roots.sort();
+        blocked_by_roots.dedup();
+        return Ok(UninstallResult {
+            name: target_receipt.name,
+            version: Some(target_receipt.version),
+            status: UninstallStatus::BlockedByDependents,
+            pruned_dependencies: Vec::new(),
+            blocked_by_roots,
         });
     }
 
-    let raw = fs::read_to_string(&receipt_path)
-        .with_context(|| format!("failed to read install receipt: {}", receipt_path.display()))?;
-    let receipt = parse_receipt(&raw).with_context(|| {
-        format!(
-            "failed to parse install receipt: {}",
-            receipt_path.display()
-        )
-    })?;
+    let target_closure = reachable_packages(&[name.to_string()], &dependencies);
+    let mut pruned_dependencies = target_closure
+        .iter()
+        .filter(|entry| entry.as_str() != name)
+        .filter(|entry| !reachable.contains(entry.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    pruned_dependencies.sort();
 
-    let package_dir = layout.package_dir(&receipt.name, &receipt.version);
-    let package_existed = package_dir.exists();
-    if package_existed {
-        fs::remove_dir_all(&package_dir)
-            .with_context(|| format!("failed to remove package dir: {}", package_dir.display()))?;
+    let mut removal_names = Vec::with_capacity(pruned_dependencies.len() + 1);
+    removal_names.push(name.to_string());
+    removal_names.extend(pruned_dependencies.iter().cloned());
+    let removal_names_set: HashSet<&str> = removal_names.iter().map(String::as_str).collect();
+
+    let mut target_status = UninstallStatus::RepairedStaleState;
+    let mut removed_cache_paths = Vec::new();
+    for removal_name in &removal_names {
+        let Some(receipt) = receipt_map.get(removal_name) else {
+            continue;
+        };
+
+        if removal_name == name {
+            target_status = remove_receipt_artifacts(layout, receipt)?;
+        } else {
+            let _ = remove_receipt_artifacts(layout, receipt)?;
+        }
+        if let Some(cache_path) = &receipt.cache_path {
+            removed_cache_paths.push(cache_path.clone());
+        }
     }
 
-    for exposed_bin in &receipt.exposed_bins {
-        remove_exposed_binary(layout, exposed_bin)?;
+    let referenced_cache_paths: HashSet<String> = receipt_map
+        .iter()
+        .filter(|(receipt_name, _)| !removal_names_set.contains(receipt_name.as_str()))
+        .filter_map(|(_, receipt)| receipt.cache_path.clone())
+        .collect();
+    for cache_path in removed_cache_paths {
+        if referenced_cache_paths.contains(&cache_path) {
+            continue;
+        }
+        if let Some(cache_path) = safe_cache_prune_path(layout, &cache_path) {
+            remove_file_if_exists(&cache_path)
+                .with_context(|| format!("failed to prune cache file: {}", cache_path.display()))?;
+        }
     }
-
-    fs::remove_file(&receipt_path).with_context(|| {
-        format!(
-            "failed to remove install receipt: {}",
-            receipt_path.display()
-        )
-    })?;
 
     Ok(UninstallResult {
-        name: receipt.name,
-        version: Some(receipt.version),
-        status: if package_existed {
-            UninstallStatus::Uninstalled
-        } else {
-            UninstallStatus::RepairedStaleState
-        },
+        name: target_receipt.name,
+        version: Some(target_receipt.version),
+        status: target_status,
+        pruned_dependencies,
+        blocked_by_roots: Vec::new(),
     })
+}
+
+fn safe_cache_prune_path(layout: &PrefixLayout, cache_path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(cache_path);
+    if !path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+
+    let artifacts_dir = layout.artifacts_cache_dir();
+    if !path.starts_with(&artifacts_dir) {
+        return None;
+    }
+
+    Some(path)
 }
 
 fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
@@ -386,6 +492,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut artifact_sha256 = None;
     let mut cache_path = None;
     let mut exposed_bins = Vec::new();
+    let mut install_reason = None;
     let mut install_status = None;
     let mut installed_at_unix = None;
 
@@ -402,6 +509,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
             "artifact_sha256" => artifact_sha256 = Some(v.to_string()),
             "cache_path" => cache_path = Some(v.to_string()),
             "exposed_bin" => exposed_bins.push(v.to_string()),
+            "install_reason" => install_reason = Some(InstallReason::parse(v)?),
             "install_status" => install_status = Some(v.to_string()),
             "installed_at_unix" => {
                 installed_at_unix = Some(v.parse().context("installed_at_unix must be u64")?)
@@ -419,9 +527,98 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         artifact_sha256,
         cache_path,
         exposed_bins,
+        install_reason: install_reason.unwrap_or(InstallReason::Root),
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
         installed_at_unix: installed_at_unix.context("missing installed_at_unix")?,
     })
+}
+
+fn remove_receipt_artifacts(
+    layout: &PrefixLayout,
+    receipt: &InstallReceipt,
+) -> Result<UninstallStatus> {
+    let package_dir = layout.package_dir(&receipt.name, &receipt.version);
+    let package_existed = package_dir.exists();
+    if package_existed {
+        fs::remove_dir_all(&package_dir)
+            .with_context(|| format!("failed to remove package dir: {}", package_dir.display()))?;
+    }
+
+    for exposed_bin in &receipt.exposed_bins {
+        remove_exposed_binary(layout, exposed_bin)?;
+    }
+
+    let receipt_path = layout.receipt_path(&receipt.name);
+    fs::remove_file(&receipt_path).with_context(|| {
+        format!(
+            "failed to remove install receipt: {}",
+            receipt_path.display()
+        )
+    })?;
+
+    Ok(if package_existed {
+        UninstallStatus::Uninstalled
+    } else {
+        UninstallStatus::RepairedStaleState
+    })
+}
+
+fn dependency_map(receipts: &HashMap<String, InstallReceipt>) -> HashMap<String, BTreeSet<String>> {
+    receipts
+        .iter()
+        .map(|(name, receipt)| {
+            let deps = receipt
+                .dependencies
+                .iter()
+                .filter_map(|entry| parse_dependency_name(entry))
+                .filter(|dep| receipts.contains_key(*dep))
+                .map(ToOwned::to_owned)
+                .collect::<BTreeSet<_>>();
+            (name.clone(), deps)
+        })
+        .collect()
+}
+
+fn parse_dependency_name(entry: &str) -> Option<&str> {
+    entry.split_once('@').map(|(name, _)| name)
+}
+
+fn reachable_packages(
+    roots: &[String],
+    dependencies: &HashMap<String, BTreeSet<String>>,
+) -> HashSet<String> {
+    let mut visited = HashSet::new();
+    let mut stack = roots.to_vec();
+    while let Some(next) = stack.pop() {
+        if !visited.insert(next.clone()) {
+            continue;
+        }
+        if let Some(next_deps) = dependencies.get(&next) {
+            stack.extend(next_deps.iter().cloned());
+        }
+    }
+    visited
+}
+
+fn package_reachable(
+    root: &str,
+    target: &str,
+    dependencies: &HashMap<String, BTreeSet<String>>,
+) -> bool {
+    let mut visited = HashSet::new();
+    let mut stack = vec![root.to_string()];
+    while let Some(next) = stack.pop() {
+        if next == target {
+            return true;
+        }
+        if !visited.insert(next.clone()) {
+            continue;
+        }
+        if let Some(next_deps) = dependencies.get(&next) {
+            stack.extend(next_deps.iter().cloned());
+        }
+    }
+    false
 }
 
 pub fn bin_path(layout: &PrefixLayout, binary_name: &str) -> PathBuf {
@@ -769,8 +966,8 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         expose_binary, parse_receipt, read_all_pins, read_pin, remove_exposed_binary, remove_pin,
-        strip_rel_components, uninstall_package, write_install_receipt, write_pin, InstallReceipt,
-        PrefixLayout, UninstallStatus,
+        strip_rel_components, uninstall_package, write_install_receipt, write_pin, InstallReason,
+        InstallReceipt, PrefixLayout, UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -784,16 +981,18 @@ mod tests {
         assert!(receipt.dependencies.is_empty());
         assert_eq!(receipt.install_status, "installed");
         assert!(receipt.target.is_none());
+        assert_eq!(receipt.install_reason, InstallReason::Root);
     }
 
     #[test]
     fn parse_new_receipt_shape() {
-        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_status=installed\ninstalled_at_unix=123\n";
+        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
         let receipt = parse_receipt(raw).expect("must parse");
         assert_eq!(receipt.dependencies, vec!["zlib@2.1.0", "pcre2@10.44.0"]);
         assert_eq!(receipt.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
         assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
+        assert_eq!(receipt.install_reason, InstallReason::Dependency);
     }
 
     #[test]
@@ -845,6 +1044,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
             },
@@ -888,6 +1088,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
             },
@@ -917,6 +1118,259 @@ mod tests {
         assert!(package_dir.exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_blocks_when_required_by_remaining_root() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let result = uninstall_package(&layout, "shared").expect("must evaluate dependencies");
+        assert_eq!(result.status, UninstallStatus::BlockedByDependents);
+        assert_eq!(result.blocked_by_roots, vec!["app"]);
+        assert!(layout.receipt_path("shared").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_prunes_orphans_when_root_removed() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let result = uninstall_package(&layout, "app").expect("must uninstall root and orphan");
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert_eq!(result.pruned_dependencies, vec!["shared"]);
+        assert!(!layout.receipt_path("app").exists());
+        assert!(!layout.receipt_path("shared").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_keeps_shared_dependency_for_other_root() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app-a",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "app-b",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let result = uninstall_package(&layout, "app-a").expect("must uninstall app-a only");
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(result.pruned_dependencies.is_empty());
+        assert!(!layout.receipt_path("app-a").exists());
+        assert!(layout.receipt_path("app-b").exists());
+        assert!(layout.receipt_path("shared").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_prunes_unreferenced_cache_paths() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let cache_path = layout
+            .cache_dir()
+            .join("artifacts")
+            .join("shared")
+            .join("1.0.0")
+            .join("x86_64-unknown-linux-gnu")
+            .join("artifact.tar.zst");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).expect("must create cache dir");
+        }
+        fs::write(&cache_path, b"artifact").expect("must create cache file");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            Some(cache_path.to_string_lossy().to_string()),
+        );
+
+        let result = uninstall_package(&layout, "app").expect("must uninstall root and orphan");
+        assert_eq!(result.pruned_dependencies, vec!["shared"]);
+        assert!(!cache_path.exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_keeps_cache_when_still_referenced() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let cache_path = layout
+            .cache_dir()
+            .join("artifacts")
+            .join("shared")
+            .join("1.0.0")
+            .join("x86_64-unknown-linux-gnu")
+            .join("artifact.tar.zst");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).expect("must create cache dir");
+        }
+        fs::write(&cache_path, b"artifact").expect("must create cache file");
+
+        write_receipt(
+            &layout,
+            "app-a",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "app-b",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            Some(cache_path.to_string_lossy().to_string()),
+        );
+
+        uninstall_package(&layout, "app-a").expect("must uninstall only app-a");
+        assert!(cache_path.exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_skips_pruning_cache_path_outside_artifacts_dir() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let outside_cache_path = layout.prefix().join("outside-cache-file");
+        fs::write(&outside_cache_path, b"artifact").expect("must create outside cache file");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            Some(outside_cache_path.to_string_lossy().to_string()),
+        );
+
+        let result = uninstall_package(&layout, "app").expect("must ignore unsafe cache prune");
+        assert_eq!(result.pruned_dependencies, vec!["shared"]);
+        assert!(outside_cache_path.exists());
+        assert!(!layout.receipt_path("app").exists());
+        assert!(!layout.receipt_path("shared").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    fn write_receipt(
+        layout: &PrefixLayout,
+        name: &str,
+        version: &str,
+        dependencies: &[&str],
+        install_reason: InstallReason,
+        cache_path: Option<String>,
+    ) {
+        let package_dir = layout.package_dir(name, version);
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        write_install_receipt(
+            layout,
+            &InstallReceipt {
+                name: name.to_string(),
+                version: version.to_string(),
+                dependencies: dependencies.iter().map(|v| (*v).to_string()).collect(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path,
+                exposed_bins: Vec::new(),
+                install_reason,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
     }
 
     fn test_layout() -> PrefixLayout {

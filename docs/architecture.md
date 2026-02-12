@@ -44,9 +44,11 @@ Default user prefixes:
   - `--force-redownload` to bypass artifact cache.
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed packages (`upgrade`) with a global dependency solve while honoring pins.
-- `uninstall` removes installed package content by receipt and is idempotent when package is not installed.
+- `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
+- `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
+- `uninstall` prunes unreferenced artifact cache files for removed packages.
 - `list` reads install receipts from `<prefix>/state/installed/`.
 
 ## Deferred Items
 
-- Dependency-aware uninstall and cache pruning.
+- Multi-profile uninstall policies beyond root/dependency receipts.

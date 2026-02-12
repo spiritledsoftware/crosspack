@@ -9,8 +9,8 @@ use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
     bin_path, current_unix_timestamp, default_user_prefix, expose_binary, install_from_artifact,
     read_all_pins, read_install_receipts, remove_exposed_binary, remove_file_if_exists,
-    uninstall_package, write_install_receipt, write_pin, InstallReceipt, PrefixLayout,
-    UninstallStatus,
+    uninstall_package, write_install_receipt, write_pin, InstallReason, InstallReceipt,
+    PrefixLayout, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::RegistryIndex;
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
@@ -26,6 +26,8 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
+
+const NO_ROOT_PACKAGES_TO_UPGRADE: &str = "No root packages installed";
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -94,10 +96,20 @@ fn main() -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
             let roots = vec![RootInstallRequest { name, requirement }];
+            let root_names = roots
+                .iter()
+                .map(|root| root.name.clone())
+                .collect::<Vec<_>>();
             let resolved = resolve_install_graph(&layout, &index, &roots, target.as_deref())?;
             for package in &resolved {
                 let dependencies = build_dependency_receipts(package, &resolved);
-                let outcome = install_resolved(&layout, package, &dependencies, force_redownload)?;
+                let outcome = install_resolved(
+                    &layout,
+                    package,
+                    &dependencies,
+                    &root_names,
+                    force_redownload,
+                )?;
                 print_install_outcome(&outcome);
             }
         }
@@ -128,6 +140,7 @@ fn main() -> Result<()> {
                         name: installed_receipt.name.clone(),
                         requirement,
                     }];
+                    let root_names = Vec::new();
                     let resolved = resolve_install_graph(
                         &layout,
                         &index,
@@ -154,7 +167,8 @@ fn main() -> Result<()> {
                         }
 
                         let dependencies = build_dependency_receipts(package, &resolved);
-                        let outcome = install_resolved(&layout, package, &dependencies, false)?;
+                        let outcome =
+                            install_resolved(&layout, package, &dependencies, &root_names, false)?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
                             println!(
@@ -166,12 +180,14 @@ fn main() -> Result<()> {
                     }
                 }
                 None => {
-                    let roots = receipts
+                    let roots = build_upgrade_roots(&receipts);
+                    if roots.is_empty() {
+                        println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
+                        return Ok(());
+                    }
+                    let root_names = roots
                         .iter()
-                        .map(|receipt| RootInstallRequest {
-                            name: receipt.name.clone(),
-                            requirement: VersionReq::STAR,
-                        })
+                        .map(|root| root.name.clone())
                         .collect::<Vec<_>>();
 
                     let mut targets = receipts
@@ -213,7 +229,8 @@ fn main() -> Result<()> {
                         }
 
                         let dependencies = build_dependency_receipts(package, &resolved);
-                        let outcome = install_resolved(&layout, package, &dependencies, false)?;
+                        let outcome =
+                            install_resolved(&layout, package, &dependencies, &root_names, false)?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
                             println!(
@@ -236,21 +253,8 @@ fn main() -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let result = uninstall_package(&layout, &name)?;
 
-            match result.status {
-                UninstallStatus::NotInstalled => {
-                    println!("{name} is not installed");
-                }
-                UninstallStatus::Uninstalled => {
-                    let version = result.version.unwrap_or_else(|| "unknown".to_string());
-                    println!("uninstalled {} {}", result.name, version);
-                }
-                UninstallStatus::RepairedStaleState => {
-                    let version = result.version.unwrap_or_else(|| "unknown".to_string());
-                    println!(
-                        "removed stale state for {} {} (package files already missing)",
-                        result.name, version
-                    );
-                }
+            for line in format_uninstall_messages(&result) {
+                println!("{line}");
             }
         }
         Commands::List => {
@@ -439,6 +443,7 @@ fn install_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
     dependency_receipts: &[String],
+    root_names: &[String],
     force_redownload: bool,
 ) -> Result<InstallOutcome> {
     let receipts = read_install_receipts(layout)?;
@@ -499,6 +504,7 @@ fn install_resolved(
         artifact_sha256: Some(resolved.artifact.sha256.clone()),
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
+        install_reason: determine_install_reason(&resolved.manifest.name, root_names, &receipts),
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
@@ -624,6 +630,63 @@ fn build_dependency_receipts(
         .collect::<Vec<_>>();
     deps.sort();
     deps
+}
+
+fn determine_install_reason(
+    package_name: &str,
+    root_names: &[String],
+    existing_receipts: &[InstallReceipt],
+) -> InstallReason {
+    if root_names.iter().any(|root| root == package_name) {
+        return InstallReason::Root;
+    }
+
+    if let Some(existing) = existing_receipts
+        .iter()
+        .find(|receipt| receipt.name == package_name)
+    {
+        return existing.install_reason.clone();
+    }
+
+    InstallReason::Dependency
+}
+
+fn build_upgrade_roots(receipts: &[InstallReceipt]) -> Vec<RootInstallRequest> {
+    receipts
+        .iter()
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .map(|receipt| RootInstallRequest {
+            name: receipt.name.clone(),
+            requirement: VersionReq::STAR,
+        })
+        .collect()
+}
+
+fn format_uninstall_messages(result: &UninstallResult) -> Vec<String> {
+    let version = result.version.as_deref().unwrap_or("unknown");
+    let mut lines = match result.status {
+        UninstallStatus::NotInstalled => vec![format!("{} is not installed", result.name)],
+        UninstallStatus::Uninstalled => vec![format!("uninstalled {} {}", result.name, version)],
+        UninstallStatus::RepairedStaleState => vec![format!(
+            "removed stale state for {} {} (package files already missing)",
+            result.name, version
+        )],
+        UninstallStatus::BlockedByDependents => vec![format!(
+            "cannot uninstall {} {}: still required by roots {}",
+            result.name,
+            version,
+            result.blocked_by_roots.join(", ")
+        )],
+    };
+
+    if !result.pruned_dependencies.is_empty() {
+        lines.push(format!(
+            "pruned orphan dependencies: {}",
+            result.pruned_dependencies.join(", ")
+        ));
+    }
+
+    lines
 }
 
 fn enforce_no_downgrades(
@@ -774,11 +837,14 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_no_downgrades, parse_pin_spec, select_manifest_with_pin, validate_binary_preflight,
-        ResolvedInstall,
+        build_upgrade_roots, determine_install_reason, enforce_no_downgrades,
+        format_uninstall_messages, parse_pin_spec, select_manifest_with_pin,
+        validate_binary_preflight, ResolvedInstall,
     };
     use crosspack_core::{ArchiveType, PackageManifest};
-    use crosspack_installer::{bin_path, InstallReceipt, PrefixLayout};
+    use crosspack_installer::{
+        bin_path, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
+    };
     use semver::VersionReq;
     use std::fs;
 
@@ -836,6 +902,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
         }];
@@ -875,6 +942,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
         }];
@@ -895,11 +963,152 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
         }];
         let resolved = vec![resolved_install("tool", "1.2.0")];
         enforce_no_downgrades(&receipts, &resolved, "upgrade").expect("must pass");
+    }
+
+    #[test]
+    fn determine_install_reason_sets_requested_root() {
+        let reason = determine_install_reason("tool", &["tool".to_string()], &[]);
+        assert_eq!(reason, InstallReason::Root);
+    }
+
+    #[test]
+    fn determine_install_reason_sets_dependency_for_non_root() {
+        let reason = determine_install_reason("shared", &["app".to_string()], &[]);
+        assert_eq!(reason, InstallReason::Dependency);
+    }
+
+    #[test]
+    fn determine_install_reason_preserves_existing_root() {
+        let existing = vec![InstallReceipt {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let reason = determine_install_reason("shared", &["app".to_string()], &existing);
+        assert_eq!(reason, InstallReason::Root);
+    }
+
+    #[test]
+    fn determine_install_reason_promotes_to_root_when_requested() {
+        let existing = vec![InstallReceipt {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let reason = determine_install_reason("shared", &["shared".to_string()], &existing);
+        assert_eq!(reason, InstallReason::Root);
+    }
+
+    #[test]
+    fn build_upgrade_roots_uses_only_root_receipts() {
+        let receipts = vec![
+            InstallReceipt {
+                name: "app".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: vec!["shared@1.0.0".to_string()],
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+            InstallReceipt {
+                name: "shared".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                install_reason: InstallReason::Dependency,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        ];
+
+        let roots = build_upgrade_roots(&receipts);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].name, "app");
+    }
+
+    #[test]
+    fn build_upgrade_roots_is_empty_when_no_roots_installed() {
+        let receipts = vec![InstallReceipt {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let roots = build_upgrade_roots(&receipts);
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn format_uninstall_messages_reports_blocking_roots() {
+        let result = UninstallResult {
+            name: "shared".to_string(),
+            version: Some("1.0.0".to_string()),
+            status: UninstallStatus::BlockedByDependents,
+            pruned_dependencies: Vec::new(),
+            blocked_by_roots: vec!["app-a".to_string(), "app-b".to_string()],
+        };
+
+        let lines = format_uninstall_messages(&result);
+        assert_eq!(
+            lines,
+            vec!["cannot uninstall shared 1.0.0: still required by roots app-a, app-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_uninstall_messages_reports_pruned_dependencies() {
+        let result = UninstallResult {
+            name: "app".to_string(),
+            version: Some("1.0.0".to_string()),
+            status: UninstallStatus::Uninstalled,
+            pruned_dependencies: vec!["shared".to_string(), "zlib".to_string()],
+            blocked_by_roots: Vec::new(),
+        };
+
+        let lines = format_uninstall_messages(&result);
+        assert_eq!(lines[0], "uninstalled app 1.0.0");
+        assert_eq!(lines[1], "pruned orphan dependencies: shared, zlib");
     }
 
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
