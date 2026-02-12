@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -118,10 +119,9 @@ struct RegistrySourceStateFile {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RegistrySourceStateFileCompat {
-    Versioned(RegistrySourceStateFile),
-    Legacy { sources: Vec<RegistrySourceRecord> },
+struct RegistrySourceStateFileLegacy {
+    #[serde(default)]
+    sources: Vec<RegistrySourceRecord>,
 }
 
 impl Default for RegistrySourceStateFile {
@@ -134,17 +134,35 @@ impl Default for RegistrySourceStateFile {
 }
 
 fn parse_source_state_file(content: &str) -> Result<RegistrySourceStateFile> {
-    let state = toml::from_str::<RegistrySourceStateFileCompat>(content)?;
-    Ok(match state {
-        RegistrySourceStateFileCompat::Versioned(mut state) => {
-            state.version = state_file_version();
-            state
+    let value = toml::from_str::<toml::Value>(content)?;
+    let mut state = if value.get("version").is_some() {
+        let parsed = value
+            .clone()
+            .try_into::<RegistrySourceStateFile>()
+            .context("failed parsing versioned source state")?;
+        let expected = state_file_version();
+        if parsed.version != expected {
+            anyhow::bail!(
+                "unsupported source state version {} (expected {}): update sources.toml to version {}",
+                parsed.version,
+                expected,
+                expected
+            );
         }
-        RegistrySourceStateFileCompat::Legacy { sources } => RegistrySourceStateFile {
+        parsed
+    } else {
+        let parsed = value
+            .try_into::<RegistrySourceStateFileLegacy>()
+            .context("failed parsing legacy source state")?;
+        RegistrySourceStateFile {
             version: state_file_version(),
-            sources,
-        },
-    })
+            sources: parsed.sources,
+        }
+    };
+
+    validate_loaded_sources(&state.sources)?;
+    state.version = state_file_version();
+    Ok(state)
 }
 
 fn state_file_version() -> u32 {
@@ -186,6 +204,23 @@ fn validate_source_name(name: &str) -> Result<()> {
 fn validate_source_fingerprint(fingerprint: &str) -> Result<()> {
     if fingerprint.len() != 64 || !fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()) {
         anyhow::bail!("invalid source fingerprint: '{fingerprint}'");
+    }
+
+    Ok(())
+}
+
+fn validate_loaded_sources(sources: &[RegistrySourceRecord]) -> Result<()> {
+    let mut seen_names: HashSet<&str> = HashSet::with_capacity(sources.len());
+    for source in sources {
+        validate_source_name(&source.name)?;
+        validate_source_fingerprint(&source.fingerprint_sha256)?;
+
+        if !seen_names.insert(source.name.as_str()) {
+            anyhow::bail!(
+                "duplicate source name '{}' in sources.toml: remove or rename one entry",
+                source.name
+            );
+        }
     }
 
     Ok(())
@@ -528,6 +563,103 @@ mod tests {
             .list_sources()
             .expect_err("must reject negative source priority");
         assert!(err.to_string().contains("failed parsing source state"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_rejects_duplicate_names_in_loaded_state() {
+        let root = test_registry_root();
+        fs::create_dir_all(&root).expect("must create state root");
+        fs::write(
+            root.join("sources.toml"),
+            concat!(
+                "version = 1\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/official.git\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "priority = 1\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/official-mirror.git\"\n",
+                "fingerprint_sha256 = \"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\"\n",
+                "priority = 2\n"
+            ),
+        )
+        .expect("must write duplicate source state file");
+
+        let store = RegistrySourceStore::new(&root);
+        let err = store
+            .list_sources()
+            .expect_err("must reject duplicate source names from disk");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("duplicate source name 'official'"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_rejects_invalid_fingerprint_in_loaded_state() {
+        let root = test_registry_root();
+        fs::create_dir_all(&root).expect("must create state root");
+        fs::write(
+            root.join("sources.toml"),
+            concat!(
+                "version = 1\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/official.git\"\n",
+                "fingerprint_sha256 = \"xyz\"\n",
+                "priority = 1\n"
+            ),
+        )
+        .expect("must write invalid fingerprint state file");
+
+        let store = RegistrySourceStore::new(&root);
+        let err = store
+            .list_sources()
+            .expect_err("must reject invalid source fingerprint from disk");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("invalid source fingerprint"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_rejects_unknown_state_file_version() {
+        let root = test_registry_root();
+        fs::create_dir_all(&root).expect("must create state root");
+        fs::write(
+            root.join("sources.toml"),
+            concat!(
+                "version = 7\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"git\"\n",
+                "location = \"https://example.com/official.git\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "priority = 1\n"
+            ),
+        )
+        .expect("must write unknown version state file");
+
+        let store = RegistrySourceStore::new(&root);
+        let err = store
+            .list_sources()
+            .expect_err("must reject unknown source state schema version");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("unsupported source state version"),
+            "expected explicit unsupported version error, got: {err}"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
