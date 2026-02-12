@@ -181,6 +181,8 @@ dependencies = [
  "crosspack-security",
  "ed25519-dalek",
  "hex",
+ "serde",
+ "toml",
 ]
 
 [[package]]

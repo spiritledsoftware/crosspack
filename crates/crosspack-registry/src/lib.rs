@@ -4,6 +4,142 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use crosspack_core::PackageManifest;
 use crosspack_security::verify_ed25519_signature_hex;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistrySourceKind {
+    Git,
+    Filesystem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrySourceRecord {
+    pub name: String,
+    pub kind: RegistrySourceKind,
+    pub location: String,
+    pub fingerprint: String,
+    pub priority: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistrySourceStore {
+    state_root: PathBuf,
+}
+
+impl RegistrySourceStore {
+    pub fn new(state_root: impl Into<PathBuf>) -> Self {
+        Self {
+            state_root: state_root.into(),
+        }
+    }
+
+    pub fn add_source(&self, source: RegistrySourceRecord) -> Result<()> {
+        validate_source_name(&source.name)?;
+        validate_source_fingerprint(&source.fingerprint)?;
+
+        let mut state = self.load_state()?;
+        if state
+            .sources
+            .iter()
+            .any(|existing| existing.name == source.name)
+        {
+            anyhow::bail!("source '{}' already exists", source.name);
+        }
+
+        state.sources.push(source);
+        sort_sources(&mut state.sources);
+        self.save_state(&state)
+    }
+
+    pub fn list_sources(&self) -> Result<Vec<RegistrySourceRecord>> {
+        let mut state = self.load_state()?;
+        sort_sources(&mut state.sources);
+        Ok(state.sources)
+    }
+
+    pub fn remove_source(&self, name: &str) -> Result<()> {
+        let mut state = self.load_state()?;
+        let before = state.sources.len();
+        state.sources.retain(|source| source.name != name);
+        if state.sources.len() == before {
+            anyhow::bail!("source '{}' not found", name);
+        }
+
+        sort_sources(&mut state.sources);
+        self.save_state(&state)
+    }
+
+    fn sources_file_path(&self) -> PathBuf {
+        self.state_root.join("sources.toml")
+    }
+
+    fn load_state(&self) -> Result<RegistrySourceStateFile> {
+        let path = self.sources_file_path();
+        if !path.exists() {
+            return Ok(RegistrySourceStateFile::default());
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed reading source state: {}", path.display()))?;
+        let mut state: RegistrySourceStateFile = toml::from_str(&content)
+            .with_context(|| format!("failed parsing source state: {}", path.display()))?;
+        sort_sources(&mut state.sources);
+        Ok(state)
+    }
+
+    fn save_state(&self, state: &RegistrySourceStateFile) -> Result<()> {
+        fs::create_dir_all(&self.state_root).with_context(|| {
+            format!(
+                "failed creating source state root: {}",
+                self.state_root.display()
+            )
+        })?;
+
+        let path = self.sources_file_path();
+        let content = toml::to_string(state)
+            .with_context(|| format!("failed serializing source state: {}", path.display()))?;
+        fs::write(&path, content)
+            .with_context(|| format!("failed writing source state: {}", path.display()))
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct RegistrySourceStateFile {
+    #[serde(default)]
+    sources: Vec<RegistrySourceRecord>,
+}
+
+fn sort_sources(sources: &mut [RegistrySourceRecord]) {
+    sources.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+fn validate_source_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("invalid source name: must not be empty");
+    }
+
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+    {
+        anyhow::bail!("invalid source name: '{name}'");
+    }
+
+    Ok(())
+}
+
+fn validate_source_fingerprint(fingerprint: &str) -> Result<()> {
+    if fingerprint.len() != 64 || !fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid source fingerprint: '{fingerprint}'");
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct RegistryIndex {
@@ -127,7 +263,86 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
 
-    use super::RegistryIndex;
+    use super::{RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore};
+
+    #[test]
+    fn source_store_add_rejects_duplicate_name() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        store
+            .add_source(source_record("official", 10))
+            .expect("must add source");
+        let err = store
+            .add_source(source_record("official", 5))
+            .expect_err("must reject duplicate source name");
+        assert!(err.to_string().contains("already exists"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_add_rejects_invalid_name() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        let err = store
+            .add_source(source_record("bad name", 10))
+            .expect_err("must reject invalid source name");
+        assert!(err.to_string().contains("invalid source name"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_add_rejects_invalid_fingerprint() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        let mut record = source_record("official", 10);
+        record.fingerprint = "xyz".to_string();
+        let err = store
+            .add_source(record)
+            .expect_err("must reject invalid fingerprint");
+        assert!(err.to_string().contains("invalid source fingerprint"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_list_sorts_by_priority_then_name() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        store
+            .add_source(source_record("zeta", 10))
+            .expect("must add source");
+        store
+            .add_source(source_record("alpha", 1))
+            .expect("must add source");
+        store
+            .add_source(source_record("beta", 10))
+            .expect("must add source");
+
+        let listed = store.list_sources().expect("must list sources");
+        let names: Vec<&str> = listed.iter().map(|record| record.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "zeta"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_remove_reports_missing_source() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+
+        let err = store
+            .remove_source("missing")
+            .expect_err("must report missing source");
+        assert!(err.to_string().contains("not found"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn search_names_fails_when_registry_public_key_is_missing() {
@@ -291,6 +506,17 @@ version = "{version}"
 
     fn public_key_hex(signing_key: &SigningKey) -> String {
         hex::encode(signing_key.verifying_key().to_bytes())
+    }
+
+    fn source_record(name: &str, priority: i32) -> RegistrySourceRecord {
+        RegistrySourceRecord {
+            name: name.to_string(),
+            kind: RegistrySourceKind::Git,
+            location: format!("https://example.com/{name}.git"),
+            fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            priority,
+        }
     }
 
     fn test_registry_root() -> PathBuf {
