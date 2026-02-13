@@ -48,6 +48,30 @@ pub struct SourceUpdateResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrySourceWithSnapshotState {
+    pub source: RegistrySourceRecord,
+    pub snapshot: RegistrySourceSnapshotState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrySourceSnapshotState {
+    None,
+    Ready {
+        snapshot_id: String,
+    },
+    Error {
+        status: RegistrySourceWithSnapshotStatus,
+        reason_code: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrySourceWithSnapshotStatus {
+    Unreadable,
+    Invalid,
+}
+
 impl RegistrySourceStore {
     pub fn new(state_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -77,6 +101,19 @@ impl RegistrySourceStore {
         let mut state = self.load_state()?;
         sort_sources(&mut state.sources);
         Ok(state.sources)
+    }
+
+    pub fn list_sources_with_snapshot_state(&self) -> Result<Vec<RegistrySourceWithSnapshotState>> {
+        let mut state = self.load_state()?;
+        sort_sources(&mut state.sources);
+
+        let mut listed = Vec::with_capacity(state.sources.len());
+        for source in state.sources {
+            let cache_root = self.state_root.join("cache").join(&source.name);
+            let snapshot = read_snapshot_state(&cache_root);
+            listed.push(RegistrySourceWithSnapshotState { source, snapshot });
+        }
+        Ok(listed)
     }
 
     pub fn remove_source(&self, name: &str) -> Result<()> {
@@ -862,6 +899,43 @@ fn read_snapshot_id(path: &Path) -> Option<String> {
     Some(parsed.snapshot_id)
 }
 
+fn read_snapshot_state(cache_root: &Path) -> RegistrySourceSnapshotState {
+    let snapshot_path = cache_root.join("snapshot.json");
+    let content = match fs::read_to_string(&snapshot_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return RegistrySourceSnapshotState::None;
+        }
+        Err(_) => {
+            return RegistrySourceSnapshotState::Error {
+                status: RegistrySourceWithSnapshotStatus::Unreadable,
+                reason_code: "snapshot-unreadable".to_string(),
+            };
+        }
+    };
+
+    let snapshot = match serde_json::from_str::<SourceSnapshotFile>(&content) {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            return RegistrySourceSnapshotState::Error {
+                status: RegistrySourceWithSnapshotStatus::Unreadable,
+                reason_code: "snapshot-unreadable".to_string(),
+            };
+        }
+    };
+
+    if snapshot.status == "ready" {
+        return RegistrySourceSnapshotState::Ready {
+            snapshot_id: snapshot.snapshot_id,
+        };
+    }
+
+    RegistrySourceSnapshotState::Error {
+        status: RegistrySourceWithSnapshotStatus::Invalid,
+        reason_code: "snapshot-invalid".to_string(),
+    }
+}
+
 fn current_unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1129,7 +1203,8 @@ mod tests {
     use super::{
         combine_replace_restore_errors, derive_snapshot_id_from_full_git_sha,
         ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
-        RegistrySourceStore, SourceUpdateStatus,
+        RegistrySourceSnapshotState, RegistrySourceStore, RegistrySourceWithSnapshotStatus,
+        SourceUpdateStatus,
     };
 
     #[test]
@@ -1226,6 +1301,89 @@ mod tests {
         let listed = store.list_sources().expect("must list sources");
         let names: Vec<&str> = listed.iter().map(|record| record.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta", "zeta"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_list_sources_with_snapshot_state_returns_none_when_snapshot_missing() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+        store
+            .add_source(source_record("official", 1))
+            .expect("must add source");
+
+        let listed = store
+            .list_sources_with_snapshot_state()
+            .expect("must list source states");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source.name, "official");
+        assert_eq!(listed[0].snapshot, RegistrySourceSnapshotState::None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_list_sources_with_snapshot_state_returns_ready_snapshot() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+        store
+            .add_source(source_record("official", 1))
+            .expect("must add source");
+
+        let cache_root = root.join("cache").join("official");
+        fs::create_dir_all(&cache_root).expect("must create cache root");
+        fs::write(
+            cache_root.join("snapshot.json"),
+            r#"{
+  "version": 1,
+  "source": "official",
+  "snapshot_id": "git:0123456789abcdef",
+  "updated_at_unix": 1,
+  "manifest_count": 0,
+  "status": "ready"
+}"#,
+        )
+        .expect("must write snapshot file");
+
+        let listed = store
+            .list_sources_with_snapshot_state()
+            .expect("must list source states");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].snapshot,
+            RegistrySourceSnapshotState::Ready {
+                snapshot_id: "git:0123456789abcdef".to_string()
+            }
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_store_list_sources_with_snapshot_state_maps_invalid_snapshot_to_error_reason_code() {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
+        store
+            .add_source(source_record("official", 1))
+            .expect("must add source");
+
+        let cache_root = root.join("cache").join("official");
+        fs::create_dir_all(&cache_root).expect("must create cache root");
+        fs::write(cache_root.join("snapshot.json"), "{not-json")
+            .expect("must write invalid snapshot");
+
+        let listed = store
+            .list_sources_with_snapshot_state()
+            .expect("must list source states");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].snapshot,
+            RegistrySourceSnapshotState::Error {
+                status: RegistrySourceWithSnapshotStatus::Unreadable,
+                reason_code: "snapshot-unreadable".to_string(),
+            }
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

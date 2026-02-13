@@ -13,8 +13,8 @@ use crosspack_installer::{
     PrefixLayout, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
-    RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
-    SourceUpdateResult, SourceUpdateStatus,
+    RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState,
+    RegistrySourceStore, RegistrySourceWithSnapshotState, SourceUpdateResult, SourceUpdateStatus,
 };
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
@@ -351,23 +351,33 @@ fn main() -> Result<()> {
                     priority,
                     fingerprint,
                 } => {
+                    let source_kind: RegistrySourceKind = kind.into();
+                    let kind_label = format_registry_kind(source_kind.clone());
+                    let output_lines =
+                        format_registry_add_lines(&name, kind_label, priority, &fingerprint);
                     store.add_source(RegistrySourceRecord {
                         name,
-                        kind: kind.into(),
+                        kind: source_kind,
                         location,
                         fingerprint_sha256: fingerprint,
                         enabled: true,
                         priority,
                     })?;
+                    for line in output_lines {
+                        println!("{line}");
+                    }
                 }
                 RegistryCommands::List => {
-                    let sources = store.list_sources()?;
+                    let sources = store.list_sources_with_snapshot_state()?;
                     for line in format_registry_list_lines(sources) {
                         println!("{line}");
                     }
                 }
                 RegistryCommands::Remove { name, purge_cache } => {
                     store.remove_source_with_cache_purge(&name, purge_cache)?;
+                    for line in format_registry_remove_lines(&name, purge_cache) {
+                        println!("{line}");
+                    }
                 }
             }
         }
@@ -376,17 +386,7 @@ fn main() -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let source_state_root = registry_state_root(&layout);
             let store = RegistrySourceStore::new(&source_state_root);
-            let results = store.update_sources(&registry)?;
-
-            let report = build_update_report(&results);
-            for line in report.lines {
-                println!("{line}");
-            }
-            println!(
-                "{}",
-                format_update_summary_line(report.updated, report.up_to_date, report.failed)
-            );
-            ensure_update_succeeded(report.failed)?;
+            run_update_command(&store, &registry)?;
         }
         Commands::Doctor => {
             let prefix = default_user_prefix()?;
@@ -482,23 +482,76 @@ fn update_failure_reason_code(error: Option<&str>) -> String {
     "unknown".to_string()
 }
 
-fn format_registry_list_lines(mut sources: Vec<RegistrySourceRecord>) -> Vec<String> {
+fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Result<()> {
+    let results = store.update_sources(registry)?;
+    let report = build_update_report(&results);
+    for line in report.lines {
+        println!("{line}");
+    }
+    println!(
+        "{}",
+        format_update_summary_line(report.updated, report.up_to_date, report.failed)
+    );
+    ensure_update_succeeded(report.failed)
+}
+
+fn format_registry_kind(kind: RegistrySourceKind) -> &'static str {
+    match kind {
+        RegistrySourceKind::Git => "git",
+        RegistrySourceKind::Filesystem => "filesystem",
+    }
+}
+
+fn format_registry_add_lines(
+    name: &str,
+    kind: &str,
+    priority: u32,
+    fingerprint: &str,
+) -> Vec<String> {
+    let prefix: String = fingerprint.chars().take(16).collect();
+    vec![
+        format!("added registry {name}"),
+        format!("kind: {kind}"),
+        format!("priority: {priority}"),
+        format!("fingerprint: {prefix}..."),
+    ]
+}
+
+fn format_registry_remove_lines(name: &str, purge_cache: bool) -> Vec<String> {
+    let cache_state = if purge_cache { "purged" } else { "kept" };
+    vec![
+        format!("removed registry {name}"),
+        format!("cache: {cache_state}"),
+    ]
+}
+
+fn format_registry_list_snapshot_state(snapshot: &RegistrySourceSnapshotState) -> String {
+    match snapshot {
+        RegistrySourceSnapshotState::None => "none".to_string(),
+        RegistrySourceSnapshotState::Ready { snapshot_id } => format!("ready:{snapshot_id}"),
+        RegistrySourceSnapshotState::Error { reason_code, .. } => format!("error:{reason_code}"),
+    }
+}
+
+fn format_registry_list_lines(mut sources: Vec<RegistrySourceWithSnapshotState>) -> Vec<String> {
     sources.sort_by(|left, right| {
-        left.priority
-            .cmp(&right.priority)
-            .then_with(|| left.name.cmp(&right.name))
+        left.source
+            .priority
+            .cmp(&right.source.priority)
+            .then_with(|| left.source.name.cmp(&right.source.name))
     });
 
     sources
         .into_iter()
         .map(|source| {
-            let kind = match source.kind {
-                RegistrySourceKind::Git => "git",
-                RegistrySourceKind::Filesystem => "filesystem",
-            };
+            let kind = format_registry_kind(source.source.kind.clone());
             format!(
-                "{}\t{}\t{}\t{}",
-                source.name, kind, source.priority, source.location
+                "{} kind={} priority={} location={} snapshot={}",
+                source.source.name,
+                kind,
+                source.source.priority,
+                source.source.location,
+                format_registry_list_snapshot_state(&source.snapshot)
             )
         })
         .collect()
@@ -1114,9 +1167,11 @@ mod tests {
     use super::{
         build_update_report, build_upgrade_plans, build_upgrade_roots, determine_install_reason,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_update_succeeded,
-        format_registry_list_lines, format_uninstall_messages, format_update_summary_line,
-        parse_pin_spec, select_manifest_with_pin, update_failure_reason_code,
-        validate_binary_preflight, Cli, CliRegistryKind, Commands, ResolvedInstall,
+        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
+        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
+        parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
+        update_failure_reason_code, validate_binary_preflight, Cli, CliRegistryKind, Commands,
+        ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1124,10 +1179,13 @@ mod tests {
         bin_path, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
-        RegistrySourceKind, RegistrySourceRecord, SourceUpdateResult, SourceUpdateStatus,
+        RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
+        RegistrySourceWithSnapshotState, RegistrySourceWithSnapshotStatus, SourceUpdateResult,
+        SourceUpdateStatus,
     };
     use semver::VersionReq;
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn parse_pin_spec_requires_constraint() {
@@ -1680,29 +1738,122 @@ sha256 = "def"
     #[test]
     fn registry_list_output_is_sorted() {
         let sources = vec![
-            RegistrySourceRecord {
-                name: "zeta".to_string(),
-                kind: RegistrySourceKind::Git,
-                location: "https://example.test/zeta.git".to_string(),
-                fingerprint_sha256:
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-                enabled: true,
-                priority: 10,
+            RegistrySourceWithSnapshotState {
+                source: RegistrySourceRecord {
+                    name: "zeta".to_string(),
+                    kind: RegistrySourceKind::Git,
+                    location: "https://example.test/zeta.git".to_string(),
+                    fingerprint_sha256:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_string(),
+                    enabled: true,
+                    priority: 10,
+                },
+                snapshot: RegistrySourceSnapshotState::Ready {
+                    snapshot_id: "git:0123456789abcdef".to_string(),
+                },
             },
-            RegistrySourceRecord {
-                name: "alpha".to_string(),
-                kind: RegistrySourceKind::Filesystem,
-                location: "/tmp/alpha".to_string(),
-                fingerprint_sha256:
-                    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
-                enabled: true,
-                priority: 1,
+            RegistrySourceWithSnapshotState {
+                source: RegistrySourceRecord {
+                    name: "alpha".to_string(),
+                    kind: RegistrySourceKind::Filesystem,
+                    location: "/tmp/alpha".to_string(),
+                    fingerprint_sha256:
+                        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                            .to_string(),
+                    enabled: true,
+                    priority: 1,
+                },
+                snapshot: RegistrySourceSnapshotState::None,
             },
         ];
 
         let lines = format_registry_list_lines(sources);
-        assert_eq!(lines[0], "alpha\tfilesystem\t1\t/tmp/alpha");
-        assert_eq!(lines[1], "zeta\tgit\t10\thttps://example.test/zeta.git");
+        assert_eq!(
+            lines[0],
+            "alpha kind=filesystem priority=1 location=/tmp/alpha snapshot=none"
+        );
+        assert_eq!(
+            lines[1],
+            "zeta kind=git priority=10 location=https://example.test/zeta.git snapshot=ready:git:0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn format_registry_add_lines_matches_source_management_spec() {
+        let lines = format_registry_add_lines(
+            "official",
+            "git",
+            10,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+
+        assert_eq!(
+            lines,
+            vec![
+                "added registry official".to_string(),
+                "kind: git".to_string(),
+                "priority: 10".to_string(),
+                "fingerprint: 0123456789abcdef...".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_registry_remove_lines_matches_source_management_spec() {
+        let lines = format_registry_remove_lines("official", true);
+        assert_eq!(lines, vec!["removed registry official", "cache: purged"]);
+
+        let lines = format_registry_remove_lines("official", false);
+        assert_eq!(lines, vec!["removed registry official", "cache: kept"]);
+    }
+
+    #[test]
+    fn format_registry_list_snapshot_error_line_uses_reason_code() {
+        let line = format_registry_list_snapshot_state(&RegistrySourceSnapshotState::Error {
+            status: RegistrySourceWithSnapshotStatus::Unreadable,
+            reason_code: "snapshot-unreadable".to_string(),
+        });
+        assert_eq!(line, "error:snapshot-unreadable");
+    }
+
+    #[test]
+    fn run_update_command_returns_err_on_partial_failure() {
+        let root = test_layout();
+        let store = RegistrySourceStore::new(registry_state_root(&root));
+
+        let ok_source = test_registry_source_dir("ok-source", true);
+        let bad_source = test_registry_source_dir("bad-source", false);
+
+        store
+            .add_source(RegistrySourceRecord {
+                name: "ok".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: ok_source.display().to_string(),
+                fingerprint_sha256:
+                    "f0cf90f634c31f8f43f56f3576d2f23f9f66d4b041e92f788bcbdbdbf4dcd89f".to_string(),
+                enabled: true,
+                priority: 1,
+            })
+            .expect("must add ok source");
+        store
+            .add_source(RegistrySourceRecord {
+                name: "bad".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: bad_source.display().to_string(),
+                fingerprint_sha256:
+                    "f0cf90f634c31f8f43f56f3576d2f23f9f66d4b041e92f788bcbdbdbf4dcd89f".to_string(),
+                enabled: true,
+                priority: 2,
+            })
+            .expect("must add bad source");
+
+        let err = run_update_command(&store, &[]).expect_err("partial failure must return err");
+        assert_eq!(err.to_string(), "source update failed");
+
+        let _ = std::fs::remove_dir_all(root.prefix());
+        let _ = std::fs::remove_dir_all(ok_source);
+        let _ = std::fs::remove_dir_all(bad_source);
     }
 
     #[test]
@@ -1785,5 +1936,20 @@ sha256 = "abc"
             nanos
         ));
         PrefixLayout::new(path)
+    }
+
+    fn test_registry_source_dir(name: &str, with_registry_pub: bool) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        path.push(format!("crosspack-cli-test-registry-{name}-{nanos}"));
+        std::fs::create_dir_all(path.join("index")).expect("must create index dir");
+        if with_registry_pub {
+            std::fs::write(path.join("registry.pub"), "test-key\n")
+                .expect("must write registry key");
+        }
+        path
     }
 }
