@@ -39,6 +39,8 @@ Each package version is represented by a TOML manifest stored in the registry in
 
 The following schema and policy additions are planned but not part of the v0.2 baseline:
 
+- v0.3 source management is an index/snapshot workflow change and does not add or modify manifest fields.
+
 - v0.4 dependency policy fields (`provides`, `conflicts`, `replaces`): `docs/dependency-policy-spec.md`.
 - v0.5 optional artifact signature enforcement policy details: `docs/transaction-rollback-spec.md`.
 
