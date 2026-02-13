@@ -1,12 +1,14 @@
-# Install Flow (v0.2)
+# Install Flow (v0.3)
 
 `crosspack install <name[@constraint]>` executes this sequence:
 
-1. Verify registry metadata before resolution:
+1. Select metadata backend, then verify registry metadata before resolution:
+   - with `--registry-root`, read from that root directly (legacy single-root mode),
+   - without `--registry-root`, read from configured snapshots under `<prefix>/state/registries/cache/`,
+   - if no configured source has a ready snapshot, fail with guidance to run `crosspack registry add` and `crosspack update`,
    - trust `registry.pub` from the registry root,
    - require `<version>.toml.sig` detached sidecar for each manifest,
    - verify sidecar signatures from hex-encoded signature data.
-   - planned v0.3 extension: resolve from verified local source snapshots (see `docs/source-management-spec.md`).
 2. Resolve package graph from registry manifests:
    - merge dependency constraints transitively,
    - apply pin constraints to root and transitive packages,
@@ -86,8 +88,7 @@
 
 ## Forward-Looking Extensions
 
-The current flow is the v0.2 baseline. Planned extensions are specified in:
+The current flow is the v0.3 baseline. Planned extensions are specified in:
 
-- Source-management and snapshot update behavior: `docs/source-management-spec.md`.
 - Dependency policy and replacement/provider behavior: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery behavior: `docs/transaction-rollback-spec.md`.

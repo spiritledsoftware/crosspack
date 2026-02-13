@@ -1,33 +1,45 @@
-# Registry Specification (Draft v0.1)
+# Registry Specification (Draft v0.3)
 
-Crosspack starts with a Git-backed static index.
+Crosspack uses configured registry sources with verified local snapshots.
 
 ## Directory Shape
 
 ```text
-registry.pub
-index/
-  <package-name>/
-    <version>.toml
-    <version>.toml.sig
+<prefix>/state/registries/
+  sources.toml
+  cache/
+    <source-name>/
+      registry.pub
+      index/
+        <package-name>/
+          <version>.toml
+          <version>.toml.sig
+      snapshot.json
 ```
 
-Examples:
+Legacy compatibility path when `--registry-root` is provided:
 
-- `index/ripgrep/14.1.0.toml`
-- `index/ripgrep/14.1.0.toml.sig`
-- `index/fd/10.2.0.toml`
+```text
+<registry-root>/
+  registry.pub
+  index/
+    <package-name>/
+      <version>.toml
+      <version>.toml.sig
+```
 
 ## Sync Strategy
 
-- Clone or fetch/pull the index repository locally.
-- Read manifests from local disk.
-- Keep a cached snapshot for deterministic resolution.
+- Configure sources via `crosspack registry add`.
+- Refresh snapshots via `crosspack update` (all sources by default, or selected via repeated `--registry <name>`).
+- Read manifests from local verified snapshots on disk.
+- Keep cached snapshots for deterministic resolution and source precedence.
 
 ## Version Discovery
 
-- Package versions are discovered by listing TOML files in `index/<package>/`.
+- Package versions are discovered by listing TOML files in snapshot `index/<package>/`.
 - Manifests are parsed and sorted by semantic version.
+- If the same package exists in multiple sources, source precedence is deterministic: lowest priority wins, then lexical source name tie-break.
 
 ## Security Baseline
 
@@ -39,10 +51,14 @@ Examples:
 - Operations that rely on registry metadata fail closed on signature or key errors.
 - If the entire registry root content is compromised (including `registry.pub`), this model does not provide authenticity guarantees for that compromised root.
 
-## Planned Source Management Extensions
+## Source Management Commands
 
-The current layout describes a single registry root. Planned v0.3 source management adds multiple configured sources, local snapshot caching, and explicit key fingerprint pinning.
+- `crosspack registry add <name> <location> --kind <git|filesystem> --priority <u32> --fingerprint <64-hex>`
+- `crosspack registry list`
+- `crosspack registry remove <name> [--purge-cache]`
+- `crosspack update [--registry <name>]...`
 
-- Source configuration and CLI workflow: `docs/source-management-spec.md`.
-- Dependency policy behavior that builds on source precedence: `docs/dependency-policy-spec.md`.
-- Transactional install/upgrade behavior that binds to one snapshot id: `docs/transaction-rollback-spec.md`.
+Metadata command fallback behavior:
+
+- `--registry-root` provided: use that root directly (legacy mode).
+- `--registry-root` omitted: require at least one configured source with a ready snapshot.

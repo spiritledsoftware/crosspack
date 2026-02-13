@@ -1,4 +1,4 @@
-# Crosspack Architecture (v0.2)
+# Crosspack Architecture (v0.3)
 
 Crosspack is a native, cross-platform package manager with first-class Windows support. It does not wrap existing package managers.
 
@@ -25,9 +25,9 @@ Default user prefixes:
 - macOS/Linux: `~/.crosspack`
 - Windows: `%LOCALAPPDATA%\\Crosspack`
 
-## Planned Lifecycle
+## Lifecycle
 
-1. Search and inspect package metadata from a Git-backed index.
+1. Search and inspect package metadata from configured verified source snapshots, or from `--registry-root` when explicitly overridden.
 2. Resolve dependencies using semver constraints.
 3. Download and verify artifacts. (implemented for direct package install)
 4. Extract to versioned package paths. (implemented for `zip`, `tar.gz`, `tar.zst`)
@@ -37,6 +37,14 @@ Default user prefixes:
 ## Current CLI Behavior
 
 - `search` and `info` query the local registry index.
+- Metadata command backend selection is:
+  - if `--registry-root` is set, read directly from that registry root (legacy single-root mode),
+  - otherwise read from configured snapshots under `<prefix>/state/registries/cache/`.
+- If `--registry-root` is not set and no configured source has a ready snapshot, metadata-dependent commands fail with guidance to run `crosspack registry add` and `crosspack update`.
+- `registry add <name> <location> --kind <git|filesystem> --priority <u32> --fingerprint <64-hex>` adds a source record.
+- `registry list` prints configured sources sorted by `(priority, name)` and includes snapshot state (`none`, `ready:<id>`, `error:<reason>`).
+- `registry remove <name> [--purge-cache]` removes a source and optionally deletes its cached snapshot.
+- `update [--registry <name>]...` refreshes all or selected sources and prints per-source status plus `update summary: updated=<n> up-to-date=<n> failed=<n>`.
 - Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root, which acts as the local trust anchor for that registry snapshot or mirror.
 - Every version manifest requires a detached hex signature sidecar at `<version>.toml.sig`.
 - Metadata-dependent commands fail closed on missing or invalid registry key/signature material.
@@ -58,10 +66,9 @@ Default user prefixes:
 
 - Multi-profile uninstall policies beyond root/dependency receipts.
 
-## Milestone Specs (Planned)
+## Milestone Specs
 
 The next architecture milestones are specified in dedicated docs. These are design targets and are not fully implemented yet.
 
-- Source management, trust pinning, and snapshot updates: `docs/source-management-spec.md`.
 - Dependency policy (`provides`, `conflicts`, `replaces`) and provider resolution: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery: `docs/transaction-rollback-spec.md`.
