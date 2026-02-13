@@ -13,8 +13,9 @@ use crosspack_installer::{
     PrefixLayout, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
-    RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState,
-    RegistrySourceStore, RegistrySourceWithSnapshotState, SourceUpdateResult, SourceUpdateStatus,
+    ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
+    RegistrySourceSnapshotState, RegistrySourceStore, RegistrySourceWithSnapshotState,
+    SourceUpdateResult, SourceUpdateStatus,
 };
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
@@ -31,6 +32,8 @@ struct Cli {
 }
 
 const NO_ROOT_PACKAGES_TO_UPGRADE: &str = "No root packages installed";
+const METADATA_CONFIG_GUIDANCE: &str =
+    "no configured registry snapshots available; run `crosspack registry add` and `crosspack update`";
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -109,16 +112,18 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Search { query } => {
-            let root = cli.registry_root.unwrap_or_else(|| PathBuf::from("."));
-            let index = RegistryIndex::open(root);
-            for name in index.search_names(&query)? {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
+            for name in backend.search_names(&query)? {
                 println!("{name}");
             }
         }
         Commands::Info { name } => {
-            let root = cli.registry_root.unwrap_or_else(|| PathBuf::from("."));
-            let index = RegistryIndex::open(root);
-            let versions = index.package_versions(&name)?;
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
+            let versions = backend.package_versions(&name)?;
 
             if versions.is_empty() {
                 println!("No package found: {name}");
@@ -135,18 +140,17 @@ fn main() -> Result<()> {
             force_redownload,
         } => {
             let (name, requirement) = parse_spec(&spec)?;
-            let root = cli.registry_root.unwrap_or_else(|| PathBuf::from("."));
-            let index = RegistryIndex::open(root);
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
+            let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
             let roots = vec![RootInstallRequest { name, requirement }];
             let root_names = roots
                 .iter()
                 .map(|root| root.name.clone())
                 .collect::<Vec<_>>();
-            let resolved = resolve_install_graph(&layout, &index, &roots, target.as_deref())?;
+            let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
             for package in &resolved {
                 let dependencies = build_dependency_receipts(package, &resolved);
                 let outcome = install_resolved(
@@ -160,12 +164,10 @@ fn main() -> Result<()> {
             }
         }
         Commands::Upgrade { spec } => {
-            let root = cli.registry_root.unwrap_or_else(|| PathBuf::from("."));
-            let index = RegistryIndex::open(root);
-
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
+            let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
 
             let receipts = read_install_receipts(&layout)?;
             if receipts.is_empty() {
@@ -189,7 +191,7 @@ fn main() -> Result<()> {
                     let root_names = Vec::new();
                     let resolved = resolve_install_graph(
                         &layout,
-                        &index,
+                        &backend,
                         &roots,
                         installed_receipt.target.as_deref(),
                     )?;
@@ -236,7 +238,7 @@ fn main() -> Result<()> {
                     for plan in &plans {
                         let resolved = resolve_install_graph(
                             &layout,
-                            &index,
+                            &backend,
                             &plan.roots,
                             plan.target.as_deref(),
                         )?;
@@ -410,7 +412,52 @@ fn main() -> Result<()> {
 }
 
 fn registry_state_root(layout: &PrefixLayout) -> PathBuf {
-    layout.state_dir().join("registry")
+    layout.state_dir().join("registries")
+}
+
+#[derive(Debug)]
+enum MetadataBackend {
+    Legacy(RegistryIndex),
+    Configured(ConfiguredRegistryIndex),
+}
+
+impl MetadataBackend {
+    fn search_names(&self, query: &str) -> Result<Vec<String>> {
+        match self {
+            Self::Legacy(index) => index.search_names(query),
+            Self::Configured(index) => index.search_names(query),
+        }
+    }
+
+    fn package_versions(&self, name: &str) -> Result<Vec<PackageManifest>> {
+        match self {
+            Self::Legacy(index) => index.package_versions(name),
+            Self::Configured(index) => index.package_versions(name),
+        }
+    }
+}
+
+fn select_metadata_backend(
+    registry_root_override: Option<&Path>,
+    layout: &PrefixLayout,
+) -> Result<MetadataBackend> {
+    if let Some(root) = registry_root_override {
+        return Ok(MetadataBackend::Legacy(RegistryIndex::open(root)));
+    }
+
+    let source_state_root = registry_state_root(layout);
+    let store = RegistrySourceStore::new(&source_state_root);
+    let sources = store.list_sources_with_snapshot_state()?;
+    let has_ready_snapshot = sources
+        .iter()
+        .any(|source| matches!(source.snapshot, RegistrySourceSnapshotState::Ready { .. }));
+    if sources.is_empty() || !has_ready_snapshot {
+        anyhow::bail!(METADATA_CONFIG_GUIDANCE);
+    }
+
+    let configured = ConfiguredRegistryIndex::open(source_state_root)
+        .with_context(|| "failed loading configured registry snapshots for metadata commands")?;
+    Ok(MetadataBackend::Configured(configured))
 }
 
 struct UpdateReport {
@@ -642,7 +689,7 @@ struct UpgradePlan {
 
 fn resolve_install_graph(
     layout: &PrefixLayout,
-    index: &RegistryIndex,
+    index: &MetadataBackend,
     roots: &[RootInstallRequest],
     requested_target: Option<&str>,
 ) -> Result<Vec<ResolvedInstall>> {
@@ -1170,8 +1217,8 @@ mod tests {
         format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
         parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
-        update_failure_reason_code, validate_binary_preflight, Cli, CliRegistryKind, Commands,
-        ResolvedInstall,
+        select_metadata_backend, update_failure_reason_code, validate_binary_preflight, Cli,
+        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1854,6 +1901,68 @@ sha256 = "def"
         let _ = std::fs::remove_dir_all(root.prefix());
         let _ = std::fs::remove_dir_all(ok_source);
         let _ = std::fs::remove_dir_all(bad_source);
+    }
+
+    #[test]
+    fn search_uses_registry_root_override_when_present() {
+        let layout = test_layout();
+        let override_root = PathBuf::from("/tmp/override-registry");
+
+        let backend = select_metadata_backend(Some(override_root.as_path()), &layout)
+            .expect("override backend must resolve");
+        assert!(matches!(backend, MetadataBackend::Legacy(_)));
+    }
+
+    #[test]
+    fn search_uses_configured_sources_without_registry_root() {
+        let layout = test_layout();
+        let state_root = registry_state_root(&layout);
+        std::fs::create_dir_all(state_root.join("cache/official/index/ripgrep"))
+            .expect("must create source cache structure");
+        std::fs::write(
+            state_root.join("sources.toml"),
+            concat!(
+                "version = 1\n",
+                "\n",
+                "[[sources]]\n",
+                "name = \"official\"\n",
+                "kind = \"filesystem\"\n",
+                "location = \"/tmp/official\"\n",
+                "fingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+                "enabled = true\n",
+                "priority = 1\n"
+            ),
+        )
+        .expect("must write configured sources file");
+        std::fs::write(
+            state_root.join("cache/official/snapshot.json"),
+            r#"{
+  "version": 1,
+  "source": "official",
+  "snapshot_id": "fs:test",
+  "updated_at_unix": 1,
+  "manifest_count": 0,
+  "status": "ready"
+}"#,
+        )
+        .expect("must write snapshot metadata");
+
+        let backend = select_metadata_backend(None, &layout)
+            .expect("configured backend must resolve without override");
+        assert!(matches!(backend, MetadataBackend::Configured(_)));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn metadata_commands_fail_with_guidance_when_no_sources_or_snapshots() {
+        let layout = test_layout();
+
+        let err = select_metadata_backend(None, &layout)
+            .expect_err("must fail when no configured metadata backend is available");
+        let rendered = err.to_string();
+        assert!(rendered.contains("crosspack registry add"));
+        assert!(rendered.contains("crosspack update"));
     }
 
     #[test]
