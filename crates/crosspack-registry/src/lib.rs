@@ -1935,12 +1935,11 @@ mod tests {
 
         let registry_pub =
             fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let source_location = git_fixture_location(&source_root);
         store
             .add_source(git_source_record(
                 "origin",
-                source_root
-                    .to_str()
-                    .expect("git source path must be valid UTF-8"),
+                &source_location,
                 sha256_hex_bytes(&registry_pub),
                 0,
             ))
@@ -1969,12 +1968,11 @@ mod tests {
 
         let registry_pub =
             fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let source_location = git_fixture_location(&source_root);
         store
             .add_source(git_source_record(
                 "origin",
-                source_root
-                    .to_str()
-                    .expect("git source path must be valid UTF-8"),
+                &source_location,
                 sha256_hex_bytes(&registry_pub),
                 0,
             ))
@@ -2024,12 +2022,11 @@ mod tests {
 
         let registry_pub =
             fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let source_location = git_fixture_location(&source_root);
         store
             .add_source(git_source_record(
                 "origin",
-                source_root
-                    .to_str()
-                    .expect("git source path must be valid UTF-8"),
+                &source_location,
                 sha256_hex_bytes(&registry_pub),
                 0,
             ))
@@ -2477,6 +2474,18 @@ version = "{version}"
         git_run(&root, &["add", "."]);
         git_commit_all(&root, "initial registry snapshot");
         root
+    }
+
+    fn git_fixture_location(path: &Path) -> String {
+        #[cfg(windows)]
+        {
+            path.to_string_lossy().replace('\\', "/")
+        }
+
+        #[cfg(not(windows))]
+        {
+            path.to_string_lossy().to_string()
+        }
     }
 
     fn git_head_short(repo_root: &Path) -> String {
