@@ -1206,6 +1206,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use ed25519_dalek::{Signer, SigningKey};
@@ -2564,16 +2565,20 @@ version = "{version}"
         .expect("must write snapshot metadata");
     }
 
+    static TEST_REGISTRY_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn test_registry_root() -> PathBuf {
         let mut path = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
+        let sequence = TEST_REGISTRY_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
         path.push(format!(
-            "crosspack-registry-tests-{}-{}",
+            "crosspack-registry-tests-{}-{}-{}",
             std::process::id(),
-            nanos
+            nanos,
+            sequence
         ));
         path
     }
