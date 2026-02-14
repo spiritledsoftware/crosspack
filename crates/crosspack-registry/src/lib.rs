@@ -396,8 +396,18 @@ impl RegistrySourceStore {
     }
 }
 
+fn base_git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg("core.autocrlf=false")
+        .arg("-c")
+        .arg("core.eol=lf");
+    command
+}
+
 fn run_git_clone(location: &str, destination: &Path, source_name: &str) -> Result<()> {
-    let output = Command::new("git")
+    let output = base_git_command()
         .arg("clone")
         .arg("--")
         .arg(location)
@@ -420,7 +430,7 @@ fn run_git_clone(location: &str, destination: &Path, source_name: &str) -> Resul
 }
 
 fn run_git_command(repo_root: &Path, args: &[&str], source_name: &str) -> Result<()> {
-    let output = Command::new("git")
+    let output = base_git_command()
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -443,7 +453,7 @@ fn run_git_command(repo_root: &Path, args: &[&str], source_name: &str) -> Result
 }
 
 fn git_head_snapshot_id(repo_root: &Path, source_name: &str) -> Result<String> {
-    let output = Command::new("git")
+    let output = base_git_command()
         .arg("rev-parse")
         .arg("HEAD")
         .current_dir(repo_root)
