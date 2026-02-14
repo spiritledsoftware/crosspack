@@ -100,6 +100,12 @@ pub struct PackageManifest {
     pub license: Option<String>,
     pub homepage: Option<String>,
     #[serde(default)]
+    pub provides: Vec<String>,
+    #[serde(default)]
+    pub conflicts: BTreeMap<String, VersionReq>,
+    #[serde(default)]
+    pub replaces: BTreeMap<String, VersionReq>,
+    #[serde(default)]
     pub dependencies: BTreeMap<String, VersionReq>,
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
@@ -107,13 +113,24 @@ pub struct PackageManifest {
 
 impl PackageManifest {
     pub fn from_toml_str(input: &str) -> anyhow::Result<Self> {
-        toml::from_str(input).context("failed to parse crosspack manifest")
+        let manifest: Self = toml::from_str(input).context("failed to parse crosspack manifest")?;
+        if manifest.conflicts.contains_key(&manifest.name) {
+            return Err(anyhow!(
+                "manifest '{}' conflicts with itself",
+                manifest.name
+            ));
+        }
+        if manifest.replaces.contains_key(&manifest.name) {
+            return Err(anyhow!("manifest '{}' replaces itself", manifest.name));
+        }
+        Ok(manifest)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ArchiveType, PackageManifest};
+    use semver::VersionReq;
 
     #[test]
     fn parse_manifest() {
@@ -121,6 +138,13 @@ mod tests {
 name = "ripgrep"
 version = "14.1.0"
 license = "MIT"
+provides = ["ripgrep", "rg"]
+
+[conflicts]
+grep = "<2.0.0"
+
+[replaces]
+ripgrep-legacy = "^1.0"
 
 [dependencies]
 zlib = ">=1.2.0, <2.0.0"
@@ -138,11 +162,54 @@ path = "ripgrep"
         let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
         assert_eq!(parsed.name, "ripgrep");
         assert_eq!(parsed.version.to_string(), "14.1.0");
+        assert_eq!(parsed.provides, vec!["ripgrep", "rg"]);
+        assert_eq!(
+            parsed.conflicts.get("grep"),
+            Some(&VersionReq::parse("<2.0.0").expect("valid version req"))
+        );
+        assert_eq!(
+            parsed.replaces.get("ripgrep-legacy"),
+            Some(&VersionReq::parse("^1.0").expect("valid version req"))
+        );
         assert!(parsed.dependencies.contains_key("zlib"));
         assert_eq!(parsed.artifacts.len(), 1);
         assert_eq!(parsed.artifacts[0].binaries.len(), 1);
         assert_eq!(parsed.artifacts[0].binaries[0].name, "rg");
         assert_eq!(parsed.artifacts[0].binaries[0].path, "ripgrep");
+    }
+
+    #[test]
+    fn reject_self_conflict() {
+        let content = r#"
+name = "ripgrep"
+version = "14.1.0"
+
+[conflicts]
+ripgrep = "*"
+"#;
+
+        let err = PackageManifest::from_toml_str(content).expect_err("manifest should be rejected");
+        assert!(
+            err.to_string().contains("conflicts with itself"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_self_replace() {
+        let content = r#"
+name = "ripgrep"
+version = "14.1.0"
+
+[replaces]
+ripgrep = "*"
+"#;
+
+        let err = PackageManifest::from_toml_str(content).expect_err("manifest should be rejected");
+        assert!(
+            err.to_string().contains("replaces itself"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
