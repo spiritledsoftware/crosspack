@@ -29,6 +29,18 @@ pub fn select_highest_compatible<'a>(
 pub fn resolve_dependency_graph<F>(
     roots: &[RootRequirement],
     pins: &BTreeMap<String, VersionReq>,
+    load_versions: F,
+) -> Result<ResolvedGraph>
+where
+    F: FnMut(&str) -> Result<Vec<PackageManifest>>,
+{
+    resolve_dependency_graph_with_installed(roots, pins, &BTreeMap::new(), load_versions)
+}
+
+pub fn resolve_dependency_graph_with_installed<F>(
+    roots: &[RootRequirement],
+    pins: &BTreeMap<String, VersionReq>,
+    installed: &BTreeMap<String, PackageManifest>,
     mut load_versions: F,
 ) -> Result<ResolvedGraph>
 where
@@ -48,6 +60,7 @@ where
     if !search(
         &mut constraints,
         pins,
+        installed,
         &mut selected,
         &mut versions_cache,
         &mut load_versions,
@@ -65,6 +78,7 @@ where
 fn search<F>(
     constraints: &mut BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
+    installed: &BTreeMap<String, PackageManifest>,
     selected: &mut BTreeMap<String, PackageManifest>,
     versions_cache: &mut HashMap<String, Vec<PackageManifest>>,
     load_versions: &mut F,
@@ -90,8 +104,17 @@ where
                 added_constraints.push((dep_name.clone(), list.len()));
             }
 
-            let consistent = selected_satisfies_constraints(selected, constraints, pins);
-            if consistent && search(constraints, pins, selected, versions_cache, load_versions)? {
+            let consistent = selected_satisfies_constraints(selected, constraints, pins, installed);
+            if consistent
+                && search(
+                    constraints,
+                    pins,
+                    installed,
+                    selected,
+                    versions_cache,
+                    load_versions,
+                )?
+            {
                 return Ok(true);
             }
 
@@ -107,7 +130,12 @@ where
         return Ok(false);
     }
 
-    Ok(selected_satisfies_constraints(selected, constraints, pins))
+    Ok(selected_satisfies_constraints(
+        selected,
+        constraints,
+        pins,
+        installed,
+    ))
 }
 
 fn matching_candidates<F>(
@@ -152,7 +180,22 @@ where
         .cloned()
         .collect();
 
-    if matched.is_empty() {
+    let has_direct_match = matched.iter().any(|manifest| manifest.name == name);
+    let mut selected = if has_direct_match {
+        matched
+            .into_iter()
+            .filter(|manifest| manifest.name == name)
+            .collect::<Vec<_>>()
+    } else {
+        matched
+            .into_iter()
+            .filter(|manifest| manifest.provides.iter().any(|provided| provided == name))
+            .collect::<Vec<_>>()
+    };
+
+    selected.sort_by(|a, b| b.version.cmp(&a.version).then_with(|| a.name.cmp(&b.name)));
+
+    if selected.is_empty() {
         let req_desc = if package_reqs.is_empty() {
             "*".to_string()
         } else {
@@ -172,13 +215,14 @@ where
         ));
     }
 
-    Ok(matched)
+    Ok(selected)
 }
 
 fn selected_satisfies_constraints(
     selected: &BTreeMap<String, PackageManifest>,
     constraints: &BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
+    installed: &BTreeMap<String, PackageManifest>,
 ) -> bool {
     for (name, manifest) in selected {
         if let Some(reqs) = constraints.get(name) {
@@ -192,7 +236,40 @@ fn selected_satisfies_constraints(
             }
         }
     }
+
+    let selected_manifests: Vec<&PackageManifest> = selected.values().collect();
+    for (index, left) in selected_manifests.iter().enumerate() {
+        for right in selected_manifests.iter().skip(index + 1) {
+            if manifests_conflict(left, right) {
+                return false;
+            }
+        }
+    }
+
+    for selected_manifest in selected.values() {
+        for (installed_name, installed_manifest) in installed {
+            if selected.contains_key(installed_name) {
+                continue;
+            }
+            if manifests_conflict(selected_manifest, installed_manifest) {
+                return false;
+            }
+        }
+    }
+
     true
+}
+
+fn manifests_conflict(left: &PackageManifest, right: &PackageManifest) -> bool {
+    left.conflicts
+        .get(&right.name)
+        .map(|req| req.matches(&right.version))
+        .unwrap_or(false)
+        || right
+            .conflicts
+            .get(&left.name)
+            .map(|req| req.matches(&left.version))
+            .unwrap_or(false)
 }
 
 fn topo_order(selected: &BTreeMap<String, PackageManifest>) -> Result<Vec<String>> {
@@ -269,7 +346,10 @@ mod tests {
     use crosspack_core::PackageManifest;
     use semver::VersionReq;
 
-    use crate::{resolve_dependency_graph, select_highest_compatible, RootRequirement};
+    use crate::{
+        resolve_dependency_graph, resolve_dependency_graph_with_installed,
+        select_highest_compatible, RootRequirement,
+    };
 
     #[test]
     fn selects_latest_matching_version() {
@@ -634,6 +714,269 @@ sha256 = "shared11"
             "1.3.0"
         );
         assert_eq!(graph.install_order, vec!["shared", "tool-a", "tool-b"]);
+    }
+
+    #[test]
+    fn prefers_direct_package_name_over_capability_provider_candidates() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "compiler".to_string(),
+            vec![
+                manifest(
+                    r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+                ),
+                manifest(
+                    r#"
+name = "compiler"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/compiler-1.0.0.tar.zst"
+sha256 = "compiler"
+"#,
+                ),
+            ],
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let graph = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+        assert_eq!(
+            graph
+                .manifests
+                .get("compiler")
+                .expect("compiler dependency must be selected")
+                .name,
+            "compiler"
+        );
+    }
+
+    #[test]
+    fn selects_lexicographically_smallest_provider_on_version_tie() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "compiler".to_string(),
+            vec![
+                manifest(
+                    r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#,
+                ),
+                manifest(
+                    r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+                ),
+            ],
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let graph = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+        assert_eq!(
+            graph
+                .manifests
+                .get("compiler")
+                .expect("provider for compiler must be selected")
+                .name,
+            "gcc"
+        );
+    }
+
+    #[test]
+    fn fails_when_selected_packages_conflict() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+foo = "*"
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "foo".to_string(),
+            vec![manifest(
+                r#"
+name = "foo"
+version = "1.0.0"
+[conflicts]
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+            )],
+        );
+        available.insert(
+            "bar".to_string(),
+            vec![manifest(
+                r#"
+name = "bar"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#,
+            )],
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let err = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect_err("conflicting graph must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("no compatible dependency graph found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn fails_when_selected_package_conflicts_with_installed_state() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+foo = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "foo".to_string(),
+            vec![manifest(
+                r#"
+name = "foo"
+version = "1.0.0"
+[conflicts]
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+            )],
+        );
+
+        let mut installed = BTreeMap::new();
+        installed.insert(
+            "bar".to_string(),
+            manifest(
+                r#"
+name = "bar"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#,
+            ),
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let err =
+            resolve_dependency_graph_with_installed(&roots, &BTreeMap::new(), &installed, |name| {
+                Ok(available.get(name).cloned().unwrap_or_default())
+            })
+            .expect_err("installed-state conflict must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("no compatible dependency graph found"),
+            "unexpected error: {err}"
+        );
     }
 
     fn manifest(raw: &str) -> PackageManifest {
