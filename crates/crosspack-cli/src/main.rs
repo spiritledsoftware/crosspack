@@ -941,7 +941,8 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
         Ok(active_txid) => active_txid,
         Err(_) => {
             return Err(anyhow!(
-                "transaction state requires repair (reason=active_marker_unreadable)"
+                "transaction state requires repair (reason=active_marker_unreadable path={})",
+                layout.transaction_active_path().display()
             ));
         }
     };
@@ -1628,9 +1629,12 @@ mod tests {
 
         let err = ensure_no_active_transaction(&layout)
             .expect_err("unreadable active marker should return repair-required reason");
+        let expected = format!(
+            "transaction state requires repair (reason=active_marker_unreadable path={})",
+            layout.transaction_active_path().display()
+        );
         assert!(
-            err.to_string()
-                .contains("transaction state requires repair (reason=active_marker_unreadable)"),
+            err.to_string().contains(&expected),
             "unexpected error: {err}"
         );
 
