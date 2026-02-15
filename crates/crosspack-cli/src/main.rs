@@ -981,7 +981,10 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         ));
     };
 
-    if metadata.status == "failed" || metadata.status == "rolling_back" {
+    if metadata.status == "rolling_back" {
+        return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
+    }
+    if metadata.status == "failed" {
         return Ok(format!("transaction: failed {txid}"));
     }
     if status_allows_stale_marker_cleanup(&metadata.status) {
@@ -2042,7 +2045,10 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for rolling_back tx");
-        assert_eq!(line, "transaction: failed tx-rolling-back");
+        assert_eq!(
+            line,
+            "transaction: failed tx-rolling-back (reason=rolling_back)"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
