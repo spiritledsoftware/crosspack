@@ -9,9 +9,9 @@ use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
-    read_all_pins, read_install_receipts, remove_exposed_binary, remove_file_if_exists,
-    set_active_transaction, uninstall_package, write_install_receipt, write_pin,
-    write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+    read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
+    remove_file_if_exists, set_active_transaction, uninstall_package, write_install_receipt,
+    write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
     TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
@@ -776,6 +776,17 @@ fn begin_transaction(
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
     if let Some(txid) = read_active_transaction(layout)? {
+        if let Some(metadata) = read_transaction_metadata(layout, &txid)? {
+            if metadata.status == "failed" {
+                return Err(anyhow!("transaction {txid} requires repair"));
+            }
+
+            return Err(anyhow!(
+                "transaction {txid} is active (status={})",
+                metadata.status
+            ));
+        }
+
         return Err(anyhow!("transaction {txid} requires repair"));
     }
 
@@ -1320,8 +1331,8 @@ mod tests {
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        bin_path, set_active_transaction, InstallReason, InstallReceipt, PrefixLayout,
-        UninstallResult, UninstallStatus,
+        bin_path, set_active_transaction, write_transaction_metadata, InstallReason,
+        InstallReceipt, PrefixLayout, TransactionMetadata, UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -1373,6 +1384,33 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("transaction tx-abc requires repair"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_includes_status_when_metadata_exists() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-abc".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_300,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-abc").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("active transaction must include status context");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-abc is active (status=applying)"),
             "unexpected error: {err}"
         );
 
