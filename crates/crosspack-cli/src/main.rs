@@ -954,10 +954,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         return Ok(format!("transaction: failed {txid}"));
     }
 
-    Ok(format!(
-        "transaction: active {txid} (status={})",
-        metadata.status
-    ))
+    Ok(format!("transaction: active {txid}"))
 }
 
 fn resolve_install_graph(
@@ -1804,6 +1801,29 @@ mod tests {
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for failed tx");
         assert_eq!(line, "transaction: failed tx-failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_active_state_without_status_suffix() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-active".to_string(),
+            operation: "upgrade".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_640,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-active").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for active tx");
+        assert_eq!(line, "transaction: active tx-active");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
