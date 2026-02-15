@@ -971,7 +971,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
     };
 
     let Some(metadata) = read_transaction_metadata(layout, &txid)? else {
-        return Ok(format!("transaction: failed {txid}"));
+        return Ok(format!("transaction: failed {txid} (metadata missing)"));
     };
 
     if metadata.status == "failed" || metadata.status == "rolling_back" {
@@ -2021,7 +2021,7 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for missing metadata");
-        assert_eq!(line, "transaction: failed tx-missing");
+        assert_eq!(line, "transaction: failed tx-missing (metadata missing)");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
