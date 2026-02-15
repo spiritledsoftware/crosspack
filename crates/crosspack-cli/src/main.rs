@@ -949,10 +949,14 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
                     "transaction {txid} requires repair (status=applying->failed)"
                 ));
             }
-            if metadata.status == "rolling_back" || metadata.status == "failed" {
+            if metadata.status == "rolling_back" {
                 return Err(anyhow!(
-                    "transaction {txid} requires repair (status={})",
-                    metadata.status
+                    "transaction {txid} requires repair (reason=rolling_back)"
+                ));
+            }
+            if metadata.status == "failed" {
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (reason=failed)"
                 ));
             }
 
@@ -1615,8 +1619,35 @@ mod tests {
             .expect_err("rolling_back transaction should block mutation");
         assert!(
             err.to_string().contains(
-                "transaction tx-rolling-diagnostic requires repair (status=rolling_back)"
+                "transaction tx-rolling-diagnostic requires repair (reason=rolling_back)"
             ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_failed_reason_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-failed-diagnostic".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_710,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-failed-diagnostic").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("failed transaction should block mutation");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-failed-diagnostic requires repair (reason=failed)"),
             "unexpected error: {err}"
         );
 
