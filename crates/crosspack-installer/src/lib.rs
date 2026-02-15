@@ -965,9 +965,9 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        expose_binary, parse_receipt, read_all_pins, read_pin, remove_exposed_binary, remove_pin,
-        strip_rel_components, uninstall_package, write_install_receipt, write_pin, InstallReason,
-        InstallReceipt, PrefixLayout, UninstallStatus,
+        bin_path, expose_binary, parse_receipt, read_all_pins, read_pin, remove_exposed_binary,
+        remove_pin, strip_rel_components, uninstall_package, write_install_receipt, write_pin,
+        InstallReason, InstallReceipt, PrefixLayout, UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -1005,7 +1005,7 @@ mod tests {
 
         expose_binary(&layout, &package_dir, "demo", "demo").expect("must expose binary");
 
-        let exposed_path = layout.bin_dir().join("demo");
+        let exposed_path = bin_path(&layout, "demo");
         assert!(exposed_path.exists());
 
         remove_exposed_binary(&layout, "demo").expect("must remove binary");

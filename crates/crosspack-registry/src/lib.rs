@@ -396,8 +396,18 @@ impl RegistrySourceStore {
     }
 }
 
+fn base_git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg("core.autocrlf=false")
+        .arg("-c")
+        .arg("core.eol=lf");
+    command
+}
+
 fn run_git_clone(location: &str, destination: &Path, source_name: &str) -> Result<()> {
-    let output = Command::new("git")
+    let output = base_git_command()
         .arg("clone")
         .arg("--")
         .arg(location)
@@ -420,7 +430,7 @@ fn run_git_clone(location: &str, destination: &Path, source_name: &str) -> Resul
 }
 
 fn run_git_command(repo_root: &Path, args: &[&str], source_name: &str) -> Result<()> {
-    let output = Command::new("git")
+    let output = base_git_command()
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -443,7 +453,7 @@ fn run_git_command(repo_root: &Path, args: &[&str], source_name: &str) -> Result
 }
 
 fn git_head_snapshot_id(repo_root: &Path, source_name: &str) -> Result<String> {
-    let output = Command::new("git")
+    let output = base_git_command()
         .arg("rev-parse")
         .arg("HEAD")
         .current_dir(repo_root)
@@ -1196,6 +1206,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use ed25519_dalek::{Signer, SigningKey};
@@ -1924,12 +1935,11 @@ mod tests {
 
         let registry_pub =
             fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let source_location = git_fixture_location(&source_root);
         store
             .add_source(git_source_record(
                 "origin",
-                source_root
-                    .to_str()
-                    .expect("git source path must be valid UTF-8"),
+                &source_location,
                 sha256_hex_bytes(&registry_pub),
                 0,
             ))
@@ -1958,12 +1968,11 @@ mod tests {
 
         let registry_pub =
             fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let source_location = git_fixture_location(&source_root);
         store
             .add_source(git_source_record(
                 "origin",
-                source_root
-                    .to_str()
-                    .expect("git source path must be valid UTF-8"),
+                &source_location,
                 sha256_hex_bytes(&registry_pub),
                 0,
             ))
@@ -2013,12 +2022,11 @@ mod tests {
 
         let registry_pub =
             fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+        let source_location = git_fixture_location(&source_root);
         store
             .add_source(git_source_record(
                 "origin",
-                source_root
-                    .to_str()
-                    .expect("git source path must be valid UTF-8"),
+                &source_location,
                 sha256_hex_bytes(&registry_pub),
                 0,
             ))
@@ -2468,6 +2476,18 @@ version = "{version}"
         root
     }
 
+    fn git_fixture_location(path: &Path) -> String {
+        #[cfg(windows)]
+        {
+            path.to_string_lossy().replace('\\', "/")
+        }
+
+        #[cfg(not(windows))]
+        {
+            path.to_string_lossy().to_string()
+        }
+    }
+
     fn git_head_short(repo_root: &Path) -> String {
         let output = Command::new("git")
             .arg("rev-parse")
@@ -2554,16 +2574,20 @@ version = "{version}"
         .expect("must write snapshot metadata");
     }
 
+    static TEST_REGISTRY_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn test_registry_root() -> PathBuf {
         let mut path = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
+        let sequence = TEST_REGISTRY_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
         path.push(format!(
-            "crosspack-registry-tests-{}-{}",
+            "crosspack-registry-tests-{}-{}-{}",
             std::process::id(),
-            nanos
+            nanos,
+            sequence
         ));
         path
     }
