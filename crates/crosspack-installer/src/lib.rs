@@ -285,6 +285,33 @@ pub fn write_transaction_metadata(
     Ok(path)
 }
 
+pub fn read_transaction_metadata(
+    layout: &PrefixLayout,
+    txid: &str,
+) -> Result<Option<TransactionMetadata>> {
+    let path = layout.transaction_metadata_path(txid);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to read transaction metadata file: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    let metadata = parse_transaction_metadata(&raw).with_context(|| {
+        format!(
+            "failed parsing transaction metadata file: {}",
+            path.display()
+        )
+    })?;
+    Ok(Some(metadata))
+}
+
 pub fn append_transaction_journal_entry(
     layout: &PrefixLayout,
     txid: &str,
@@ -1112,6 +1139,57 @@ fn serialize_transaction_journal_entry(entry: &TransactionJournalEntry) -> Strin
     format!("{{{}}}", fields.join(","))
 }
 
+fn parse_transaction_metadata(raw: &str) -> Result<TransactionMetadata> {
+    let mut string_fields = HashMap::new();
+    let mut number_fields = HashMap::new();
+
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line == "{" || line == "}" {
+            continue;
+        }
+
+        let normalized = line.strip_suffix(',').unwrap_or(line);
+        let (raw_key, raw_value) = normalized
+            .split_once(':')
+            .ok_or_else(|| anyhow!("invalid transaction metadata line: {line}"))?;
+
+        let key = raw_key.trim().trim_matches('"').to_string();
+        let value = raw_value.trim();
+        if value.starts_with('"') && value.ends_with('"') {
+            let inner = &value[1..value.len().saturating_sub(1)];
+            string_fields.insert(key, unescape_json(inner)?);
+        } else {
+            number_fields.insert(key, value.to_string());
+        }
+    }
+
+    let parse_number = |field: &str| -> Result<u64> {
+        number_fields
+            .get(field)
+            .with_context(|| format!("missing transaction metadata field: {field}"))?
+            .parse::<u64>()
+            .with_context(|| format!("invalid numeric transaction metadata field: {field}"))
+    };
+
+    Ok(TransactionMetadata {
+        version: parse_number("version")? as u32,
+        txid: string_fields
+            .get("txid")
+            .with_context(|| "missing transaction metadata field: txid")?
+            .clone(),
+        operation: string_fields
+            .get("operation")
+            .with_context(|| "missing transaction metadata field: operation")?
+            .clone(),
+        status: string_fields
+            .get("status")
+            .with_context(|| "missing transaction metadata field: status")?
+            .clone(),
+        started_at_unix: parse_number("started_at_unix")?,
+        snapshot_id: string_fields.get("snapshot_id").cloned(),
+    })
+}
+
 fn escape_json(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -1119,6 +1197,34 @@ fn escape_json(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+fn unescape_json(value: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut chars = value.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        let escaped = chars
+            .next()
+            .ok_or_else(|| anyhow!("unterminated JSON escape sequence"))?;
+        match escaped {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            other => {
+                return Err(anyhow!("unsupported JSON escape sequence: \\{other}"));
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 fn strip_rel_components(path: &Path, strip_components: usize) -> Option<PathBuf> {
@@ -1158,10 +1264,10 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
-        parse_receipt, read_active_transaction, read_all_pins, read_pin, remove_exposed_binary,
-        remove_pin, set_active_transaction, strip_rel_components, uninstall_package,
-        write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
-        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
+        parse_receipt, read_active_transaction, read_all_pins, read_pin, read_transaction_metadata,
+        remove_exposed_binary, remove_pin, set_active_transaction, strip_rel_components,
+        uninstall_package, write_install_receipt, write_pin, write_transaction_metadata,
+        InstallReason, InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
         UninstallStatus,
     };
     use std::fs;
@@ -1251,6 +1357,30 @@ mod tests {
 
         clear_active_transaction(&layout).expect("must clear active transaction");
         assert!(!layout.transaction_active_path().exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_transaction_metadata_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-meta-1".to_string(),
+            operation: "upgrade".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_240,
+            snapshot_id: Some("git:abc123".to_string()),
+        };
+
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        let loaded = read_transaction_metadata(&layout, "tx-meta-1")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+
+        assert_eq!(loaded, metadata);
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
