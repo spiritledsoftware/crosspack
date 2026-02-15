@@ -914,10 +914,14 @@ where
     }
 }
 
+fn status_allows_stale_marker_cleanup(status: &str) -> bool {
+    matches!(status, "planning" | "committed" | "rolled_back")
+}
+
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
     if let Some(txid) = read_active_transaction(layout)? {
         if let Some(metadata) = read_transaction_metadata(layout, &txid)? {
-            if metadata.status == "committed" || metadata.status == "planning" {
+            if status_allows_stale_marker_cleanup(&metadata.status) {
                 clear_active_transaction(layout)?;
                 return Ok(());
             }
@@ -953,7 +957,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
     if metadata.status == "failed" {
         return Ok(format!("transaction: failed {txid}"));
     }
-    if metadata.status == "committed" || metadata.status == "rolled_back" {
+    if status_allows_stale_marker_cleanup(&metadata.status) {
         return Ok("transaction: clean".to_string());
     }
 
@@ -1646,6 +1650,38 @@ mod tests {
     }
 
     #[test]
+    fn ensure_no_active_transaction_clears_rolled_back_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolled-back".to_string(),
+            operation: "upgrade".to_string(),
+            status: "rolled_back".to_string(),
+            started_at_unix: 1_771_001_430,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolled-back").expect("must write active marker");
+
+        ensure_no_active_transaction(&layout)
+            .expect("rolled_back transaction marker should be auto-cleaned");
+
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "rolled_back active marker should be cleared"
+        );
+
+        ensure_no_active_transaction(&layout)
+            .expect("cleanup path should remain idempotent after marker is removed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn set_transaction_status_updates_metadata_via_helper() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -1849,6 +1885,29 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for committed marker");
+        assert_eq!(line, "transaction: clean");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_planning_marker_as_clean() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-planning".to_string(),
+            operation: "install".to_string(),
+            status: "planning".to_string(),
+            started_at_unix: 1_771_001_670,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-planning").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for planning marker");
         assert_eq!(line, "transaction: clean");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
