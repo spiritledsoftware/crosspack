@@ -954,7 +954,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         return Ok(format!("transaction: active {txid}"));
     };
 
-    if metadata.status == "failed" {
+    if metadata.status == "failed" || metadata.status == "rolling_back" {
         return Ok(format!("transaction: failed {txid}"));
     }
     if status_allows_stale_marker_cleanup(&metadata.status) {
@@ -1840,6 +1840,29 @@ mod tests {
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for failed tx");
         assert_eq!(line, "transaction: failed tx-failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_rolling_back_as_failed() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolling-back".to_string(),
+            operation: "uninstall".to_string(),
+            status: "rolling_back".to_string(),
+            started_at_unix: 1_771_001_630,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolling-back").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for rolling_back tx");
+        assert_eq!(line, "transaction: failed tx-rolling-back");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
