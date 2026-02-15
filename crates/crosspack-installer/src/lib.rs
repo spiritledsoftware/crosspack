@@ -312,6 +312,14 @@ pub fn read_transaction_metadata(
     Ok(Some(metadata))
 }
 
+pub fn update_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
+    let mut metadata = read_transaction_metadata(layout, txid)?
+        .ok_or_else(|| anyhow!("transaction metadata not found for '{txid}'"))?;
+    metadata.status = status.to_string();
+    write_transaction_metadata(layout, &metadata)?;
+    Ok(())
+}
+
 pub fn append_transaction_journal_entry(
     layout: &PrefixLayout,
     txid: &str,
@@ -1266,9 +1274,9 @@ mod tests {
         append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
         parse_receipt, read_active_transaction, read_all_pins, read_pin, read_transaction_metadata,
         remove_exposed_binary, remove_pin, set_active_transaction, strip_rel_components,
-        uninstall_package, write_install_receipt, write_pin, write_transaction_metadata,
-        InstallReason, InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
-        UninstallStatus,
+        uninstall_package, update_transaction_status, write_install_receipt, write_pin,
+        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+        TransactionJournalEntry, TransactionMetadata, UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -1381,6 +1389,31 @@ mod tests {
             .expect("metadata should exist");
 
         assert_eq!(loaded, metadata);
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn update_transaction_status_rewrites_metadata_status() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-status-1".to_string(),
+            operation: "install".to_string(),
+            status: "planning".to_string(),
+            started_at_unix: 1_771_001_250,
+            snapshot_id: None,
+        };
+
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        update_transaction_status(&layout, "tx-status-1", "applying").expect("must update status");
+
+        let loaded = read_transaction_metadata(&layout, "tx-status-1")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(loaded.status, "applying");
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
