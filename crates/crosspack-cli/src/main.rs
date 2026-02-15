@@ -948,7 +948,10 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
                 return Err(anyhow!("transaction {txid} requires repair"));
             }
             if metadata.status == "rolling_back" || metadata.status == "failed" {
-                return Err(anyhow!("transaction {txid} requires repair"));
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (status={})",
+                    metadata.status
+                ));
             }
 
             return Err(anyhow!(
@@ -1579,6 +1582,34 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("transaction tx-abc requires repair"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_rolling_back_status_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolling-diagnostic".to_string(),
+            operation: "upgrade".to_string(),
+            status: "rolling_back".to_string(),
+            started_at_unix: 1_771_001_700,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolling-diagnostic").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("rolling_back transaction should block mutation");
+        assert!(
+            err.to_string().contains(
+                "transaction tx-rolling-diagnostic requires repair (status=rolling_back)"
+            ),
             "unexpected error: {err}"
         );
 
