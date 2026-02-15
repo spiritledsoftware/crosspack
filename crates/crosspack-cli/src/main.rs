@@ -988,7 +988,16 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         return Ok("transaction: clean".to_string());
     };
 
-    let Some(metadata) = read_transaction_metadata(layout, &txid)? else {
+    let metadata = match read_transaction_metadata(layout, &txid) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Ok(format!(
+                "transaction: failed {txid} (reason=metadata_unreadable)"
+            ));
+        }
+    };
+
+    let Some(metadata) = metadata else {
         return Ok(format!(
             "transaction: failed {txid} (reason=metadata_missing)"
         ));
@@ -2127,6 +2136,26 @@ mod tests {
         assert_eq!(
             line,
             "transaction: failed tx-missing (reason=metadata_missing)"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_when_metadata_unreadable() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-unreadable";
+        std::fs::write(layout.transaction_metadata_path(txid), "{not-json")
+            .expect("must write corrupt metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should map unreadable metadata to failed");
+        assert_eq!(
+            line,
+            "transaction: failed tx-unreadable (reason=metadata_unreadable)"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
