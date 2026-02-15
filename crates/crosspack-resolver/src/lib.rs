@@ -782,6 +782,72 @@ sha256 = "compiler"
     }
 
     #[test]
+    fn selects_lexicographically_smallest_provider_on_version_tie() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "compiler".to_string(),
+            vec![
+                manifest(
+                    r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#,
+                ),
+                manifest(
+                    r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+                ),
+            ],
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let graph = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+        assert_eq!(
+            graph
+                .manifests
+                .get("compiler")
+                .expect("provider for compiler must be selected")
+                .name,
+            "gcc"
+        );
+    }
+
+    #[test]
     fn fails_when_selected_packages_conflict() {
         let mut available = BTreeMap::new();
         available.insert(
