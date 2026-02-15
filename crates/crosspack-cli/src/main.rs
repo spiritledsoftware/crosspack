@@ -963,7 +963,7 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
         }
 
         return Err(anyhow!(
-            "transaction {txid} requires repair (metadata missing)"
+            "transaction {txid} requires repair (reason=metadata_missing)"
         ));
     }
 
@@ -976,7 +976,9 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
     };
 
     let Some(metadata) = read_transaction_metadata(layout, &txid)? else {
-        return Ok(format!("transaction: failed {txid} (metadata missing)"));
+        return Ok(format!(
+            "transaction: failed {txid} (reason=metadata_missing)"
+        ));
     };
 
     if metadata.status == "failed" || metadata.status == "rolling_back" {
@@ -1629,7 +1631,7 @@ mod tests {
             .expect_err("missing metadata should block mutating command");
         assert!(
             err.to_string()
-                .contains("transaction tx-missing-meta requires repair (metadata missing)"),
+                .contains("transaction tx-missing-meta requires repair (reason=metadata_missing)"),
             "unexpected error: {err}"
         );
 
@@ -2054,7 +2056,10 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for missing metadata");
-        assert_eq!(line, "transaction: failed tx-missing (metadata missing)");
+        assert_eq!(
+            line,
+            "transaction: failed tx-missing (reason=metadata_missing)"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
