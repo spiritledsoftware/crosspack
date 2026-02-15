@@ -953,6 +953,9 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
     if metadata.status == "failed" {
         return Ok(format!("transaction: failed {txid}"));
     }
+    if metadata.status == "committed" || metadata.status == "rolled_back" {
+        return Ok("transaction: clean".to_string());
+    }
 
     Ok(format!("transaction: active {txid}"))
 }
@@ -1824,6 +1827,29 @@ mod tests {
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for active tx");
         assert_eq!(line, "transaction: active tx-active");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_committed_marker_as_clean() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-committed".to_string(),
+            operation: "install".to_string(),
+            status: "committed".to_string(),
+            started_at_unix: 1_771_001_660,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-committed").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for committed marker");
+        assert_eq!(line, "transaction: clean");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
