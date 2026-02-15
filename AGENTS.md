@@ -45,6 +45,7 @@ crosspack/
 ## CONVENTIONS
 - One binary entrypoint: `crosspack-cli` owns all command wiring; other crates stay library-only.
 - CI order is fixed and strict: fmt check, clippy (warnings denied), workspace tests.
+- Commit messages must follow Conventional Commits: `type(scope): subject` (https://www.conventionalcommits.org/en/v1.0.0/).
 - Imports grouped as `std` then external crates then workspace crates.
 - Use `Path`/`PathBuf` for filesystem work; avoid string path concatenation.
 - Keep user-facing messages deterministic; libraries should stay quiet.
