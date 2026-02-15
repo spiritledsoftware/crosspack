@@ -914,9 +914,14 @@ where
                 .map(|metadata| metadata.status);
             let preserve_recovery_state = current_status
                 .as_deref()
-                .map(|status| matches!(status, "rolling_back" | "rolled_back" | "failed"))
+                .map(|status| {
+                    matches!(
+                        status,
+                        "rolling_back" | "rolled_back" | "committed" | "failed"
+                    )
+                })
                 .unwrap_or(false);
-            if current_status.as_deref() == Some("rolled_back") {
+            if matches!(current_status.as_deref(), Some("rolled_back" | "committed")) {
                 let _ = clear_active_transaction(layout);
             }
             if !preserve_recovery_state {
@@ -1843,6 +1848,35 @@ mod tests {
                 .expect("must read active transaction")
                 .is_none(),
             "rolled_back final state should clear active marker"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_preserves_committed_status_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "install", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "committed")?;
+            Err(anyhow::anyhow!("post-commit warning"))
+        })
+        .expect_err("committed transaction should preserve final status on error");
+        assert!(err.to_string().contains("post-commit warning"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "committed");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "committed final state should clear active marker"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
