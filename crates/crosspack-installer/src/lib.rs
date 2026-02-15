@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +27,24 @@ pub struct InstallReceipt {
     pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionMetadata {
+    pub version: u32,
+    pub txid: String,
+    pub operation: String,
+    pub status: String,
+    pub started_at_unix: u64,
+    pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionJournalEntry {
+    pub seq: u64,
+    pub step: String,
+    pub state: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +142,30 @@ impl PrefixLayout {
         self.installed_state_dir().join(format!("{name}.receipt"))
     }
 
+    pub fn transactions_dir(&self) -> PathBuf {
+        self.state_dir().join("transactions")
+    }
+
+    pub fn transactions_staging_dir(&self) -> PathBuf {
+        self.transactions_dir().join("staging")
+    }
+
+    pub fn transaction_active_path(&self) -> PathBuf {
+        self.transactions_dir().join("active")
+    }
+
+    pub fn transaction_metadata_path(&self, txid: &str) -> PathBuf {
+        self.transactions_dir().join(format!("{txid}.json"))
+    }
+
+    pub fn transaction_journal_path(&self, txid: &str) -> PathBuf {
+        self.transactions_dir().join(format!("{txid}.journal"))
+    }
+
+    pub fn transaction_staging_path(&self, txid: &str) -> PathBuf {
+        self.transactions_staging_dir().join(txid)
+    }
+
     pub fn artifact_cache_path(
         &self,
         name: &str,
@@ -148,6 +190,8 @@ impl PrefixLayout {
             self.tmp_state_dir(),
             self.installed_state_dir(),
             self.pins_dir(),
+            self.transactions_dir(),
+            self.transactions_staging_dir(),
         ] {
             fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -165,6 +209,88 @@ pub fn default_user_prefix() -> Result<PathBuf> {
 
     let home = std::env::var("HOME").context("HOME is not set; cannot resolve user prefix")?;
     Ok(PathBuf::from(home).join(".crosspack"))
+}
+
+pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathBuf> {
+    let path = layout.transaction_active_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&path, format!("{txid}\n")).with_context(|| {
+        format!(
+            "failed to write active transaction file: {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+pub fn clear_active_transaction(layout: &PrefixLayout) -> Result<()> {
+    let path = layout.transaction_active_path();
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| {
+            format!(
+                "failed to clear active transaction file: {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn write_transaction_metadata(
+    layout: &PrefixLayout,
+    metadata: &TransactionMetadata,
+) -> Result<PathBuf> {
+    let path = layout.transaction_metadata_path(&metadata.txid);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::create_dir_all(layout.transaction_staging_path(&metadata.txid)).with_context(|| {
+        format!(
+            "failed to create transaction staging dir: {}",
+            layout.transaction_staging_path(&metadata.txid).display()
+        )
+    })?;
+
+    fs::write(&path, serialize_transaction_metadata(metadata)).with_context(|| {
+        format!(
+            "failed to write transaction metadata file: {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+pub fn append_transaction_journal_entry(
+    layout: &PrefixLayout,
+    txid: &str,
+    entry: &TransactionJournalEntry,
+) -> Result<PathBuf> {
+    let path = layout.transaction_journal_path(txid);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open transaction journal: {}", path.display()))?;
+    file.write_all(serialize_transaction_journal_entry(entry).as_bytes())
+        .with_context(|| format!("failed to append transaction journal: {}", path.display()))?;
+    file.write_all(b"\n").with_context(|| {
+        format!(
+            "failed to append transaction journal newline: {}",
+            path.display()
+        )
+    })?;
+    file.flush()
+        .with_context(|| format!("failed to flush transaction journal: {}", path.display()))?;
+    Ok(path)
 }
 
 pub fn install_from_artifact(
@@ -929,6 +1055,45 @@ fn copy_with_strip_recursive(
     Ok(())
 }
 
+fn serialize_transaction_metadata(metadata: &TransactionMetadata) -> String {
+    let snapshot_id = metadata
+        .snapshot_id
+        .as_ref()
+        .map(|value| format!("\n  \"snapshot_id\": \"{}\"", escape_json(value)))
+        .unwrap_or_default();
+
+    format!(
+        "{{\n  \"version\": {},\n  \"txid\": \"{}\",\n  \"operation\": \"{}\",\n  \"status\": \"{}\",\n  \"started_at_unix\": {}{}\n}}\n",
+        metadata.version,
+        escape_json(&metadata.txid),
+        escape_json(&metadata.operation),
+        escape_json(&metadata.status),
+        metadata.started_at_unix,
+        snapshot_id
+    )
+}
+
+fn serialize_transaction_journal_entry(entry: &TransactionJournalEntry) -> String {
+    let mut fields = vec![
+        format!("\"seq\":{}", entry.seq),
+        format!("\"step\":\"{}\"", escape_json(&entry.step)),
+        format!("\"state\":\"{}\"", escape_json(&entry.state)),
+    ];
+    if let Some(path) = &entry.path {
+        fields.push(format!("\"path\":\"{}\"", escape_json(path)));
+    }
+    format!("{{{}}}", fields.join(","))
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 fn strip_rel_components(path: &Path, strip_components: usize) -> Option<PathBuf> {
     let components: Vec<_> = path
         .components()
@@ -965,9 +1130,11 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bin_path, expose_binary, parse_receipt, read_all_pins, read_pin, remove_exposed_binary,
-        remove_pin, strip_rel_components, uninstall_package, write_install_receipt, write_pin,
-        InstallReason, InstallReceipt, PrefixLayout, UninstallStatus,
+        append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
+        parse_receipt, read_all_pins, read_pin, remove_exposed_binary, remove_pin,
+        set_active_transaction, strip_rel_components, uninstall_package, write_install_receipt,
+        write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+        TransactionJournalEntry, TransactionMetadata, UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -993,6 +1160,114 @@ mod tests {
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
         assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
         assert_eq!(receipt.install_reason, InstallReason::Dependency);
+    }
+
+    #[test]
+    fn transaction_paths_match_spec_layout() {
+        let layout = test_layout();
+        assert_eq!(
+            layout.transactions_dir(),
+            layout.state_dir().join("transactions")
+        );
+        assert_eq!(
+            layout.transaction_active_path(),
+            layout.state_dir().join("transactions").join("active")
+        );
+        assert_eq!(
+            layout.transaction_metadata_path("tx-1"),
+            layout.state_dir().join("transactions").join("tx-1.json")
+        );
+        assert_eq!(
+            layout.transaction_journal_path("tx-1"),
+            layout.state_dir().join("transactions").join("tx-1.journal")
+        );
+        assert_eq!(
+            layout.transaction_staging_path("tx-1"),
+            layout
+                .state_dir()
+                .join("transactions")
+                .join("staging")
+                .join("tx-1")
+        );
+    }
+
+    #[test]
+    fn write_transaction_metadata_and_active_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-1771001234-000042".to_string(),
+            operation: "upgrade".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_234,
+            snapshot_id: Some("git:5f1b3d8a1f2a4d0e".to_string()),
+        };
+
+        let metadata_path = write_transaction_metadata(&layout, &metadata)
+            .expect("must write transaction metadata");
+        set_active_transaction(&layout, &metadata.txid).expect("must write active transaction");
+
+        let metadata_raw = fs::read_to_string(metadata_path).expect("must read metadata file");
+        assert!(metadata_raw.contains("\"txid\": \"tx-1771001234-000042\""));
+        assert!(metadata_raw.contains("\"operation\": \"upgrade\""));
+        assert!(metadata_raw.contains("\"status\": \"applying\""));
+        assert!(metadata_raw.contains("\"snapshot_id\": \"git:5f1b3d8a1f2a4d0e\""));
+
+        let active_raw =
+            fs::read_to_string(layout.transaction_active_path()).expect("must read active file");
+        assert_eq!(active_raw.trim(), "tx-1771001234-000042");
+
+        clear_active_transaction(&layout).expect("must clear active transaction");
+        assert!(!layout.transaction_active_path().exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn append_transaction_journal_entries_in_order() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        append_transaction_journal_entry(
+            &layout,
+            "tx-1",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_receipt".to_string(),
+                state: "done".to_string(),
+                path: Some("state/installed/tool.receipt.bak".to_string()),
+            },
+        )
+        .expect("must append first entry");
+
+        append_transaction_journal_entry(
+            &layout,
+            "tx-1",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "remove_package_dir".to_string(),
+                state: "done".to_string(),
+                path: Some("pkgs/tool/1.0.0".to_string()),
+            },
+        )
+        .expect("must append second entry");
+
+        let journal_raw =
+            fs::read_to_string(layout.transaction_journal_path("tx-1")).expect("must read journal");
+        let lines: Vec<&str> = journal_raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "{\"seq\":1,\"step\":\"backup_receipt\",\"state\":\"done\",\"path\":\"state/installed/tool.receipt.bak\"}"
+        );
+        assert_eq!(
+            lines[1],
+            "{\"seq\":2,\"step\":\"remove_package_dir\",\"state\":\"done\",\"path\":\"pkgs/tool/1.0.0\"}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
