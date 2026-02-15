@@ -908,15 +908,17 @@ where
     match run_result {
         Ok(()) => Ok(()),
         Err(err) => {
-            let preserve_recovery_state = read_transaction_metadata(layout, &tx.txid)
+            let current_status = read_transaction_metadata(layout, &tx.txid)
                 .ok()
                 .flatten()
-                .map(|metadata| {
-                    metadata.status == "rolling_back"
-                        || metadata.status == "rolled_back"
-                        || metadata.status == "failed"
-                })
+                .map(|metadata| metadata.status);
+            let preserve_recovery_state = current_status
+                .as_deref()
+                .map(|status| matches!(status, "rolling_back" | "rolled_back" | "failed"))
                 .unwrap_or(false);
+            if current_status.as_deref() == Some("rolled_back") {
+                let _ = clear_active_transaction(layout);
+            }
             if !preserve_recovery_state {
                 let _ = set_transaction_status(layout, &tx.txid, "failed");
             }
@@ -1813,6 +1815,35 @@ mod tests {
             .expect("metadata should exist");
         assert_eq!(metadata.status, "rolled_back");
         assert_eq!(metadata.operation, "uninstall");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_clears_active_marker_when_rolled_back_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            Err(anyhow::anyhow!("cleanup warning"))
+        })
+        .expect_err("rolled_back error path should still return original error");
+        assert!(err.to_string().contains("cleanup warning"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "rolled_back");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "rolled_back final state should clear active marker"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
