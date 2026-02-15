@@ -458,6 +458,7 @@ fn main() -> Result<()> {
             println!("prefix: {}", layout.prefix().display());
             println!("bin: {}", layout.bin_dir().display());
             println!("cache: {}", layout.cache_dir().display());
+            println!("{}", doctor_transaction_health_line(&layout)?);
         }
         Commands::InitShell => {
             let prefix = default_user_prefix()?;
@@ -800,6 +801,25 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
+    let Some(txid) = read_active_transaction(layout)? else {
+        return Ok("transaction: clean".to_string());
+    };
+
+    let Some(metadata) = read_transaction_metadata(layout, &txid)? else {
+        return Ok(format!("transaction: active {txid}"));
+    };
+
+    if metadata.status == "failed" {
+        return Ok(format!("transaction: failed {txid}"));
+    }
+
+    Ok(format!(
+        "transaction: active {txid} (status={})",
+        metadata.status
+    ))
 }
 
 fn resolve_install_graph(
@@ -1329,14 +1349,14 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 mod tests {
     use super::{
         begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
-        determine_install_reason, enforce_disjoint_multi_target_upgrade, enforce_no_downgrades,
-        ensure_no_active_transaction, ensure_update_succeeded, format_registry_add_lines,
-        format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
-        select_metadata_backend, set_transaction_status, update_failure_reason_code,
-        validate_binary_preflight, Cli, CliRegistryKind, Commands, MetadataBackend,
-        ResolvedInstall,
+        determine_install_reason, doctor_transaction_health_line,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
+        ensure_update_succeeded, format_registry_add_lines, format_registry_list_lines,
+        format_registry_list_snapshot_state, format_registry_remove_lines,
+        format_uninstall_messages, format_update_summary_line, parse_pin_spec, registry_state_root,
+        run_update_command, select_manifest_with_pin, select_metadata_backend,
+        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
+        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1564,6 +1584,29 @@ mod tests {
             .expect("must read metadata")
             .expect("metadata should exist");
         assert_eq!(updated.status, "failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-failed".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_620,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-failed").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for failed tx");
+        assert_eq!(line, "transaction: failed tx-failed");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
