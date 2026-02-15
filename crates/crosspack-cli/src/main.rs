@@ -782,6 +782,10 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
                 clear_active_transaction(layout)?;
                 return Ok(());
             }
+            if metadata.status == "applying" {
+                let _ = set_transaction_status(layout, &txid, "failed");
+                return Err(anyhow!("transaction {txid} requires repair"));
+            }
             if metadata.status == "failed" {
                 return Err(anyhow!("transaction {txid} requires repair"));
             }
@@ -1406,7 +1410,7 @@ mod tests {
             version: 1,
             txid: "tx-abc".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: "rolling_back".to_string(),
             started_at_unix: 1_771_001_300,
             snapshot_id: None,
         };
@@ -1417,7 +1421,7 @@ mod tests {
             .expect_err("active transaction must include status context");
         assert!(
             err.to_string()
-                .contains("transaction tx-abc is active (status=applying)"),
+                .contains("transaction tx-abc is active (status=rolling_back)"),
             "unexpected error: {err}"
         );
 
@@ -1496,6 +1500,38 @@ mod tests {
             .expect("must read metadata")
             .expect("metadata must exist");
         assert_eq!(metadata.status, "applying");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_marks_applying_as_failed() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-applying".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_560,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-applying").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("applying transaction should transition to failed and block");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-applying requires repair"),
+            "unexpected error: {err}"
+        );
+
+        let updated = read_transaction_metadata(&layout, "tx-applying")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(updated.status, "failed");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
