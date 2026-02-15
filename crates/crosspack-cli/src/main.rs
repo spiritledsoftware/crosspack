@@ -957,7 +957,9 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
             ));
         }
 
-        return Err(anyhow!("transaction {txid} requires repair"));
+        return Err(anyhow!(
+            "transaction {txid} requires repair (metadata missing)"
+        ));
     }
 
     Ok(())
@@ -1577,6 +1579,24 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("transaction tx-abc requires repair"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_missing_metadata_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-missing-meta").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("missing metadata should block mutating command");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-missing-meta requires repair (metadata missing)"),
             "unexpected error: {err}"
         );
 
