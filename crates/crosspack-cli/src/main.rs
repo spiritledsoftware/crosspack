@@ -993,7 +993,12 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
 }
 
 fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
-    let Some(txid) = read_active_transaction(layout)? else {
+    let active_txid = match read_active_transaction(layout) {
+        Ok(active_txid) => active_txid,
+        Err(_) => return Ok("transaction: failed (reason=active_marker_unreadable)".to_string()),
+    };
+
+    let Some(txid) = active_txid else {
         return Ok("transaction: clean".to_string());
     };
 
@@ -2152,6 +2157,24 @@ mod tests {
         assert_eq!(
             line,
             "transaction: failed tx-rolling-back (reason=rolling_back)"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_when_active_marker_unreadable() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        std::fs::create_dir_all(layout.transaction_active_path())
+            .expect("must create unreadable active marker fixture");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should map unreadable active marker to failed");
+        assert_eq!(
+            line,
+            "transaction: failed (reason=active_marker_unreadable)"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
