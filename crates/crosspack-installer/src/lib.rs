@@ -24,6 +24,7 @@ pub struct InstallReceipt {
     pub artifact_sha256: Option<String>,
     pub cache_path: Option<String>,
     pub exposed_bins: Vec<String>,
+    pub snapshot_id: Option<String>,
     pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
@@ -359,6 +360,9 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     for exposed_bin in &receipt.exposed_bins {
         payload.push_str(&format!("exposed_bin={}\n", exposed_bin));
     }
+    if let Some(snapshot_id) = &receipt.snapshot_id {
+        payload.push_str(&format!("snapshot_id={}\n", snapshot_id));
+    }
     payload.push_str(&format!(
         "install_reason={}\n",
         receipt.install_reason.as_str()
@@ -618,6 +622,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut artifact_sha256 = None;
     let mut cache_path = None;
     let mut exposed_bins = Vec::new();
+    let mut snapshot_id = None;
     let mut install_reason = None;
     let mut install_status = None;
     let mut installed_at_unix = None;
@@ -635,6 +640,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
             "artifact_sha256" => artifact_sha256 = Some(v.to_string()),
             "cache_path" => cache_path = Some(v.to_string()),
             "exposed_bin" => exposed_bins.push(v.to_string()),
+            "snapshot_id" => snapshot_id = Some(v.to_string()),
             "install_reason" => install_reason = Some(InstallReason::parse(v)?),
             "install_status" => install_status = Some(v.to_string()),
             "installed_at_unix" => {
@@ -653,6 +659,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         artifact_sha256,
         cache_path,
         exposed_bins,
+        snapshot_id,
         install_reason: install_reason.unwrap_or(InstallReason::Root),
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
         installed_at_unix: installed_at_unix.context("missing installed_at_unix")?,
@@ -1148,17 +1155,19 @@ mod tests {
         assert!(receipt.dependencies.is_empty());
         assert_eq!(receipt.install_status, "installed");
         assert!(receipt.target.is_none());
+        assert!(receipt.snapshot_id.is_none());
         assert_eq!(receipt.install_reason, InstallReason::Root);
     }
 
     #[test]
     fn parse_new_receipt_shape() {
-        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
+        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\nsnapshot_id=git:5f1b3d8a1f2a4d0e\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
         let receipt = parse_receipt(raw).expect("must parse");
         assert_eq!(receipt.dependencies, vec!["zlib@2.1.0", "pcre2@10.44.0"]);
         assert_eq!(receipt.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
         assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
+        assert_eq!(receipt.snapshot_id.as_deref(), Some("git:5f1b3d8a1f2a4d0e"));
         assert_eq!(receipt.install_reason, InstallReason::Dependency);
     }
 
@@ -1319,6 +1328,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1363,6 +1373,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1640,6 +1651,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
