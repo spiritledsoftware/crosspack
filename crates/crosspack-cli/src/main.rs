@@ -938,7 +938,16 @@ fn status_allows_stale_marker_cleanup(status: &str) -> bool {
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
     if let Some(txid) = read_active_transaction(layout)? {
-        if let Some(metadata) = read_transaction_metadata(layout, &txid)? {
+        let metadata = match read_transaction_metadata(layout, &txid) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (reason=metadata_unreadable)"
+                ));
+            }
+        };
+
+        if let Some(metadata) = metadata {
             if status_allows_stale_marker_cleanup(&metadata.status) {
                 clear_active_transaction(layout)?;
                 return Ok(());
@@ -1648,6 +1657,28 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("transaction tx-failed-diagnostic requires repair (reason=failed)"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_unreadable_metadata_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-corrupt-meta";
+        std::fs::write(layout.transaction_metadata_path(txid), "{invalid-json")
+            .expect("must write corrupt metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("corrupt metadata should block mutating command");
+        assert!(
+            err.to_string().contains(
+                "transaction tx-corrupt-meta requires repair (reason=metadata_unreadable)"
+            ),
             "unexpected error: {err}"
         );
 
