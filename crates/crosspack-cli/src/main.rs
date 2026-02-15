@@ -7,10 +7,12 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
-    bin_path, current_unix_timestamp, default_user_prefix, expose_binary, install_from_artifact,
-    read_all_pins, read_install_receipts, remove_exposed_binary, remove_file_if_exists,
-    uninstall_package, write_install_receipt, write_pin, InstallReason, InstallReceipt,
-    PrefixLayout, UninstallResult, UninstallStatus,
+    append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
+    default_user_prefix, expose_binary, install_from_artifact, read_all_pins,
+    read_install_receipts, remove_exposed_binary, remove_file_if_exists, set_active_transaction,
+    uninstall_package, write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
+    InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
+    UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -145,22 +147,82 @@ fn main() -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
-            let roots = vec![RootInstallRequest { name, requirement }];
-            let root_names = roots
-                .iter()
-                .map(|root| root.name.clone())
-                .collect::<Vec<_>>();
-            let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
-            for package in &resolved {
-                let dependencies = build_dependency_receipts(package, &resolved);
-                let outcome = install_resolved(
+            let started_at_unix = current_unix_timestamp()?;
+            let mut tx = begin_transaction(&layout, "install", None, started_at_unix)?;
+            let mut journal_seq = 1_u64;
+
+            let install_result = (|| -> Result<()> {
+                let roots = vec![RootInstallRequest { name, requirement }];
+                let root_names = roots
+                    .iter()
+                    .map(|root| root.name.clone())
+                    .collect::<Vec<_>>();
+                let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
+
+                append_transaction_journal_entry(
                     &layout,
-                    package,
-                    &dependencies,
-                    &root_names,
-                    force_redownload,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: "resolve_plan".to_string(),
+                        state: "done".to_string(),
+                        path: None,
+                    },
                 )?;
-                print_install_outcome(&outcome);
+                journal_seq += 1;
+
+                tx.status = "applying".to_string();
+                write_transaction_metadata(&layout, &tx)?;
+
+                for package in &resolved {
+                    append_transaction_journal_entry(
+                        &layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!("install_package:{}", package.manifest.name),
+                            state: "done".to_string(),
+                            path: Some(package.manifest.name.clone()),
+                        },
+                    )?;
+                    journal_seq += 1;
+
+                    let dependencies = build_dependency_receipts(package, &resolved);
+                    let outcome = install_resolved(
+                        &layout,
+                        package,
+                        &dependencies,
+                        &root_names,
+                        force_redownload,
+                    )?;
+                    print_install_outcome(&outcome);
+                }
+
+                append_transaction_journal_entry(
+                    &layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: "apply_complete".to_string(),
+                        state: "done".to_string(),
+                        path: None,
+                    },
+                )?;
+
+                Ok(())
+            })();
+
+            match install_result {
+                Ok(()) => {
+                    tx.status = "committed".to_string();
+                    write_transaction_metadata(&layout, &tx)?;
+                    clear_active_transaction(&layout)?;
+                }
+                Err(err) => {
+                    tx.status = "failed".to_string();
+                    let _ = write_transaction_metadata(&layout, &tx);
+                    return Err(err);
+                }
             }
         }
         Commands::Upgrade { spec } => {
@@ -685,6 +747,28 @@ struct UpgradePlan {
     target: Option<String>,
     roots: Vec<RootInstallRequest>,
     root_names: Vec<String>,
+}
+
+fn begin_transaction(
+    layout: &PrefixLayout,
+    operation: &str,
+    snapshot_id: Option<&str>,
+    started_at_unix: u64,
+) -> Result<TransactionMetadata> {
+    let txid = format!("tx-{started_at_unix}-{}", std::process::id());
+    let metadata = TransactionMetadata {
+        version: 1,
+        txid,
+        operation: operation.to_string(),
+        status: "planning".to_string(),
+        started_at_unix,
+        snapshot_id: snapshot_id.map(ToOwned::to_owned),
+    };
+
+    write_transaction_metadata(layout, &metadata)?;
+    set_active_transaction(layout, &metadata.txid)?;
+
+    Ok(metadata)
 }
 
 fn resolve_install_graph(
@@ -1213,13 +1297,14 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_update_report, build_upgrade_plans, build_upgrade_roots, determine_install_reason,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_update_succeeded,
-        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
-        select_metadata_backend, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
+        determine_install_reason, enforce_disjoint_multi_target_upgrade, enforce_no_downgrades,
+        ensure_update_succeeded, format_registry_add_lines, format_registry_list_lines,
+        format_registry_list_snapshot_state, format_registry_remove_lines,
+        format_uninstall_messages, format_update_summary_line, parse_pin_spec, registry_state_root,
+        run_update_command, select_manifest_with_pin, select_metadata_backend,
+        update_failure_reason_code, validate_binary_preflight, Cli, CliRegistryKind, Commands,
+        MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1234,6 +1319,35 @@ mod tests {
     use semver::VersionReq;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn begin_transaction_writes_planning_metadata_and_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let tx = begin_transaction(
+            &layout,
+            "install",
+            Some("git:5f1b3d8a1f2a4d0e"),
+            1_771_001_234,
+        )
+        .expect("must start transaction");
+
+        assert_eq!(tx.operation, "install");
+        assert_eq!(tx.status, "planning");
+        assert_eq!(tx.snapshot_id.as_deref(), Some("git:5f1b3d8a1f2a4d0e"));
+
+        let active =
+            std::fs::read_to_string(layout.transaction_active_path()).expect("must read active");
+        assert_eq!(active.trim(), tx.txid);
+
+        let metadata = std::fs::read_to_string(layout.transaction_metadata_path(&tx.txid))
+            .expect("must read metadata");
+        assert!(metadata.contains("\"status\": \"planning\""));
+        assert!(metadata.contains("\"operation\": \"install\""));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
 
     #[test]
     fn parse_pin_spec_requires_constraint() {
