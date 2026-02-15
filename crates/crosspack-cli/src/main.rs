@@ -945,7 +945,9 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
             }
             if metadata.status == "applying" {
                 let _ = set_transaction_status(layout, &txid, "failed");
-                return Err(anyhow!("transaction {txid} requires repair"));
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (status=applying->failed)"
+                ));
             }
             if metadata.status == "rolling_back" || metadata.status == "failed" {
                 return Err(anyhow!(
@@ -1953,7 +1955,7 @@ mod tests {
             .expect_err("applying transaction should transition to failed and block");
         assert!(
             err.to_string()
-                .contains("transaction tx-applying requires repair"),
+                .contains("transaction tx-applying requires repair (status=applying->failed)"),
             "unexpected error: {err}"
         );
 
