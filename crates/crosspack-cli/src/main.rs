@@ -952,7 +952,8 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
             Ok(metadata) => metadata,
             Err(_) => {
                 return Err(anyhow!(
-                    "transaction {txid} requires repair (reason=metadata_unreadable)"
+                    "transaction {txid} requires repair (reason=metadata_unreadable path={})",
+                    layout.transaction_metadata_path(&txid).display()
                 ));
             }
         };
@@ -1012,7 +1013,8 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         Ok(metadata) => metadata,
         Err(_) => {
             return Ok(format!(
-                "transaction: failed {txid} (reason=metadata_unreadable)"
+                "transaction: failed {txid} (reason=metadata_unreadable path={})",
+                layout.transaction_metadata_path(&txid).display()
             ));
         }
     };
@@ -1731,10 +1733,12 @@ mod tests {
 
         let err = ensure_no_active_transaction(&layout)
             .expect_err("corrupt metadata should block mutating command");
+        let expected = format!(
+            "transaction tx-corrupt-meta requires repair (reason=metadata_unreadable path={})",
+            layout.transaction_metadata_path(txid).display()
+        );
         assert!(
-            err.to_string().contains(
-                "transaction tx-corrupt-meta requires repair (reason=metadata_unreadable)"
-            ),
+            err.to_string().contains(&expected),
             "unexpected error: {err}"
         );
 
@@ -2219,10 +2223,11 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should map unreadable metadata to failed");
-        assert_eq!(
-            line,
-            "transaction: failed tx-unreadable (reason=metadata_unreadable)"
+        let expected = format!(
+            "transaction: failed tx-unreadable (reason=metadata_unreadable path={})",
+            layout.transaction_metadata_path(txid).display()
         );
+        assert_eq!(line, expected);
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
