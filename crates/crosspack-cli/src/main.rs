@@ -958,6 +958,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         return Ok(format!("transaction: failed {txid}"));
     }
     if status_allows_stale_marker_cleanup(&metadata.status) {
+        clear_active_transaction(layout)?;
         return Ok("transaction: clean".to_string());
     }
 
@@ -1946,6 +1947,35 @@ mod tests {
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for planning marker");
         assert_eq!(line, "transaction: clean");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_clears_stale_marker_when_status_is_final() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-stale".to_string(),
+            operation: "upgrade".to_string(),
+            status: "committed".to_string(),
+            started_at_unix: 1_771_001_680,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-stale").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for stale marker");
+        assert_eq!(line, "transaction: clean");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "doctor should clear stale final-state marker"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
