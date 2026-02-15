@@ -777,6 +777,10 @@ fn begin_transaction(
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
     if let Some(txid) = read_active_transaction(layout)? {
         if let Some(metadata) = read_transaction_metadata(layout, &txid)? {
+            if metadata.status == "committed" {
+                clear_active_transaction(layout)?;
+                return Ok(());
+            }
             if metadata.status == "failed" {
                 return Err(anyhow!("transaction {txid} requires repair"));
             }
@@ -1331,8 +1335,9 @@ mod tests {
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        bin_path, set_active_transaction, write_transaction_metadata, InstallReason,
-        InstallReceipt, PrefixLayout, TransactionMetadata, UninstallResult, UninstallStatus,
+        bin_path, read_active_transaction, set_active_transaction, write_transaction_metadata,
+        InstallReason, InstallReceipt, PrefixLayout, TransactionMetadata, UninstallResult,
+        UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -1412,6 +1417,35 @@ mod tests {
             err.to_string()
                 .contains("transaction tx-abc is active (status=applying)"),
             "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_clears_committed_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-committed".to_string(),
+            operation: "install".to_string(),
+            status: "committed".to_string(),
+            started_at_unix: 1_771_001_360,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-committed").expect("must write active marker");
+
+        ensure_no_active_transaction(&layout)
+            .expect("committed transaction marker should be auto-cleaned");
+
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "committed active marker should be cleared"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
