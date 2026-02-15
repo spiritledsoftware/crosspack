@@ -777,7 +777,7 @@ fn begin_transaction(
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
     if let Some(txid) = read_active_transaction(layout)? {
         if let Some(metadata) = read_transaction_metadata(layout, &txid)? {
-            if metadata.status == "committed" {
+            if metadata.status == "committed" || metadata.status == "planning" {
                 clear_active_transaction(layout)?;
                 return Ok(());
             }
@@ -1446,6 +1446,35 @@ mod tests {
                 .expect("must read active transaction")
                 .is_none(),
             "committed active marker should be cleared"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_clears_planning_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-planning".to_string(),
+            operation: "install".to_string(),
+            status: "planning".to_string(),
+            started_at_unix: 1_771_001_420,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-planning").expect("must write active marker");
+
+        ensure_no_active_transaction(&layout)
+            .expect("planning transaction marker should be auto-cleaned");
+
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "planning active marker should be cleared"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
