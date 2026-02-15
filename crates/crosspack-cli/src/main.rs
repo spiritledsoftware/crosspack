@@ -979,7 +979,7 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
             }
 
             return Err(anyhow!(
-                "transaction {txid} is active (status={})",
+                "transaction {txid} is active (reason=active_status status={})",
                 metadata.status
             ));
         }
@@ -1765,7 +1765,7 @@ mod tests {
             .expect_err("active transaction must include status context");
         assert!(
             err.to_string()
-                .contains("transaction tx-abc is active (status=paused)"),
+                .contains("transaction tx-abc is active (reason=active_status status=paused)"),
             "unexpected error: {err}"
         );
 
