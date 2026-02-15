@@ -908,7 +908,14 @@ where
     match run_result {
         Ok(()) => Ok(()),
         Err(err) => {
-            let _ = set_transaction_status(layout, &tx.txid, "failed");
+            let preserve_recovery_state = read_transaction_metadata(layout, &tx.txid)
+                .ok()
+                .flatten()
+                .map(|metadata| metadata.status == "rolling_back" || metadata.status == "failed")
+                .unwrap_or(false);
+            if !preserve_recovery_state {
+                let _ = set_transaction_status(layout, &tx.txid, "failed");
+            }
             Err(err)
         }
     }
@@ -1754,6 +1761,30 @@ mod tests {
             Some(txid.as_str()),
             "failed transaction should retain active marker for repair"
         );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_preserves_rolling_back_status_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "rolling_back")?;
+            Err(anyhow::anyhow!("rollback in progress"))
+        })
+        .expect_err("failing rollback transaction must return error");
+        assert!(err.to_string().contains("rollback in progress"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "rolling_back");
+        assert_eq!(metadata.operation, "upgrade");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
