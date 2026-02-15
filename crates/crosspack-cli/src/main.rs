@@ -148,11 +148,9 @@ fn main() -> Result<()> {
             layout.ensure_base_dirs()?;
             ensure_no_active_transaction(&layout)?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
-            let started_at_unix = current_unix_timestamp()?;
-            let tx = begin_transaction(&layout, "install", None, started_at_unix)?;
-            let mut journal_seq = 1_u64;
 
-            let install_result = (|| -> Result<()> {
+            execute_with_transaction(&layout, "install", None, |tx| {
+                let mut journal_seq = 1_u64;
                 let roots = vec![RootInstallRequest { name, requirement }];
                 let root_names = roots
                     .iter()
@@ -171,8 +169,6 @@ fn main() -> Result<()> {
                     },
                 )?;
                 journal_seq += 1;
-
-                set_transaction_status(&layout, &tx.txid, "applying")?;
 
                 for package in &resolved {
                     append_transaction_journal_entry(
@@ -210,18 +206,7 @@ fn main() -> Result<()> {
                 )?;
 
                 Ok(())
-            })();
-
-            match install_result {
-                Ok(()) => {
-                    set_transaction_status(&layout, &tx.txid, "committed")?;
-                    clear_active_transaction(&layout)?;
-                }
-                Err(err) => {
-                    let _ = set_transaction_status(&layout, &tx.txid, "failed");
-                    return Err(err);
-                }
-            }
+            })?;
         }
         Commands::Upgrade { spec } => {
             let prefix = default_user_prefix()?;
@@ -236,94 +221,44 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            match spec {
-                Some(single) => {
-                    let (name, requirement) = parse_spec(&single)?;
-                    let installed = receipts.iter().find(|receipt| receipt.name == name);
-                    let Some(installed_receipt) = installed else {
-                        println!("{name} is not installed");
-                        return Ok(());
-                    };
+            execute_with_transaction(&layout, "upgrade", None, |tx| {
+                let mut journal_seq = 1_u64;
 
-                    let roots = vec![RootInstallRequest {
-                        name: installed_receipt.name.clone(),
-                        requirement,
-                    }];
-                    let root_names = Vec::new();
-                    let resolved = resolve_install_graph(
-                        &layout,
-                        &backend,
-                        &roots,
-                        installed_receipt.target.as_deref(),
-                    )?;
-                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
-                    for package in &resolved {
-                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
-                        {
-                            let old_version = Version::parse(&old.version).with_context(|| {
-                                format!(
-                                    "installed receipt for '{}' has invalid version: {}",
-                                    old.name, old.version
-                                )
-                            })?;
-                            if package.manifest.version <= old_version {
-                                println!(
-                                    "{} is up-to-date ({})",
-                                    package.manifest.name, old.version
-                                );
-                                continue;
-                            }
-                        }
+                match spec.as_deref() {
+                    Some(single) => {
+                        let (name, requirement) = parse_spec(single)?;
+                        let installed = receipts.iter().find(|receipt| receipt.name == name);
+                        let Some(installed_receipt) = installed else {
+                            println!("{name} is not installed");
+                            return Ok(());
+                        };
 
-                        let dependencies = build_dependency_receipts(package, &resolved);
-                        let outcome =
-                            install_resolved(&layout, package, &dependencies, &root_names, false)?;
-                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
-                        {
-                            println!(
-                                "upgraded {} from {} to {}",
-                                package.manifest.name, old.version, package.manifest.version
-                            );
-                        }
-                        println!("receipt: {}", outcome.receipt_path.display());
-                    }
-                }
-                None => {
-                    let plans = build_upgrade_plans(&receipts);
-                    if plans.is_empty() {
-                        println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
-                        return Ok(());
-                    }
-
-                    let mut grouped_resolved = Vec::new();
-                    for plan in &plans {
+                        let roots = vec![RootInstallRequest {
+                            name: installed_receipt.name.clone(),
+                            requirement,
+                        }];
+                        let root_names = Vec::new();
                         let resolved = resolve_install_graph(
                             &layout,
                             &backend,
-                            &plan.roots,
-                            plan.target.as_deref(),
+                            &roots,
+                            installed_receipt.target.as_deref(),
                         )?;
                         enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
-                        grouped_resolved.push(resolved);
-                    }
 
-                    let overlap_check = grouped_resolved
-                        .iter()
-                        .zip(plans.iter())
-                        .map(|(resolved, plan)| {
-                            (
-                                plan.target.as_deref(),
-                                resolved
-                                    .iter()
-                                    .map(|package| package.manifest.name.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    enforce_disjoint_multi_target_upgrade(&overlap_check)?;
+                        append_transaction_journal_entry(
+                            &layout,
+                            &tx.txid,
+                            &TransactionJournalEntry {
+                                seq: journal_seq,
+                                step: format!("resolve_plan:{}", installed_receipt.name),
+                                state: "done".to_string(),
+                                path: Some(installed_receipt.name.clone()),
+                            },
+                        )?;
+                        journal_seq += 1;
 
-                    for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
-                        for package in resolved {
+                        for package in &resolved {
                             if let Some(old) =
                                 receipts.iter().find(|r| r.name == package.manifest.name)
                             {
@@ -343,12 +278,24 @@ fn main() -> Result<()> {
                                 }
                             }
 
-                            let dependencies = build_dependency_receipts(package, resolved);
+                            append_transaction_journal_entry(
+                                &layout,
+                                &tx.txid,
+                                &TransactionJournalEntry {
+                                    seq: journal_seq,
+                                    step: format!("upgrade_package:{}", package.manifest.name),
+                                    state: "done".to_string(),
+                                    path: Some(package.manifest.name.clone()),
+                                },
+                            )?;
+                            journal_seq += 1;
+
+                            let dependencies = build_dependency_receipts(package, &resolved);
                             let outcome = install_resolved(
                                 &layout,
                                 package,
                                 &dependencies,
-                                &plan.root_names,
+                                &root_names,
                                 false,
                             )?;
                             if let Some(old) =
@@ -358,27 +305,189 @@ fn main() -> Result<()> {
                                     "upgraded {} from {} to {}",
                                     package.manifest.name, old.version, package.manifest.version
                                 );
-                            } else {
-                                println!(
-                                    "installed dependency {} {}",
-                                    package.manifest.name, package.manifest.version
-                                );
                             }
                             println!("receipt: {}", outcome.receipt_path.display());
                         }
                     }
+                    None => {
+                        let plans = build_upgrade_plans(&receipts);
+                        if plans.is_empty() {
+                            println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
+                            return Ok(());
+                        }
+
+                        let mut grouped_resolved = Vec::new();
+                        for plan in &plans {
+                            let resolved = resolve_install_graph(
+                                &layout,
+                                &backend,
+                                &plan.roots,
+                                plan.target.as_deref(),
+                            )?;
+                            enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+
+                            append_transaction_journal_entry(
+                                &layout,
+                                &tx.txid,
+                                &TransactionJournalEntry {
+                                    seq: journal_seq,
+                                    step: format!(
+                                        "resolve_plan:{}",
+                                        plan.target.as_deref().unwrap_or("host")
+                                    ),
+                                    state: "done".to_string(),
+                                    path: plan.target.clone(),
+                                },
+                            )?;
+                            journal_seq += 1;
+
+                            grouped_resolved.push(resolved);
+                        }
+
+                        let overlap_check = grouped_resolved
+                            .iter()
+                            .zip(plans.iter())
+                            .map(|(resolved, plan)| {
+                                (
+                                    plan.target.as_deref(),
+                                    resolved
+                                        .iter()
+                                        .map(|package| package.manifest.name.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        enforce_disjoint_multi_target_upgrade(&overlap_check)?;
+
+                        for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
+                            for package in resolved {
+                                if let Some(old) =
+                                    receipts.iter().find(|r| r.name == package.manifest.name)
+                                {
+                                    let old_version =
+                                        Version::parse(&old.version).with_context(|| {
+                                            format!(
+                                                "installed receipt for '{}' has invalid version: {}",
+                                                old.name, old.version
+                                            )
+                                        })?;
+                                    if package.manifest.version <= old_version {
+                                        println!(
+                                            "{} is up-to-date ({})",
+                                            package.manifest.name, old.version
+                                        );
+                                        continue;
+                                    }
+                                }
+
+                                append_transaction_journal_entry(
+                                    &layout,
+                                    &tx.txid,
+                                    &TransactionJournalEntry {
+                                        seq: journal_seq,
+                                        step: format!("upgrade_package:{}", package.manifest.name),
+                                        state: "done".to_string(),
+                                        path: Some(package.manifest.name.clone()),
+                                    },
+                                )?;
+                                journal_seq += 1;
+
+                                let dependencies = build_dependency_receipts(package, resolved);
+                                let outcome = install_resolved(
+                                    &layout,
+                                    package,
+                                    &dependencies,
+                                    &plan.root_names,
+                                    false,
+                                )?;
+                                if let Some(old) =
+                                    receipts.iter().find(|r| r.name == package.manifest.name)
+                                {
+                                    println!(
+                                        "upgraded {} from {} to {}",
+                                        package.manifest.name,
+                                        old.version,
+                                        package.manifest.version
+                                    );
+                                } else {
+                                    println!(
+                                        "installed dependency {} {}",
+                                        package.manifest.name, package.manifest.version
+                                    );
+                                }
+                                println!("receipt: {}", outcome.receipt_path.display());
+                            }
+                        }
+                    }
                 }
-            }
+
+                append_transaction_journal_entry(
+                    &layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: "apply_complete".to_string(),
+                        state: "done".to_string(),
+                        path: None,
+                    },
+                )?;
+
+                Ok(())
+            })?;
         }
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
+            layout.ensure_base_dirs()?;
             ensure_no_active_transaction(&layout)?;
-            let result = uninstall_package(&layout, &name)?;
 
-            for line in format_uninstall_messages(&result) {
-                println!("{line}");
-            }
+            execute_with_transaction(&layout, "uninstall", None, |tx| {
+                let mut journal_seq = 1_u64;
+                let result = uninstall_package(&layout, &name)?;
+
+                append_transaction_journal_entry(
+                    &layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: format!("uninstall_target:{}", name),
+                        state: "done".to_string(),
+                        path: Some(name.clone()),
+                    },
+                )?;
+                journal_seq += 1;
+
+                for dependency in &result.pruned_dependencies {
+                    append_transaction_journal_entry(
+                        &layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!("prune_dependency:{dependency}"),
+                            state: "done".to_string(),
+                            path: Some(dependency.clone()),
+                        },
+                    )?;
+                    journal_seq += 1;
+                }
+
+                append_transaction_journal_entry(
+                    &layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: "apply_complete".to_string(),
+                        state: "done".to_string(),
+                        path: None,
+                    },
+                )?;
+
+                for line in format_uninstall_messages(&result) {
+                    println!("{line}");
+                }
+
+                Ok(())
+            })?;
         }
         Commands::List => {
             let prefix = default_user_prefix()?;
@@ -774,6 +883,35 @@ fn begin_transaction(
 
 fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
     update_transaction_status(layout, txid, status)
+}
+
+fn execute_with_transaction<F>(
+    layout: &PrefixLayout,
+    operation: &str,
+    snapshot_id: Option<&str>,
+    run: F,
+) -> Result<()>
+where
+    F: FnOnce(&TransactionMetadata) -> Result<()>,
+{
+    let started_at_unix = current_unix_timestamp()?;
+    let tx = begin_transaction(layout, operation, snapshot_id, started_at_unix)?;
+
+    let run_result = (|| -> Result<()> {
+        set_transaction_status(layout, &tx.txid, "applying")?;
+        run(&tx)?;
+        set_transaction_status(layout, &tx.txid, "committed")?;
+        clear_active_transaction(layout)?;
+        Ok(())
+    })();
+
+    match run_result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = set_transaction_status(layout, &tx.txid, "failed");
+            Err(err)
+        }
+    }
 }
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
@@ -1351,12 +1489,13 @@ mod tests {
         begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
         determine_install_reason, doctor_transaction_health_line,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
-        ensure_update_succeeded, format_registry_add_lines, format_registry_list_lines,
-        format_registry_list_snapshot_state, format_registry_remove_lines,
-        format_uninstall_messages, format_update_summary_line, parse_pin_spec, registry_state_root,
-        run_update_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        ensure_update_succeeded, execute_with_transaction, format_registry_add_lines,
+        format_registry_list_lines, format_registry_list_snapshot_state,
+        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
+        parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
+        select_metadata_backend, set_transaction_status, update_failure_reason_code,
+        validate_binary_preflight, Cli, CliRegistryKind, Commands, MetadataBackend,
+        ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1520,6 +1659,64 @@ mod tests {
             .expect("must read metadata")
             .expect("metadata must exist");
         assert_eq!(metadata.status, "applying");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_commits_and_clears_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        execute_with_transaction(&layout, "upgrade", None, |tx| {
+            txid = Some(tx.txid.clone());
+            Ok(())
+        })
+        .expect("transaction should commit");
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "committed");
+        assert_eq!(metadata.operation, "upgrade");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "active marker should be cleared"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_marks_failed_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "uninstall", None, |tx| {
+            txid = Some(tx.txid.clone());
+            Err(anyhow::anyhow!("boom"))
+        })
+        .expect_err("failing transaction must return error");
+        assert!(err.to_string().contains("boom"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "failed");
+        assert_eq!(metadata.operation, "uninstall");
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some(txid.as_str()),
+            "failed transaction should retain active marker for repair"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
