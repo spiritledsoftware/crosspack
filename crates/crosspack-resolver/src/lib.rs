@@ -207,7 +207,29 @@ fn selected_satisfies_constraints(
             }
         }
     }
+
+    let selected_manifests: Vec<&PackageManifest> = selected.values().collect();
+    for (index, left) in selected_manifests.iter().enumerate() {
+        for right in selected_manifests.iter().skip(index + 1) {
+            if manifests_conflict(left, right) {
+                return false;
+            }
+        }
+    }
+
     true
+}
+
+fn manifests_conflict(left: &PackageManifest, right: &PackageManifest) -> bool {
+    left.conflicts
+        .get(&right.name)
+        .map(|req| req.matches(&right.version))
+        .unwrap_or(false)
+        || right
+            .conflicts
+            .get(&left.name)
+            .map(|req| req.matches(&left.version))
+            .unwrap_or(false)
 }
 
 fn topo_order(selected: &BTreeMap<String, PackageManifest>) -> Result<Vec<String>> {
@@ -713,6 +735,71 @@ sha256 = "compiler"
                 .expect("compiler dependency must be selected")
                 .name,
             "compiler"
+        );
+    }
+
+    #[test]
+    fn fails_when_selected_packages_conflict() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+foo = "*"
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "foo".to_string(),
+            vec![manifest(
+                r#"
+name = "foo"
+version = "1.0.0"
+[conflicts]
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+            )],
+        );
+        available.insert(
+            "bar".to_string(),
+            vec![manifest(
+                r#"
+name = "bar"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#,
+            )],
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let err = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect_err("conflicting graph must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("no compatible dependency graph found"),
+            "unexpected error: {err}"
         );
     }
 
