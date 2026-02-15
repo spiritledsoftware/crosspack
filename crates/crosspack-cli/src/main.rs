@@ -10,9 +10,9 @@ use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
     read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
-    remove_file_if_exists, set_active_transaction, uninstall_package, write_install_receipt,
-    write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    remove_file_if_exists, set_active_transaction, uninstall_package, update_transaction_status,
+    write_install_receipt, write_pin, write_transaction_metadata, InstallReason, InstallReceipt,
+    PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -149,7 +149,7 @@ fn main() -> Result<()> {
             ensure_no_active_transaction(&layout)?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
             let started_at_unix = current_unix_timestamp()?;
-            let mut tx = begin_transaction(&layout, "install", None, started_at_unix)?;
+            let tx = begin_transaction(&layout, "install", None, started_at_unix)?;
             let mut journal_seq = 1_u64;
 
             let install_result = (|| -> Result<()> {
@@ -172,8 +172,7 @@ fn main() -> Result<()> {
                 )?;
                 journal_seq += 1;
 
-                tx.status = "applying".to_string();
-                write_transaction_metadata(&layout, &tx)?;
+                set_transaction_status(&layout, &tx.txid, "applying")?;
 
                 for package in &resolved {
                     append_transaction_journal_entry(
@@ -215,13 +214,11 @@ fn main() -> Result<()> {
 
             match install_result {
                 Ok(()) => {
-                    tx.status = "committed".to_string();
-                    write_transaction_metadata(&layout, &tx)?;
+                    set_transaction_status(&layout, &tx.txid, "committed")?;
                     clear_active_transaction(&layout)?;
                 }
                 Err(err) => {
-                    tx.status = "failed".to_string();
-                    let _ = write_transaction_metadata(&layout, &tx);
+                    let _ = set_transaction_status(&layout, &tx.txid, "failed");
                     return Err(err);
                 }
             }
@@ -772,6 +769,10 @@ fn begin_transaction(
     set_active_transaction(layout, &metadata.txid)?;
 
     Ok(metadata)
+}
+
+fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
+    update_transaction_status(layout, txid, status)
 }
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
@@ -1329,15 +1330,16 @@ mod tests {
         format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
         parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
-        select_metadata_backend, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        select_metadata_backend, set_transaction_status, update_failure_reason_code,
+        validate_binary_preflight, Cli, CliRegistryKind, Commands, MetadataBackend,
+        ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        bin_path, read_active_transaction, set_active_transaction, write_transaction_metadata,
-        InstallReason, InstallReceipt, PrefixLayout, TransactionMetadata, UninstallResult,
-        UninstallStatus,
+        bin_path, read_active_transaction, read_transaction_metadata, set_active_transaction,
+        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+        TransactionMetadata, UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -1476,6 +1478,24 @@ mod tests {
                 .is_none(),
             "planning active marker should be cleared"
         );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn set_transaction_status_updates_metadata_via_helper() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let tx = begin_transaction(&layout, "install", None, 1_771_001_500)
+            .expect("must create transaction");
+
+        set_transaction_status(&layout, &tx.txid, "applying").expect("must update status");
+
+        let metadata = read_transaction_metadata(&layout, &tx.txid)
+            .expect("must read metadata")
+            .expect("metadata must exist");
+        assert_eq!(metadata.status, "applying");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
