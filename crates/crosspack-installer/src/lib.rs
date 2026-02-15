@@ -227,6 +227,26 @@ pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathB
     Ok(path)
 }
 
+pub fn read_active_transaction(layout: &PrefixLayout) -> Result<Option<String>> {
+    let path = layout.transaction_active_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to read active transaction file: {}", path.display())
+            });
+        }
+    };
+
+    let txid = raw.trim();
+    if txid.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(txid.to_string()))
+}
+
 pub fn clear_active_transaction(layout: &PrefixLayout) -> Result<()> {
     let path = layout.transaction_active_path();
     if path.exists() {
@@ -1138,10 +1158,11 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
-        parse_receipt, read_all_pins, read_pin, remove_exposed_binary, remove_pin,
-        set_active_transaction, strip_rel_components, uninstall_package, write_install_receipt,
-        write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-        TransactionJournalEntry, TransactionMetadata, UninstallStatus,
+        parse_receipt, read_active_transaction, read_all_pins, read_pin, remove_exposed_binary,
+        remove_pin, set_active_transaction, strip_rel_components, uninstall_package,
+        write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
+        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
+        UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -1230,6 +1251,31 @@ mod tests {
 
         clear_active_transaction(&layout).expect("must clear active transaction");
         assert!(!layout.transaction_active_path().exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_active_transaction_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        assert!(read_active_transaction(&layout)
+            .expect("must read active transaction")
+            .is_none());
+
+        set_active_transaction(&layout, "tx-abc").expect("must write active transaction");
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-abc")
+        );
+
+        clear_active_transaction(&layout).expect("must clear active transaction");
+        assert!(read_active_transaction(&layout)
+            .expect("must read active transaction")
+            .is_none());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
