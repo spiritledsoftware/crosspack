@@ -152,7 +152,22 @@ where
         .cloned()
         .collect();
 
-    if matched.is_empty() {
+    let has_direct_match = matched.iter().any(|manifest| manifest.name == name);
+    let mut selected = if has_direct_match {
+        matched
+            .into_iter()
+            .filter(|manifest| manifest.name == name)
+            .collect::<Vec<_>>()
+    } else {
+        matched
+            .into_iter()
+            .filter(|manifest| manifest.provides.iter().any(|provided| provided == name))
+            .collect::<Vec<_>>()
+    };
+
+    selected.sort_by(|a, b| b.version.cmp(&a.version).then_with(|| a.name.cmp(&b.name)));
+
+    if selected.is_empty() {
         let req_desc = if package_reqs.is_empty() {
             "*".to_string()
         } else {
@@ -172,7 +187,7 @@ where
         ));
     }
 
-    Ok(matched)
+    Ok(selected)
 }
 
 fn selected_satisfies_constraints(
@@ -634,6 +649,71 @@ sha256 = "shared11"
             "1.3.0"
         );
         assert_eq!(graph.install_order, vec!["shared", "tool-a", "tool-b"]);
+    }
+
+    #[test]
+    fn prefers_direct_package_name_over_capability_provider_candidates() {
+        let mut available = BTreeMap::new();
+        available.insert(
+            "app".to_string(),
+            vec![manifest(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+            )],
+        );
+        available.insert(
+            "compiler".to_string(),
+            vec![
+                manifest(
+                    r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+                ),
+                manifest(
+                    r#"
+name = "compiler"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/compiler-1.0.0.tar.zst"
+sha256 = "compiler"
+"#,
+                ),
+            ],
+        );
+
+        let roots = vec![RootRequirement {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let graph = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+        assert_eq!(
+            graph
+                .manifests
+                .get("compiler")
+                .expect("compiler dependency must be selected")
+                .name,
+            "compiler"
+        );
     }
 
     fn manifest(raw: &str) -> PackageManifest {
