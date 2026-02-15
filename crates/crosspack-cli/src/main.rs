@@ -925,11 +925,11 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
                 clear_active_transaction(layout)?;
                 return Ok(());
             }
-            if metadata.status == "applying" || metadata.status == "rolling_back" {
+            if metadata.status == "applying" {
                 let _ = set_transaction_status(layout, &txid, "failed");
                 return Err(anyhow!("transaction {txid} requires repair"));
             }
-            if metadata.status == "failed" {
+            if metadata.status == "rolling_back" || metadata.status == "failed" {
                 return Err(anyhow!("transaction {txid} requires repair"));
             }
 
@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_no_active_transaction_marks_rolling_back_as_failed() {
+    fn ensure_no_active_transaction_blocks_rolling_back_without_mutating_status() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -1806,7 +1806,7 @@ mod tests {
         set_active_transaction(&layout, "tx-rolling-back").expect("must write active marker");
 
         let err = ensure_no_active_transaction(&layout)
-            .expect_err("rolling_back transaction should transition to failed and block");
+            .expect_err("rolling_back transaction should block and preserve status");
         assert!(
             err.to_string()
                 .contains("transaction tx-rolling-back requires repair"),
@@ -1816,7 +1816,7 @@ mod tests {
         let updated = read_transaction_metadata(&layout, "tx-rolling-back")
             .expect("must read metadata")
             .expect("metadata should exist");
-        assert_eq!(updated.status, "failed");
+        assert_eq!(updated.status, "rolling_back");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
