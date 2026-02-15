@@ -1003,6 +1003,11 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         ));
     };
 
+    if metadata.status == "applying" {
+        return Ok(format!(
+            "transaction: failed {txid} (reason=applying_incomplete)"
+        ));
+    }
     if metadata.status == "rolling_back" {
         return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
     }
@@ -2162,6 +2167,32 @@ mod tests {
     }
 
     #[test]
+    fn doctor_transaction_health_line_treats_applying_as_failed() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-applying-health".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_645,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-applying-health").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for applying tx");
+        assert_eq!(
+            line,
+            "transaction: failed tx-applying-health (reason=applying_incomplete)"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn doctor_transaction_health_line_reports_active_state_without_status_suffix() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -2170,7 +2201,7 @@ mod tests {
             version: 1,
             txid: "tx-active".to_string(),
             operation: "upgrade".to_string(),
-            status: "applying".to_string(),
+            status: "paused".to_string(),
             started_at_unix: 1_771_001_640,
             snapshot_id: None,
         };
