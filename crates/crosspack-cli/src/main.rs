@@ -985,7 +985,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
     }
     if metadata.status == "failed" {
-        return Ok(format!("transaction: failed {txid}"));
+        return Ok(format!("transaction: failed {txid} (reason=failed)"));
     }
     if status_allows_stale_marker_cleanup(&metadata.status) {
         clear_active_transaction(layout)?;
@@ -2022,7 +2022,7 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for failed tx");
-        assert_eq!(line, "transaction: failed tx-failed");
+        assert_eq!(line, "transaction: failed tx-failed (reason=failed)");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
