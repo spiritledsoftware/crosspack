@@ -951,7 +951,7 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
     };
 
     let Some(metadata) = read_transaction_metadata(layout, &txid)? else {
-        return Ok(format!("transaction: active {txid}"));
+        return Ok(format!("transaction: failed {txid}"));
     };
 
     if metadata.status == "failed" || metadata.status == "rolling_back" {
@@ -1863,6 +1863,20 @@ mod tests {
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for rolling_back tx");
         assert_eq!(line, "transaction: failed tx-rolling-back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_when_active_marker_has_no_metadata() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-missing").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for missing metadata");
+        assert_eq!(line, "transaction: failed tx-missing");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
