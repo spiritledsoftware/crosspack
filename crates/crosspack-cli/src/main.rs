@@ -937,7 +937,16 @@ fn status_allows_stale_marker_cleanup(status: &str) -> bool {
 }
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
-    if let Some(txid) = read_active_transaction(layout)? {
+    let active_txid = match read_active_transaction(layout) {
+        Ok(active_txid) => active_txid,
+        Err(_) => {
+            return Err(anyhow!(
+                "transaction state requires repair (reason=active_marker_unreadable)"
+            ));
+        }
+    };
+
+    if let Some(txid) = active_txid {
         let metadata = match read_transaction_metadata(layout, &txid) {
             Ok(metadata) => metadata,
             Err(_) => {
@@ -1600,6 +1609,25 @@ mod tests {
             .expect("must read metadata");
         assert!(metadata.contains("\"status\": \"planning\""));
         assert!(metadata.contains("\"operation\": \"install\""));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_unreadable_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        std::fs::create_dir_all(layout.transaction_active_path())
+            .expect("must create unreadable active marker fixture");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("unreadable active marker should return repair-required reason");
+        assert!(
+            err.to_string()
+                .contains("transaction state requires repair (reason=active_marker_unreadable)"),
+            "unexpected error: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
