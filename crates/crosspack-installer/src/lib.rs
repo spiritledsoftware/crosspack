@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,9 +24,28 @@ pub struct InstallReceipt {
     pub artifact_sha256: Option<String>,
     pub cache_path: Option<String>,
     pub exposed_bins: Vec<String>,
+    pub snapshot_id: Option<String>,
     pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionMetadata {
+    pub version: u32,
+    pub txid: String,
+    pub operation: String,
+    pub status: String,
+    pub started_at_unix: u64,
+    pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionJournalEntry {
+    pub seq: u64,
+    pub step: String,
+    pub state: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +143,30 @@ impl PrefixLayout {
         self.installed_state_dir().join(format!("{name}.receipt"))
     }
 
+    pub fn transactions_dir(&self) -> PathBuf {
+        self.state_dir().join("transactions")
+    }
+
+    pub fn transactions_staging_dir(&self) -> PathBuf {
+        self.transactions_dir().join("staging")
+    }
+
+    pub fn transaction_active_path(&self) -> PathBuf {
+        self.transactions_dir().join("active")
+    }
+
+    pub fn transaction_metadata_path(&self, txid: &str) -> PathBuf {
+        self.transactions_dir().join(format!("{txid}.json"))
+    }
+
+    pub fn transaction_journal_path(&self, txid: &str) -> PathBuf {
+        self.transactions_dir().join(format!("{txid}.journal"))
+    }
+
+    pub fn transaction_staging_path(&self, txid: &str) -> PathBuf {
+        self.transactions_staging_dir().join(txid)
+    }
+
     pub fn artifact_cache_path(
         &self,
         name: &str,
@@ -148,6 +191,8 @@ impl PrefixLayout {
             self.tmp_state_dir(),
             self.installed_state_dir(),
             self.pins_dir(),
+            self.transactions_dir(),
+            self.transactions_staging_dir(),
         ] {
             fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -165,6 +210,175 @@ pub fn default_user_prefix() -> Result<PathBuf> {
 
     let home = std::env::var("HOME").context("HOME is not set; cannot resolve user prefix")?;
     Ok(PathBuf::from(home).join(".crosspack"))
+}
+
+pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathBuf> {
+    let path = layout.transaction_active_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            let existing = read_active_transaction(layout).ok().flatten();
+            let detail = existing
+                .map(|existing_txid| format!(" (txid={existing_txid})"))
+                .unwrap_or_default();
+            return Err(anyhow!("active transaction marker already exists{detail}"));
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to claim active transaction file: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    file.write_all(format!("{txid}\n").as_bytes())
+        .with_context(|| {
+            format!(
+                "failed to write active transaction file: {}",
+                path.display()
+            )
+        })?;
+    file.flush().with_context(|| {
+        format!(
+            "failed to flush active transaction file: {}",
+            path.display()
+        )
+    })?;
+
+    Ok(path)
+}
+
+pub fn read_active_transaction(layout: &PrefixLayout) -> Result<Option<String>> {
+    let path = layout.transaction_active_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to read active transaction file: {}", path.display())
+            });
+        }
+    };
+
+    let txid = raw.trim();
+    if txid.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(txid.to_string()))
+}
+
+pub fn clear_active_transaction(layout: &PrefixLayout) -> Result<()> {
+    let path = layout.transaction_active_path();
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| {
+            format!(
+                "failed to clear active transaction file: {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn write_transaction_metadata(
+    layout: &PrefixLayout,
+    metadata: &TransactionMetadata,
+) -> Result<PathBuf> {
+    let path = layout.transaction_metadata_path(&metadata.txid);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::create_dir_all(layout.transaction_staging_path(&metadata.txid)).with_context(|| {
+        format!(
+            "failed to create transaction staging dir: {}",
+            layout.transaction_staging_path(&metadata.txid).display()
+        )
+    })?;
+
+    fs::write(&path, serialize_transaction_metadata(metadata)).with_context(|| {
+        format!(
+            "failed to write transaction metadata file: {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+pub fn read_transaction_metadata(
+    layout: &PrefixLayout,
+    txid: &str,
+) -> Result<Option<TransactionMetadata>> {
+    let path = layout.transaction_metadata_path(txid);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to read transaction metadata file: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    let metadata = parse_transaction_metadata(&raw).with_context(|| {
+        format!(
+            "failed parsing transaction metadata file: {}",
+            path.display()
+        )
+    })?;
+    Ok(Some(metadata))
+}
+
+pub fn update_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
+    let mut metadata = read_transaction_metadata(layout, txid)?
+        .ok_or_else(|| anyhow!("transaction metadata not found for '{txid}'"))?;
+    metadata.status = status.to_string();
+    write_transaction_metadata(layout, &metadata)?;
+    Ok(())
+}
+
+pub fn append_transaction_journal_entry(
+    layout: &PrefixLayout,
+    txid: &str,
+    entry: &TransactionJournalEntry,
+) -> Result<PathBuf> {
+    let path = layout.transaction_journal_path(txid);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open transaction journal: {}", path.display()))?;
+    file.write_all(serialize_transaction_journal_entry(entry).as_bytes())
+        .with_context(|| format!("failed to append transaction journal: {}", path.display()))?;
+    file.write_all(b"\n").with_context(|| {
+        format!(
+            "failed to append transaction journal newline: {}",
+            path.display()
+        )
+    })?;
+    file.flush()
+        .with_context(|| format!("failed to flush transaction journal: {}", path.display()))?;
+    Ok(path)
 }
 
 pub fn install_from_artifact(
@@ -232,6 +446,9 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     }
     for exposed_bin in &receipt.exposed_bins {
         payload.push_str(&format!("exposed_bin={}\n", exposed_bin));
+    }
+    if let Some(snapshot_id) = &receipt.snapshot_id {
+        payload.push_str(&format!("snapshot_id={}\n", snapshot_id));
     }
     payload.push_str(&format!(
         "install_reason={}\n",
@@ -492,6 +709,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut artifact_sha256 = None;
     let mut cache_path = None;
     let mut exposed_bins = Vec::new();
+    let mut snapshot_id = None;
     let mut install_reason = None;
     let mut install_status = None;
     let mut installed_at_unix = None;
@@ -509,6 +727,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
             "artifact_sha256" => artifact_sha256 = Some(v.to_string()),
             "cache_path" => cache_path = Some(v.to_string()),
             "exposed_bin" => exposed_bins.push(v.to_string()),
+            "snapshot_id" => snapshot_id = Some(v.to_string()),
             "install_reason" => install_reason = Some(InstallReason::parse(v)?),
             "install_status" => install_status = Some(v.to_string()),
             "installed_at_unix" => {
@@ -527,6 +746,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         artifact_sha256,
         cache_path,
         exposed_bins,
+        snapshot_id,
         install_reason: install_reason.unwrap_or(InstallReason::Root),
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
         installed_at_unix: installed_at_unix.context("missing installed_at_unix")?,
@@ -929,6 +1149,130 @@ fn copy_with_strip_recursive(
     Ok(())
 }
 
+fn serialize_transaction_metadata(metadata: &TransactionMetadata) -> String {
+    let snapshot_id = metadata
+        .snapshot_id
+        .as_ref()
+        .map(|value| format!("\n  \"snapshot_id\": \"{}\"", escape_json(value)))
+        .unwrap_or_default();
+
+    format!(
+        "{{\n  \"version\": {},\n  \"txid\": \"{}\",\n  \"operation\": \"{}\",\n  \"status\": \"{}\",\n  \"started_at_unix\": {}{}\n}}\n",
+        metadata.version,
+        escape_json(&metadata.txid),
+        escape_json(&metadata.operation),
+        escape_json(&metadata.status),
+        metadata.started_at_unix,
+        snapshot_id
+    )
+}
+
+fn serialize_transaction_journal_entry(entry: &TransactionJournalEntry) -> String {
+    let mut fields = vec![
+        format!("\"seq\":{}", entry.seq),
+        format!("\"step\":\"{}\"", escape_json(&entry.step)),
+        format!("\"state\":\"{}\"", escape_json(&entry.state)),
+    ];
+    if let Some(path) = &entry.path {
+        fields.push(format!("\"path\":\"{}\"", escape_json(path)));
+    }
+    format!("{{{}}}", fields.join(","))
+}
+
+fn parse_transaction_metadata(raw: &str) -> Result<TransactionMetadata> {
+    let mut string_fields = HashMap::new();
+    let mut number_fields = HashMap::new();
+
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line == "{" || line == "}" {
+            continue;
+        }
+
+        let normalized = line.strip_suffix(',').unwrap_or(line);
+        let (raw_key, raw_value) = normalized
+            .split_once(':')
+            .ok_or_else(|| anyhow!("invalid transaction metadata line: {line}"))?;
+
+        let key = raw_key.trim().trim_matches('"').to_string();
+        let value = raw_value.trim();
+        if value.starts_with('"') || value.ends_with('"') {
+            if !(value.starts_with('"') && value.ends_with('"') && value.len() >= 2) {
+                return Err(anyhow!(
+                    "invalid quoted transaction metadata value for field: {key}"
+                ));
+            }
+
+            let inner = &value[1..value.len() - 1];
+            string_fields.insert(key, unescape_json(inner)?);
+        } else {
+            number_fields.insert(key, value.to_string());
+        }
+    }
+
+    let parse_number = |field: &str| -> Result<u64> {
+        number_fields
+            .get(field)
+            .with_context(|| format!("missing transaction metadata field: {field}"))?
+            .parse::<u64>()
+            .with_context(|| format!("invalid numeric transaction metadata field: {field}"))
+    };
+
+    Ok(TransactionMetadata {
+        version: parse_number("version")? as u32,
+        txid: string_fields
+            .get("txid")
+            .with_context(|| "missing transaction metadata field: txid")?
+            .clone(),
+        operation: string_fields
+            .get("operation")
+            .with_context(|| "missing transaction metadata field: operation")?
+            .clone(),
+        status: string_fields
+            .get("status")
+            .with_context(|| "missing transaction metadata field: status")?
+            .clone(),
+        started_at_unix: parse_number("started_at_unix")?,
+        snapshot_id: string_fields.get("snapshot_id").cloned(),
+    })
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn unescape_json(value: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut chars = value.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        let escaped = chars
+            .next()
+            .ok_or_else(|| anyhow!("unterminated JSON escape sequence"))?;
+        match escaped {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            other => {
+                return Err(anyhow!("unsupported JSON escape sequence: \\{other}"));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 fn strip_rel_components(path: &Path, strip_components: usize) -> Option<PathBuf> {
     let components: Vec<_> = path
         .components()
@@ -965,9 +1309,12 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bin_path, expose_binary, parse_receipt, read_all_pins, read_pin, remove_exposed_binary,
-        remove_pin, strip_rel_components, uninstall_package, write_install_receipt, write_pin,
-        InstallReason, InstallReceipt, PrefixLayout, UninstallStatus,
+        append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
+        parse_receipt, read_active_transaction, read_all_pins, read_pin, read_transaction_metadata,
+        remove_exposed_binary, remove_pin, set_active_transaction, strip_rel_components,
+        uninstall_package, update_transaction_status, write_install_receipt, write_pin,
+        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+        TransactionJournalEntry, TransactionMetadata, UninstallStatus,
     };
     use std::fs;
     use std::path::Path;
@@ -981,18 +1328,249 @@ mod tests {
         assert!(receipt.dependencies.is_empty());
         assert_eq!(receipt.install_status, "installed");
         assert!(receipt.target.is_none());
+        assert!(receipt.snapshot_id.is_none());
         assert_eq!(receipt.install_reason, InstallReason::Root);
     }
 
     #[test]
     fn parse_new_receipt_shape() {
-        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
+        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\nsnapshot_id=git:5f1b3d8a1f2a4d0e\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
         let receipt = parse_receipt(raw).expect("must parse");
         assert_eq!(receipt.dependencies, vec!["zlib@2.1.0", "pcre2@10.44.0"]);
         assert_eq!(receipt.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
         assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
+        assert_eq!(receipt.snapshot_id.as_deref(), Some("git:5f1b3d8a1f2a4d0e"));
         assert_eq!(receipt.install_reason, InstallReason::Dependency);
+    }
+
+    #[test]
+    fn transaction_paths_match_spec_layout() {
+        let layout = test_layout();
+        assert_eq!(
+            layout.transactions_dir(),
+            layout.state_dir().join("transactions")
+        );
+        assert_eq!(
+            layout.transaction_active_path(),
+            layout.state_dir().join("transactions").join("active")
+        );
+        assert_eq!(
+            layout.transaction_metadata_path("tx-1"),
+            layout.state_dir().join("transactions").join("tx-1.json")
+        );
+        assert_eq!(
+            layout.transaction_journal_path("tx-1"),
+            layout.state_dir().join("transactions").join("tx-1.journal")
+        );
+        assert_eq!(
+            layout.transaction_staging_path("tx-1"),
+            layout
+                .state_dir()
+                .join("transactions")
+                .join("staging")
+                .join("tx-1")
+        );
+    }
+
+    #[test]
+    fn write_transaction_metadata_and_active_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-1771001234-000042".to_string(),
+            operation: "upgrade".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_234,
+            snapshot_id: Some("git:5f1b3d8a1f2a4d0e".to_string()),
+        };
+
+        let metadata_path = write_transaction_metadata(&layout, &metadata)
+            .expect("must write transaction metadata");
+        set_active_transaction(&layout, &metadata.txid).expect("must write active transaction");
+
+        let metadata_raw = fs::read_to_string(metadata_path).expect("must read metadata file");
+        assert!(metadata_raw.contains("\"txid\": \"tx-1771001234-000042\""));
+        assert!(metadata_raw.contains("\"operation\": \"upgrade\""));
+        assert!(metadata_raw.contains("\"status\": \"applying\""));
+        assert!(metadata_raw.contains("\"snapshot_id\": \"git:5f1b3d8a1f2a4d0e\""));
+
+        let active_raw =
+            fs::read_to_string(layout.transaction_active_path()).expect("must read active file");
+        assert_eq!(active_raw.trim(), "tx-1771001234-000042");
+
+        clear_active_transaction(&layout).expect("must clear active transaction");
+        assert!(!layout.transaction_active_path().exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_transaction_metadata_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-meta-1".to_string(),
+            operation: "upgrade".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_240,
+            snapshot_id: Some("git:abc123".to_string()),
+        };
+
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        let loaded = read_transaction_metadata(&layout, "tx-meta-1")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+
+        assert_eq!(loaded, metadata);
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_transaction_metadata_rejects_truncated_quoted_value() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-corrupt-quote";
+        let raw = "{\n  \"version\": 1,\n  \"txid\": \",\n  \"operation\": \"install\",\n  \"status\": \"planning\",\n  \"started_at_unix\": 1771001250\n}\n";
+        fs::write(layout.transaction_metadata_path(txid), raw)
+            .expect("must write malformed metadata file");
+
+        let err = read_transaction_metadata(&layout, txid)
+            .expect_err("truncated quoted value should be recoverable parse error");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text.contains("invalid quoted transaction metadata value for field: txid"),
+            "unexpected error: {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn update_transaction_status_rewrites_metadata_status() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-status-1".to_string(),
+            operation: "install".to_string(),
+            status: "planning".to_string(),
+            started_at_unix: 1_771_001_250,
+            snapshot_id: None,
+        };
+
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        update_transaction_status(&layout, "tx-status-1", "applying").expect("must update status");
+
+        let loaded = read_transaction_metadata(&layout, "tx-status-1")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(loaded.status, "applying");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_active_transaction_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        assert!(read_active_transaction(&layout)
+            .expect("must read active transaction")
+            .is_none());
+
+        set_active_transaction(&layout, "tx-abc").expect("must write active transaction");
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-abc")
+        );
+
+        clear_active_transaction(&layout).expect("must clear active transaction");
+        assert!(read_active_transaction(&layout)
+            .expect("must read active transaction")
+            .is_none());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn set_active_transaction_rejects_when_marker_already_exists() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-first").expect("must claim first active marker");
+
+        let err = set_active_transaction(&layout, "tx-second")
+            .expect_err("second active claim should fail atomically");
+        assert!(
+            err.to_string()
+                .contains("active transaction marker already exists (txid=tx-first)"),
+            "unexpected error: {err}"
+        );
+
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active marker")
+                .as_deref(),
+            Some("tx-first"),
+            "first active marker should remain intact"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn append_transaction_journal_entries_in_order() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        append_transaction_journal_entry(
+            &layout,
+            "tx-1",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_receipt".to_string(),
+                state: "done".to_string(),
+                path: Some("state/installed/tool.receipt.bak".to_string()),
+            },
+        )
+        .expect("must append first entry");
+
+        append_transaction_journal_entry(
+            &layout,
+            "tx-1",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "remove_package_dir".to_string(),
+                state: "done".to_string(),
+                path: Some("pkgs/tool/1.0.0".to_string()),
+            },
+        )
+        .expect("must append second entry");
+
+        let journal_raw =
+            fs::read_to_string(layout.transaction_journal_path("tx-1")).expect("must read journal");
+        let lines: Vec<&str> = journal_raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "{\"seq\":1,\"step\":\"backup_receipt\",\"state\":\"done\",\"path\":\"state/installed/tool.receipt.bak\"}"
+        );
+        assert_eq!(
+            lines[1],
+            "{\"seq\":2,\"step\":\"remove_package_dir\",\"state\":\"done\",\"path\":\"pkgs/tool/1.0.0\"}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
@@ -1044,6 +1622,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1088,6 +1667,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1365,6 +1945,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,

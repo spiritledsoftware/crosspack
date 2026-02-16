@@ -7,10 +7,12 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
-    bin_path, current_unix_timestamp, default_user_prefix, expose_binary, install_from_artifact,
-    read_all_pins, read_install_receipts, remove_exposed_binary, remove_file_if_exists,
-    uninstall_package, write_install_receipt, write_pin, InstallReason, InstallReceipt,
-    PrefixLayout, UninstallResult, UninstallStatus,
+    append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
+    default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
+    read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
+    remove_file_if_exists, set_active_transaction, uninstall_package, update_transaction_status,
+    write_install_receipt, write_pin, write_transaction_metadata, InstallReason, InstallReceipt,
+    PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -144,179 +146,77 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
+            ensure_no_active_transaction_for(&layout, "install")?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
-            let roots = vec![RootInstallRequest { name, requirement }];
-            let root_names = roots
-                .iter()
-                .map(|root| root.name.clone())
-                .collect::<Vec<_>>();
-            let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
-            for package in &resolved {
-                let dependencies = build_dependency_receipts(package, &resolved);
-                let outcome = install_resolved(
+
+            execute_with_transaction(&layout, "install", None, |tx| {
+                let mut journal_seq = 1_u64;
+                let roots = vec![RootInstallRequest { name, requirement }];
+                let root_names = roots
+                    .iter()
+                    .map(|root| root.name.clone())
+                    .collect::<Vec<_>>();
+                let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
+
+                append_transaction_journal_entry(
                     &layout,
-                    package,
-                    &dependencies,
-                    &root_names,
-                    force_redownload,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: "resolve_plan".to_string(),
+                        state: "done".to_string(),
+                        path: None,
+                    },
                 )?;
-                print_install_outcome(&outcome);
-            }
+                journal_seq += 1;
+
+                for package in &resolved {
+                    append_transaction_journal_entry(
+                        &layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!("install_package:{}", package.manifest.name),
+                            state: "done".to_string(),
+                            path: Some(package.manifest.name.clone()),
+                        },
+                    )?;
+                    journal_seq += 1;
+
+                    let dependencies = build_dependency_receipts(package, &resolved);
+                    let outcome = install_resolved(
+                        &layout,
+                        package,
+                        &dependencies,
+                        &root_names,
+                        force_redownload,
+                    )?;
+                    print_install_outcome(&outcome);
+                }
+
+                append_transaction_journal_entry(
+                    &layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: "apply_complete".to_string(),
+                        state: "done".to_string(),
+                        path: None,
+                    },
+                )?;
+
+                Ok(())
+            })?;
         }
         Commands::Upgrade { spec } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            layout.ensure_base_dirs()?;
-            let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
-
-            let receipts = read_install_receipts(&layout)?;
-            if receipts.is_empty() {
-                println!("No installed packages");
-                return Ok(());
-            }
-
-            match spec {
-                Some(single) => {
-                    let (name, requirement) = parse_spec(&single)?;
-                    let installed = receipts.iter().find(|receipt| receipt.name == name);
-                    let Some(installed_receipt) = installed else {
-                        println!("{name} is not installed");
-                        return Ok(());
-                    };
-
-                    let roots = vec![RootInstallRequest {
-                        name: installed_receipt.name.clone(),
-                        requirement,
-                    }];
-                    let root_names = Vec::new();
-                    let resolved = resolve_install_graph(
-                        &layout,
-                        &backend,
-                        &roots,
-                        installed_receipt.target.as_deref(),
-                    )?;
-                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
-                    for package in &resolved {
-                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
-                        {
-                            let old_version = Version::parse(&old.version).with_context(|| {
-                                format!(
-                                    "installed receipt for '{}' has invalid version: {}",
-                                    old.name, old.version
-                                )
-                            })?;
-                            if package.manifest.version <= old_version {
-                                println!(
-                                    "{} is up-to-date ({})",
-                                    package.manifest.name, old.version
-                                );
-                                continue;
-                            }
-                        }
-
-                        let dependencies = build_dependency_receipts(package, &resolved);
-                        let outcome =
-                            install_resolved(&layout, package, &dependencies, &root_names, false)?;
-                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
-                        {
-                            println!(
-                                "upgraded {} from {} to {}",
-                                package.manifest.name, old.version, package.manifest.version
-                            );
-                        }
-                        println!("receipt: {}", outcome.receipt_path.display());
-                    }
-                }
-                None => {
-                    let plans = build_upgrade_plans(&receipts);
-                    if plans.is_empty() {
-                        println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
-                        return Ok(());
-                    }
-
-                    let mut grouped_resolved = Vec::new();
-                    for plan in &plans {
-                        let resolved = resolve_install_graph(
-                            &layout,
-                            &backend,
-                            &plan.roots,
-                            plan.target.as_deref(),
-                        )?;
-                        enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
-                        grouped_resolved.push(resolved);
-                    }
-
-                    let overlap_check = grouped_resolved
-                        .iter()
-                        .zip(plans.iter())
-                        .map(|(resolved, plan)| {
-                            (
-                                plan.target.as_deref(),
-                                resolved
-                                    .iter()
-                                    .map(|package| package.manifest.name.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    enforce_disjoint_multi_target_upgrade(&overlap_check)?;
-
-                    for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
-                        for package in resolved {
-                            if let Some(old) =
-                                receipts.iter().find(|r| r.name == package.manifest.name)
-                            {
-                                let old_version =
-                                    Version::parse(&old.version).with_context(|| {
-                                        format!(
-                                            "installed receipt for '{}' has invalid version: {}",
-                                            old.name, old.version
-                                        )
-                                    })?;
-                                if package.manifest.version <= old_version {
-                                    println!(
-                                        "{} is up-to-date ({})",
-                                        package.manifest.name, old.version
-                                    );
-                                    continue;
-                                }
-                            }
-
-                            let dependencies = build_dependency_receipts(package, resolved);
-                            let outcome = install_resolved(
-                                &layout,
-                                package,
-                                &dependencies,
-                                &plan.root_names,
-                                false,
-                            )?;
-                            if let Some(old) =
-                                receipts.iter().find(|r| r.name == package.manifest.name)
-                            {
-                                println!(
-                                    "upgraded {} from {} to {}",
-                                    package.manifest.name, old.version, package.manifest.version
-                                );
-                            } else {
-                                println!(
-                                    "installed dependency {} {}",
-                                    package.manifest.name, package.manifest.version
-                                );
-                            }
-                            println!("receipt: {}", outcome.receipt_path.display());
-                        }
-                    }
-                }
-            }
+            run_upgrade_command(&layout, cli.registry_root.as_deref(), spec)?;
         }
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            let result = uninstall_package(&layout, &name)?;
-
-            for line in format_uninstall_messages(&result) {
-                println!("{line}");
-            }
+            run_uninstall_command(&layout, name)?;
         }
         Commands::List => {
             let prefix = default_user_prefix()?;
@@ -396,6 +296,7 @@ fn main() -> Result<()> {
             println!("prefix: {}", layout.prefix().display());
             println!("bin: {}", layout.bin_dir().display());
             println!("cache: {}", layout.cache_dir().display());
+            println!("{}", doctor_transaction_health_line(&layout)?);
         }
         Commands::InitShell => {
             let prefix = default_user_prefix()?;
@@ -527,6 +428,279 @@ fn update_failure_reason_code(error: Option<&str>) -> String {
     }
 
     "unknown".to_string()
+}
+
+fn ensure_upgrade_command_ready(layout: &PrefixLayout) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    ensure_no_active_transaction_for(layout, "upgrade")
+}
+
+fn run_upgrade_command(
+    layout: &PrefixLayout,
+    registry_root: Option<&Path>,
+    spec: Option<String>,
+) -> Result<()> {
+    ensure_upgrade_command_ready(layout)?;
+    let backend = select_metadata_backend(registry_root, layout)?;
+
+    let receipts = read_install_receipts(layout)?;
+    if receipts.is_empty() {
+        println!("No installed packages");
+        return Ok(());
+    }
+
+    execute_with_transaction(layout, "upgrade", None, |tx| {
+        let mut journal_seq = 1_u64;
+
+        match spec.as_deref() {
+            Some(single) => {
+                let (name, requirement) = parse_spec(single)?;
+                let installed = receipts.iter().find(|receipt| receipt.name == name);
+                let Some(installed_receipt) = installed else {
+                    println!("{name} is not installed");
+                    return Ok(());
+                };
+
+                let roots = vec![RootInstallRequest {
+                    name: installed_receipt.name.clone(),
+                    requirement,
+                }];
+                let root_names = Vec::new();
+                let resolved = resolve_install_graph(
+                    layout,
+                    &backend,
+                    &roots,
+                    installed_receipt.target.as_deref(),
+                )?;
+                enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+
+                append_transaction_journal_entry(
+                    layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: format!("resolve_plan:{}", installed_receipt.name),
+                        state: "done".to_string(),
+                        path: Some(installed_receipt.name.clone()),
+                    },
+                )?;
+                journal_seq += 1;
+
+                for package in &resolved {
+                    if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
+                        let old_version = Version::parse(&old.version).with_context(|| {
+                            format!(
+                                "installed receipt for '{}' has invalid version: {}",
+                                old.name, old.version
+                            )
+                        })?;
+                        if package.manifest.version <= old_version {
+                            println!("{} is up-to-date ({})", package.manifest.name, old.version);
+                            continue;
+                        }
+                    }
+
+                    append_transaction_journal_entry(
+                        layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!("upgrade_package:{}", package.manifest.name),
+                            state: "done".to_string(),
+                            path: Some(package.manifest.name.clone()),
+                        },
+                    )?;
+                    journal_seq += 1;
+
+                    let dependencies = build_dependency_receipts(package, &resolved);
+                    let outcome =
+                        install_resolved(layout, package, &dependencies, &root_names, false)?;
+                    if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
+                        println!(
+                            "upgraded {} from {} to {}",
+                            package.manifest.name, old.version, package.manifest.version
+                        );
+                    }
+                    println!("receipt: {}", outcome.receipt_path.display());
+                }
+            }
+            None => {
+                let plans = build_upgrade_plans(&receipts);
+                if plans.is_empty() {
+                    println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
+                    return Ok(());
+                }
+
+                let mut grouped_resolved = Vec::new();
+                for plan in &plans {
+                    let resolved = resolve_install_graph(
+                        layout,
+                        &backend,
+                        &plan.roots,
+                        plan.target.as_deref(),
+                    )?;
+                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+
+                    append_transaction_journal_entry(
+                        layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!(
+                                "resolve_plan:{}",
+                                plan.target.as_deref().unwrap_or("host")
+                            ),
+                            state: "done".to_string(),
+                            path: plan.target.clone(),
+                        },
+                    )?;
+                    journal_seq += 1;
+
+                    grouped_resolved.push(resolved);
+                }
+
+                let overlap_check = grouped_resolved
+                    .iter()
+                    .zip(plans.iter())
+                    .map(|(resolved, plan)| {
+                        (
+                            plan.target.as_deref(),
+                            resolved
+                                .iter()
+                                .map(|package| package.manifest.name.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                enforce_disjoint_multi_target_upgrade(&overlap_check)?;
+
+                for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
+                    for package in resolved {
+                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
+                        {
+                            let old_version = Version::parse(&old.version).with_context(|| {
+                                format!(
+                                    "installed receipt for '{}' has invalid version: {}",
+                                    old.name, old.version
+                                )
+                            })?;
+                            if package.manifest.version <= old_version {
+                                println!(
+                                    "{} is up-to-date ({})",
+                                    package.manifest.name, old.version
+                                );
+                                continue;
+                            }
+                        }
+
+                        append_transaction_journal_entry(
+                            layout,
+                            &tx.txid,
+                            &TransactionJournalEntry {
+                                seq: journal_seq,
+                                step: format!("upgrade_package:{}", package.manifest.name),
+                                state: "done".to_string(),
+                                path: Some(package.manifest.name.clone()),
+                            },
+                        )?;
+                        journal_seq += 1;
+
+                        let dependencies = build_dependency_receipts(package, resolved);
+                        let outcome = install_resolved(
+                            layout,
+                            package,
+                            &dependencies,
+                            &plan.root_names,
+                            false,
+                        )?;
+                        if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
+                        {
+                            println!(
+                                "upgraded {} from {} to {}",
+                                package.manifest.name, old.version, package.manifest.version
+                            );
+                        } else {
+                            println!(
+                                "installed dependency {} {}",
+                                package.manifest.name, package.manifest.version
+                            );
+                        }
+                        println!("receipt: {}", outcome.receipt_path.display());
+                    }
+                }
+            }
+        }
+
+        append_transaction_journal_entry(
+            layout,
+            &tx.txid,
+            &TransactionJournalEntry {
+                seq: journal_seq,
+                step: "apply_complete".to_string(),
+                state: "done".to_string(),
+                path: None,
+            },
+        )?;
+
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    ensure_no_active_transaction_for(layout, "uninstall")?;
+
+    execute_with_transaction(layout, "uninstall", None, |tx| {
+        let mut journal_seq = 1_u64;
+        let result = uninstall_package(layout, &name)?;
+
+        append_transaction_journal_entry(
+            layout,
+            &tx.txid,
+            &TransactionJournalEntry {
+                seq: journal_seq,
+                step: format!("uninstall_target:{}", name),
+                state: "done".to_string(),
+                path: Some(name.clone()),
+            },
+        )?;
+        journal_seq += 1;
+
+        for dependency in &result.pruned_dependencies {
+            append_transaction_journal_entry(
+                layout,
+                &tx.txid,
+                &TransactionJournalEntry {
+                    seq: journal_seq,
+                    step: format!("prune_dependency:{dependency}"),
+                    state: "done".to_string(),
+                    path: Some(dependency.clone()),
+                },
+            )?;
+            journal_seq += 1;
+        }
+
+        append_transaction_journal_entry(
+            layout,
+            &tx.txid,
+            &TransactionJournalEntry {
+                seq: journal_seq,
+                step: "apply_complete".to_string(),
+                state: "done".to_string(),
+                path: None,
+            },
+        )?;
+
+        for line in format_uninstall_messages(&result) {
+            println!("{line}");
+        }
+
+        Ok(())
+    })?;
+
+    Ok(())
 }
 
 fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Result<()> {
@@ -687,6 +861,202 @@ struct UpgradePlan {
     root_names: Vec<String>,
 }
 
+fn begin_transaction(
+    layout: &PrefixLayout,
+    operation: &str,
+    snapshot_id: Option<&str>,
+    started_at_unix: u64,
+) -> Result<TransactionMetadata> {
+    let txid = format!("tx-{started_at_unix}-{}", std::process::id());
+    let metadata = TransactionMetadata {
+        version: 1,
+        txid,
+        operation: operation.to_string(),
+        status: "planning".to_string(),
+        started_at_unix,
+        snapshot_id: snapshot_id.map(ToOwned::to_owned),
+    };
+
+    write_transaction_metadata(layout, &metadata)?;
+    if let Err(err) = set_active_transaction(layout, &metadata.txid) {
+        let _ = remove_file_if_exists(&layout.transaction_metadata_path(&metadata.txid));
+        let _ = std::fs::remove_dir_all(layout.transaction_staging_path(&metadata.txid));
+        return Err(err);
+    }
+
+    Ok(metadata)
+}
+
+fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
+    update_transaction_status(layout, txid, status)
+}
+
+fn execute_with_transaction<F>(
+    layout: &PrefixLayout,
+    operation: &str,
+    snapshot_id: Option<&str>,
+    run: F,
+) -> Result<()>
+where
+    F: FnOnce(&TransactionMetadata) -> Result<()>,
+{
+    let started_at_unix = current_unix_timestamp()?;
+    let tx = begin_transaction(layout, operation, snapshot_id, started_at_unix)?;
+
+    let run_result = (|| -> Result<()> {
+        set_transaction_status(layout, &tx.txid, "applying")?;
+        run(&tx)?;
+        set_transaction_status(layout, &tx.txid, "committed")?;
+        clear_active_transaction(layout)?;
+        Ok(())
+    })();
+
+    match run_result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let current_status = read_transaction_metadata(layout, &tx.txid)
+                .ok()
+                .flatten()
+                .map(|metadata| metadata.status);
+            let preserve_recovery_state = current_status
+                .as_deref()
+                .map(|status| {
+                    matches!(
+                        status,
+                        "rolling_back" | "rolled_back" | "committed" | "failed"
+                    )
+                })
+                .unwrap_or(false);
+            if matches!(current_status.as_deref(), Some("rolled_back" | "committed")) {
+                let _ = clear_active_transaction(layout);
+            }
+            if !preserve_recovery_state {
+                let _ = set_transaction_status(layout, &tx.txid, "failed");
+            }
+            Err(err)
+        }
+    }
+}
+
+fn status_allows_stale_marker_cleanup(status: &str) -> bool {
+    matches!(status, "committed" | "rolled_back")
+}
+
+fn normalize_command_token(command: &str) -> String {
+    let command = command.trim().to_ascii_lowercase();
+    if command.is_empty() {
+        "unknown".to_string()
+    } else {
+        command
+    }
+}
+
+fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
+    let command = normalize_command_token(command);
+    ensure_no_active_transaction(layout).map_err(|err| {
+        anyhow!("cannot {command} (reason=active_transaction command={command}): {err}")
+    })
+}
+
+fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
+    let active_txid = match read_active_transaction(layout) {
+        Ok(active_txid) => active_txid,
+        Err(_) => {
+            return Err(anyhow!(
+                "transaction state requires repair (reason=active_marker_unreadable path={})",
+                layout.transaction_active_path().display()
+            ));
+        }
+    };
+
+    if let Some(txid) = active_txid {
+        let metadata = match read_transaction_metadata(layout, &txid) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (reason=metadata_unreadable path={})",
+                    layout.transaction_metadata_path(&txid).display()
+                ));
+            }
+        };
+
+        if let Some(metadata) = metadata {
+            if status_allows_stale_marker_cleanup(&metadata.status) {
+                clear_active_transaction(layout)?;
+                return Ok(());
+            }
+            if metadata.status == "rolling_back" {
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (reason=rolling_back)"
+                ));
+            }
+            if metadata.status == "failed" {
+                return Err(anyhow!(
+                    "transaction {txid} requires repair (reason=failed)"
+                ));
+            }
+
+            return Err(anyhow!(
+                "transaction {txid} is active (reason=active_status status={})",
+                metadata.status
+            ));
+        }
+
+        return Err(anyhow!(
+            "transaction {txid} requires repair (reason=metadata_missing path={})",
+            layout.transaction_metadata_path(&txid).display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
+    let active_txid = match read_active_transaction(layout) {
+        Ok(active_txid) => active_txid,
+        Err(_) => {
+            return Ok(format!(
+                "transaction: failed (reason=active_marker_unreadable path={})",
+                layout.transaction_active_path().display()
+            ));
+        }
+    };
+
+    let Some(txid) = active_txid else {
+        return Ok("transaction: clean".to_string());
+    };
+
+    let metadata = match read_transaction_metadata(layout, &txid) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Ok(format!(
+                "transaction: failed {txid} (reason=metadata_unreadable path={})",
+                layout.transaction_metadata_path(&txid).display()
+            ));
+        }
+    };
+
+    let Some(metadata) = metadata else {
+        return Ok(format!(
+            "transaction: failed {txid} (reason=metadata_missing path={})",
+            layout.transaction_metadata_path(&txid).display()
+        ));
+    };
+
+    if metadata.status == "rolling_back" {
+        return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
+    }
+    if metadata.status == "failed" {
+        return Ok(format!("transaction: failed {txid} (reason=failed)"));
+    }
+    if status_allows_stale_marker_cleanup(&metadata.status) {
+        clear_active_transaction(layout)?;
+        return Ok("transaction: clean".to_string());
+    }
+
+    Ok(format!("transaction: active {txid}"))
+}
+
 fn resolve_install_graph(
     layout: &PrefixLayout,
     index: &MetadataBackend,
@@ -816,6 +1186,7 @@ fn install_resolved(
         artifact_sha256: Some(resolved.artifact.sha256.clone()),
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
+        snapshot_id: None,
         install_reason: determine_install_reason(&resolved.manifest.name, root_names, &receipts),
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
@@ -1212,18 +1583,24 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_update_report, build_upgrade_plans, build_upgrade_roots, determine_install_reason,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_update_succeeded,
-        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
-        select_metadata_backend, update_failure_reason_code, validate_binary_preflight, Cli,
+        begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
+        determine_install_reason, doctor_transaction_health_line,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
+        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
+        execute_with_transaction, format_registry_add_lines, format_registry_list_lines,
+        format_registry_list_snapshot_state, format_registry_remove_lines,
+        format_uninstall_messages, format_update_summary_line, normalize_command_token,
+        parse_pin_spec, registry_state_root, run_uninstall_command, run_update_command,
+        run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
+        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
         CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        bin_path, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
+        bin_path, read_active_transaction, read_transaction_metadata, set_active_transaction,
+        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+        TransactionMetadata, UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -1233,6 +1610,1004 @@ mod tests {
     use semver::VersionReq;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn begin_transaction_writes_planning_metadata_and_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let tx = begin_transaction(
+            &layout,
+            "install",
+            Some("git:5f1b3d8a1f2a4d0e"),
+            1_771_001_234,
+        )
+        .expect("must start transaction");
+
+        assert_eq!(tx.operation, "install");
+        assert_eq!(tx.status, "planning");
+        assert_eq!(tx.snapshot_id.as_deref(), Some("git:5f1b3d8a1f2a4d0e"));
+
+        let active =
+            std::fs::read_to_string(layout.transaction_active_path()).expect("must read active");
+        assert_eq!(active.trim(), tx.txid);
+
+        let metadata = std::fs::read_to_string(layout.transaction_metadata_path(&tx.txid))
+            .expect("must read metadata");
+        assert!(metadata.contains("\"status\": \"planning\""));
+        assert!(metadata.contains("\"operation\": \"install\""));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn begin_transaction_cleans_up_metadata_when_active_claim_fails() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-existing").expect("must seed existing active marker");
+
+        let started_at_unix = 1_771_001_256;
+        let expected_txid = format!("tx-{started_at_unix}-{}", std::process::id());
+        let err = begin_transaction(&layout, "install", None, started_at_unix)
+            .expect_err("existing active marker should block transaction start");
+        assert!(
+            err.to_string()
+                .contains("active transaction marker already exists (txid=tx-existing)"),
+            "unexpected error: {err}"
+        );
+
+        assert!(
+            !layout.transaction_metadata_path(&expected_txid).exists(),
+            "metadata file should be cleaned up when active claim fails"
+        );
+        assert!(
+            !layout.transaction_staging_path(&expected_txid).exists(),
+            "staging dir should be cleaned up when active claim fails"
+        );
+
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-existing"),
+            "existing active marker should remain unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_unreadable_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        std::fs::create_dir_all(layout.transaction_active_path())
+            .expect("must create unreadable active marker fixture");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("unreadable active marker should return repair-required reason");
+        let expected = format!(
+            "transaction state requires repair (reason=active_marker_unreadable path={})",
+            layout.transaction_active_path().display()
+        );
+        assert!(
+            err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_upgrade_command_ready_reports_preflight_context_when_transaction_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-upgrade-command".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_258,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-upgrade-command")
+            .expect("must write active marker");
+
+        let err = ensure_upgrade_command_ready(&layout)
+            .expect_err("active transaction should block upgrade preflight");
+        assert!(
+            err.to_string().contains(
+                "cannot upgrade (reason=active_transaction command=upgrade): transaction tx-blocked-upgrade-command requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_upgrade_command_reports_preflight_context_when_transaction_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-upgrade-dispatch".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_258,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-upgrade-dispatch")
+            .expect("must write active marker");
+
+        let err = run_upgrade_command(&layout, None, None)
+            .expect_err("active transaction should block upgrade command");
+        assert!(
+            err.to_string().contains(
+                "cannot upgrade (reason=active_transaction command=upgrade): transaction tx-blocked-upgrade-dispatch requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_uninstall_command_reports_preflight_context_when_transaction_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-uninstall-command".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_259,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-uninstall-command")
+            .expect("must write active marker");
+
+        let err = run_uninstall_command(&layout, "ripgrep".to_string())
+            .expect_err("active transaction should block uninstall command");
+        assert!(
+            err.to_string().contains(
+                "cannot uninstall (reason=active_transaction command=uninstall): transaction tx-blocked-uninstall-command requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn normalize_command_token_trims_lowercases_and_falls_back() {
+        assert_eq!(normalize_command_token("  UnInstall  "), "uninstall");
+        assert_eq!(normalize_command_token("   \t  "), "unknown");
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_for_includes_command_context() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_260,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked").expect("must write active marker");
+
+        let err = ensure_no_active_transaction_for(&layout, "uninstall")
+            .expect_err("blocked transaction should include command context");
+        assert!(
+            err.to_string().contains(
+                "cannot uninstall (reason=active_transaction command=uninstall): transaction tx-blocked requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_for_normalizes_command_token() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-normalized".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_261,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-normalized").expect("must write active marker");
+
+        let err = ensure_no_active_transaction_for(&layout, "  UnInstall  ")
+            .expect_err("blocked transaction should normalize command token");
+        assert!(
+            err.to_string().contains(
+                "cannot uninstall (reason=active_transaction command=uninstall): transaction tx-blocked-normalized requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_for_uses_unknown_when_command_missing() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-empty-command".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_262,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-empty-command")
+            .expect("must write active marker");
+
+        let err = ensure_no_active_transaction_for(&layout, "   ")
+            .expect_err("blocked transaction should fallback command token");
+        assert!(
+            err.to_string().contains(
+                "cannot unknown (reason=active_transaction command=unknown): transaction tx-blocked-empty-command requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_rejects_when_marker_exists() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-abc").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("active transaction must block mutating command");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-abc requires repair"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_rolling_back_status_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolling-diagnostic".to_string(),
+            operation: "upgrade".to_string(),
+            status: "rolling_back".to_string(),
+            started_at_unix: 1_771_001_700,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolling-diagnostic").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("rolling_back transaction should block mutation");
+        assert!(
+            err.to_string().contains(
+                "transaction tx-rolling-diagnostic requires repair (reason=rolling_back)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_failed_reason_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-failed-diagnostic".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_710,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-failed-diagnostic").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("failed transaction should block mutation");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-failed-diagnostic requires repair (reason=failed)"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_unreadable_metadata_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-corrupt-meta";
+        std::fs::write(layout.transaction_metadata_path(txid), "{invalid-json")
+            .expect("must write corrupt metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("corrupt metadata should block mutating command");
+        let expected = format!(
+            "transaction tx-corrupt-meta requires repair (reason=metadata_unreadable path={})",
+            layout.transaction_metadata_path(txid).display()
+        );
+        assert!(
+            err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_reports_missing_metadata_in_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-missing-meta").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("missing metadata should block mutating command");
+        let expected = format!(
+            "transaction tx-missing-meta requires repair (reason=metadata_missing path={})",
+            layout
+                .transaction_metadata_path("tx-missing-meta")
+                .display()
+        );
+        assert!(
+            err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_includes_status_when_metadata_exists() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-abc".to_string(),
+            operation: "install".to_string(),
+            status: "paused".to_string(),
+            started_at_unix: 1_771_001_300,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-abc").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("active transaction must include status context");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-abc is active (reason=active_status status=paused)"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_clears_committed_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-committed".to_string(),
+            operation: "install".to_string(),
+            status: "committed".to_string(),
+            started_at_unix: 1_771_001_360,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-committed").expect("must write active marker");
+
+        ensure_no_active_transaction(&layout)
+            .expect("committed transaction marker should be auto-cleaned");
+
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "committed active marker should be cleared"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_blocks_planning_without_mutating_status() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-planning".to_string(),
+            operation: "install".to_string(),
+            status: "planning".to_string(),
+            started_at_unix: 1_771_001_420,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-planning").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("planning transaction should block concurrent mutation");
+        assert!(
+            err.to_string().contains(
+                "transaction tx-planning is active (reason=active_status status=planning)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let updated = read_transaction_metadata(&layout, "tx-planning")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(updated.status, "planning");
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-planning"),
+            "planning marker should remain active"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_clears_rolled_back_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolled-back".to_string(),
+            operation: "upgrade".to_string(),
+            status: "rolled_back".to_string(),
+            started_at_unix: 1_771_001_430,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolled-back").expect("must write active marker");
+
+        ensure_no_active_transaction(&layout)
+            .expect("rolled_back transaction marker should be auto-cleaned");
+
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "rolled_back active marker should be cleared"
+        );
+
+        ensure_no_active_transaction(&layout)
+            .expect("cleanup path should remain idempotent after marker is removed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn set_transaction_status_updates_metadata_via_helper() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let tx = begin_transaction(&layout, "install", None, 1_771_001_500)
+            .expect("must create transaction");
+
+        set_transaction_status(&layout, &tx.txid, "applying").expect("must update status");
+
+        let metadata = read_transaction_metadata(&layout, &tx.txid)
+            .expect("must read metadata")
+            .expect("metadata must exist");
+        assert_eq!(metadata.status, "applying");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_commits_and_clears_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        execute_with_transaction(&layout, "upgrade", None, |tx| {
+            txid = Some(tx.txid.clone());
+            Ok(())
+        })
+        .expect("transaction should commit");
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "committed");
+        assert_eq!(metadata.operation, "upgrade");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "active marker should be cleared"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_marks_failed_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "uninstall", None, |tx| {
+            txid = Some(tx.txid.clone());
+            Err(anyhow::anyhow!("boom"))
+        })
+        .expect_err("failing transaction must return error");
+        assert!(err.to_string().contains("boom"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "failed");
+        assert_eq!(metadata.operation, "uninstall");
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some(txid.as_str()),
+            "failed transaction should retain active marker for repair"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_preserves_rolling_back_status_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "rolling_back")?;
+            Err(anyhow::anyhow!("rollback in progress"))
+        })
+        .expect_err("failing rollback transaction must return error");
+        assert!(err.to_string().contains("rollback in progress"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "rolling_back");
+        assert_eq!(metadata.operation, "upgrade");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_preserves_rolled_back_status_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "uninstall", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            Err(anyhow::anyhow!("post-rollback cleanup failed"))
+        })
+        .expect_err("rolled_back transaction should preserve status on error");
+        assert!(err.to_string().contains("post-rollback cleanup failed"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "rolled_back");
+        assert_eq!(metadata.operation, "uninstall");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_clears_active_marker_when_rolled_back_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            Err(anyhow::anyhow!("cleanup warning"))
+        })
+        .expect_err("rolled_back error path should still return original error");
+        assert!(err.to_string().contains("cleanup warning"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "rolled_back");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "rolled_back final state should clear active marker"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn execute_with_transaction_preserves_committed_status_on_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut txid = None;
+        let err = execute_with_transaction(&layout, "install", None, |tx| {
+            txid = Some(tx.txid.clone());
+            set_transaction_status(&layout, &tx.txid, "committed")?;
+            Err(anyhow::anyhow!("post-commit warning"))
+        })
+        .expect_err("committed transaction should preserve final status on error");
+        assert!(err.to_string().contains("post-commit warning"));
+
+        let txid = txid.expect("txid should be captured");
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.status, "committed");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "committed final state should clear active marker"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_blocks_applying_without_mutating_status() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-applying".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_560,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-applying").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("applying transaction should block concurrent mutation");
+        assert!(
+            err.to_string().contains(
+                "transaction tx-applying is active (reason=active_status status=applying)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let updated = read_transaction_metadata(&layout, "tx-applying")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(updated.status, "applying");
+
+        let second_err = ensure_no_active_transaction(&layout)
+            .expect_err("second preflight call should remain blocked and deterministic");
+        assert!(
+            second_err.to_string().contains(
+                "transaction tx-applying is active (reason=active_status status=applying)"
+            ),
+            "unexpected second error: {second_err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_blocks_rolling_back_without_mutating_status() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolling-back".to_string(),
+            operation: "install".to_string(),
+            status: "rolling_back".to_string(),
+            started_at_unix: 1_771_001_580,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolling-back").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("rolling_back transaction should block and preserve status");
+        assert!(
+            err.to_string()
+                .contains("transaction tx-rolling-back requires repair"),
+            "unexpected error: {err}"
+        );
+
+        let updated = read_transaction_metadata(&layout, "tx-rolling-back")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(updated.status, "rolling_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-failed".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_620,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-failed").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for failed tx");
+        assert_eq!(line, "transaction: failed tx-failed (reason=failed)");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_rolling_back_as_failed() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-rolling-back".to_string(),
+            operation: "uninstall".to_string(),
+            status: "rolling_back".to_string(),
+            started_at_unix: 1_771_001_630,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-rolling-back").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for rolling_back tx");
+        assert_eq!(
+            line,
+            "transaction: failed tx-rolling-back (reason=rolling_back)"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_when_active_marker_unreadable() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        std::fs::create_dir_all(layout.transaction_active_path())
+            .expect("must create unreadable active marker fixture");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should map unreadable active marker to failed");
+        let expected = format!(
+            "transaction: failed (reason=active_marker_unreadable path={})",
+            layout.transaction_active_path().display()
+        );
+        assert_eq!(line, expected);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_when_active_marker_has_no_metadata() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-missing").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for missing metadata");
+        let expected = format!(
+            "transaction: failed tx-missing (reason=metadata_missing path={})",
+            layout.transaction_metadata_path("tx-missing").display()
+        );
+        assert_eq!(line, expected);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_failed_when_metadata_unreadable() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-unreadable";
+        std::fs::write(layout.transaction_metadata_path(txid), "{not-json")
+            .expect("must write corrupt metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should map unreadable metadata to failed");
+        let expected = format!(
+            "transaction: failed tx-unreadable (reason=metadata_unreadable path={})",
+            layout.transaction_metadata_path(txid).display()
+        );
+        assert_eq!(line, expected);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_applying_as_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-applying-health".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_645,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-applying-health").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for applying tx");
+        assert_eq!(line, "transaction: active tx-applying-health");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_reports_active_state_without_status_suffix() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-active".to_string(),
+            operation: "upgrade".to_string(),
+            status: "paused".to_string(),
+            started_at_unix: 1_771_001_640,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-active").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for active tx");
+        assert_eq!(line, "transaction: active tx-active");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_committed_marker_as_clean() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-committed".to_string(),
+            operation: "install".to_string(),
+            status: "committed".to_string(),
+            started_at_unix: 1_771_001_660,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-committed").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for committed marker");
+        assert_eq!(line, "transaction: clean");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_treats_planning_marker_as_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-planning".to_string(),
+            operation: "install".to_string(),
+            status: "planning".to_string(),
+            started_at_unix: 1_771_001_670,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-planning").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for planning marker");
+        assert_eq!(line, "transaction: active tx-planning");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_clears_stale_marker_when_status_is_final() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-stale".to_string(),
+            operation: "upgrade".to_string(),
+            status: "committed".to_string(),
+            started_at_unix: 1_771_001_680,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-stale").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should resolve for stale marker");
+        assert_eq!(line, "transaction: clean");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .is_none(),
+            "doctor should clear stale final-state marker"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
 
     #[test]
     fn parse_pin_spec_requires_constraint() {
@@ -1288,6 +2663,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -1328,6 +2704,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -1349,6 +2726,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -1380,6 +2758,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -1400,6 +2779,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -1421,6 +2801,7 @@ sha256 = "def"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1434,6 +2815,7 @@ sha256 = "def"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1456,6 +2838,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -1477,6 +2860,7 @@ sha256 = "def"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1490,6 +2874,7 @@ sha256 = "def"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1516,6 +2901,7 @@ sha256 = "def"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1529,6 +2915,7 @@ sha256 = "def"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                snapshot_id: None,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -1553,6 +2940,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
