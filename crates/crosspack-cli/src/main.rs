@@ -438,56 +438,7 @@ fn main() -> Result<()> {
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            layout.ensure_base_dirs()?;
-            ensure_no_active_transaction_for(&layout, "uninstall")?;
-
-            execute_with_transaction(&layout, "uninstall", None, |tx| {
-                let mut journal_seq = 1_u64;
-                let result = uninstall_package(&layout, &name)?;
-
-                append_transaction_journal_entry(
-                    &layout,
-                    &tx.txid,
-                    &TransactionJournalEntry {
-                        seq: journal_seq,
-                        step: format!("uninstall_target:{}", name),
-                        state: "done".to_string(),
-                        path: Some(name.clone()),
-                    },
-                )?;
-                journal_seq += 1;
-
-                for dependency in &result.pruned_dependencies {
-                    append_transaction_journal_entry(
-                        &layout,
-                        &tx.txid,
-                        &TransactionJournalEntry {
-                            seq: journal_seq,
-                            step: format!("prune_dependency:{dependency}"),
-                            state: "done".to_string(),
-                            path: Some(dependency.clone()),
-                        },
-                    )?;
-                    journal_seq += 1;
-                }
-
-                append_transaction_journal_entry(
-                    &layout,
-                    &tx.txid,
-                    &TransactionJournalEntry {
-                        seq: journal_seq,
-                        step: "apply_complete".to_string(),
-                        state: "done".to_string(),
-                        path: None,
-                    },
-                )?;
-
-                for line in format_uninstall_messages(&result) {
-                    println!("{line}");
-                }
-
-                Ok(())
-            })?;
+            run_uninstall_command(&layout, name)?;
         }
         Commands::List => {
             let prefix = default_user_prefix()?;
@@ -699,6 +650,61 @@ fn update_failure_reason_code(error: Option<&str>) -> String {
     }
 
     "unknown".to_string()
+}
+
+fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    ensure_no_active_transaction_for(layout, "uninstall")?;
+
+    execute_with_transaction(layout, "uninstall", None, |tx| {
+        let mut journal_seq = 1_u64;
+        let result = uninstall_package(layout, &name)?;
+
+        append_transaction_journal_entry(
+            layout,
+            &tx.txid,
+            &TransactionJournalEntry {
+                seq: journal_seq,
+                step: format!("uninstall_target:{}", name),
+                state: "done".to_string(),
+                path: Some(name.clone()),
+            },
+        )?;
+        journal_seq += 1;
+
+        for dependency in &result.pruned_dependencies {
+            append_transaction_journal_entry(
+                layout,
+                &tx.txid,
+                &TransactionJournalEntry {
+                    seq: journal_seq,
+                    step: format!("prune_dependency:{dependency}"),
+                    state: "done".to_string(),
+                    path: Some(dependency.clone()),
+                },
+            )?;
+            journal_seq += 1;
+        }
+
+        append_transaction_journal_entry(
+            layout,
+            &tx.txid,
+            &TransactionJournalEntry {
+                seq: journal_seq,
+                step: "apply_complete".to_string(),
+                state: "done".to_string(),
+                path: None,
+            },
+        )?;
+
+        for line in format_uninstall_messages(&result) {
+            println!("{line}");
+        }
+
+        Ok(())
+    })?;
+
+    Ok(())
 }
 
 fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Result<()> {
@@ -1594,10 +1600,10 @@ mod tests {
         ensure_no_active_transaction_for, ensure_update_succeeded, execute_with_transaction,
         format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        normalize_command_token, parse_pin_spec, registry_state_root, run_update_command,
-        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
-        update_failure_reason_code, validate_binary_preflight, Cli, CliRegistryKind, Commands,
-        MetadataBackend, ResolvedInstall,
+        normalize_command_token, parse_pin_spec, registry_state_root, run_uninstall_command,
+        run_update_command, select_manifest_with_pin, select_metadata_backend,
+        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
+        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1660,6 +1666,35 @@ mod tests {
         );
         assert!(
             err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_uninstall_command_reports_preflight_context_when_transaction_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-uninstall-command".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_259,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-uninstall-command")
+            .expect("must write active marker");
+
+        let err = run_uninstall_command(&layout, "ripgrep".to_string())
+            .expect_err("active transaction should block uninstall command");
+        assert!(
+            err.to_string().contains(
+                "cannot uninstall (reason=active_transaction command=uninstall): transaction tx-blocked-uninstall-command requires repair (reason=failed)"
+            ),
             "unexpected error: {err}"
         );
 
