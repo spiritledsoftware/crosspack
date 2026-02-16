@@ -578,6 +578,14 @@ pub fn remove_pin(layout: &PrefixLayout, name: &str) -> Result<bool> {
 }
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
+    uninstall_package_with_dependency_overrides(layout, name, &HashMap::new())
+}
+
+pub fn uninstall_package_with_dependency_overrides(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+) -> Result<UninstallResult> {
     let receipts = read_install_receipts(layout)?;
     let Some(target_receipt) = receipts
         .iter()
@@ -598,7 +606,8 @@ pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallR
         .cloned()
         .map(|receipt| (receipt.name.clone(), receipt))
         .collect();
-    let dependencies = dependency_map(&receipt_map);
+    let mut dependencies = dependency_map(&receipt_map);
+    apply_dependency_overrides(&mut dependencies, &receipt_map, dependency_overrides);
 
     let remaining_roots = receipt_map
         .values()
@@ -797,6 +806,25 @@ fn dependency_map(receipts: &HashMap<String, InstallReceipt>) -> HashMap<String,
             (name.clone(), deps)
         })
         .collect()
+}
+
+fn apply_dependency_overrides(
+    dependencies: &mut HashMap<String, BTreeSet<String>>,
+    receipts: &HashMap<String, InstallReceipt>,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+) {
+    for (package, override_dependencies) in dependency_overrides {
+        if !receipts.contains_key(package) {
+            continue;
+        }
+
+        let projected = override_dependencies
+            .iter()
+            .filter(|dependency| receipts.contains_key(dependency.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        dependencies.insert(package.clone(), projected);
+    }
 }
 
 fn parse_dependency_name(entry: &str) -> Option<&str> {
@@ -1312,10 +1340,12 @@ mod tests {
         append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
         parse_receipt, read_active_transaction, read_all_pins, read_pin, read_transaction_metadata,
         remove_exposed_binary, remove_pin, set_active_transaction, strip_rel_components,
-        uninstall_package, update_transaction_status, write_install_receipt, write_pin,
-        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-        TransactionJournalEntry, TransactionMetadata, UninstallStatus,
+        uninstall_package, uninstall_package_with_dependency_overrides, update_transaction_status,
+        write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
+        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
+        UninstallStatus,
     };
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
 
@@ -1726,6 +1756,41 @@ mod tests {
         assert_eq!(result.status, UninstallStatus::BlockedByDependents);
         assert_eq!(result.blocked_by_roots, vec!["app"]);
         assert!(layout.receipt_path("shared").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_with_dependency_overrides_allows_planned_root_transition() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let dependency_overrides =
+            HashMap::from([("app".to_string(), vec!["replacement".to_string()])]);
+        let result =
+            uninstall_package_with_dependency_overrides(&layout, "shared", &dependency_overrides)
+                .expect("planned dependency override should allow uninstall");
+
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!layout.receipt_path("shared").exists());
+        assert!(layout.receipt_path("app").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,9 +10,10 @@ use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
     read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
-    remove_file_if_exists, set_active_transaction, uninstall_package, update_transaction_status,
-    write_install_receipt, write_pin, write_transaction_metadata, InstallReason, InstallReceipt,
-    PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    remove_file_if_exists, set_active_transaction, uninstall_package,
+    uninstall_package_with_dependency_overrides, update_transaction_status, write_install_receipt,
+    write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -170,6 +171,8 @@ fn main() -> Result<()> {
                 )?;
                 journal_seq += 1;
 
+                let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
+
                 for package in &resolved {
                     append_transaction_journal_entry(
                         &layout,
@@ -189,6 +192,7 @@ fn main() -> Result<()> {
                         package,
                         &dependencies,
                         &root_names,
+                        &planned_dependency_overrides,
                         force_redownload,
                     )?;
                     print_install_outcome(&outcome);
@@ -472,6 +476,7 @@ fn run_upgrade_command(
                     &roots,
                     installed_receipt.target.as_deref(),
                 )?;
+                let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
 
                 append_transaction_journal_entry(
@@ -513,8 +518,14 @@ fn run_upgrade_command(
                     journal_seq += 1;
 
                     let dependencies = build_dependency_receipts(package, &resolved);
-                    let outcome =
-                        install_resolved(layout, package, &dependencies, &root_names, false)?;
+                    let outcome = install_resolved(
+                        layout,
+                        package,
+                        &dependencies,
+                        &root_names,
+                        &planned_dependency_overrides,
+                        false,
+                    )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         println!(
                             "upgraded {} from {} to {}",
@@ -575,6 +586,8 @@ fn run_upgrade_command(
                 enforce_disjoint_multi_target_upgrade(&overlap_check)?;
 
                 for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
+                    let planned_dependency_overrides = build_planned_dependency_overrides(resolved);
+
                     for package in resolved {
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
@@ -611,6 +624,7 @@ fn run_upgrade_command(
                             package,
                             &dependencies,
                             &plan.root_names,
+                            &planned_dependency_overrides,
                             false,
                         )?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
@@ -1126,6 +1140,7 @@ fn install_resolved(
     resolved: &ResolvedInstall,
     dependency_receipts: &[String],
     root_names: &[String],
+    planned_dependency_overrides: &HashMap<String, Vec<String>>,
     force_redownload: bool,
 ) -> Result<InstallOutcome> {
     let receipts = read_install_receipts(layout)?;
@@ -1143,9 +1158,6 @@ fn install_resolved(
         &receipts,
         &replacement_targets,
     )?;
-    apply_replacement_handoff(layout, &replacement_receipts)?;
-
-    let receipts = read_install_receipts(layout)?;
 
     let cache_path = layout.artifact_cache_path(
         &resolved.manifest.name,
@@ -1174,6 +1186,15 @@ fn install_resolved(
         resolved.artifact.strip_components.unwrap_or(0),
         resolved.artifact.artifact_root.as_deref(),
     )?;
+
+    if let Err(err) =
+        apply_replacement_handoff(layout, &replacement_receipts, planned_dependency_overrides)
+    {
+        let _ = std::fs::remove_dir_all(&install_root);
+        return Err(err);
+    }
+
+    let receipts = read_install_receipts(layout)?;
 
     for binary in &resolved.artifact.binaries {
         expose_binary(layout, &install_root, &binary.name, &binary.path)?;
@@ -1306,9 +1327,14 @@ fn collect_replacement_receipts(
 fn apply_replacement_handoff(
     layout: &PrefixLayout,
     replacement_receipts: &[InstallReceipt],
+    planned_dependency_overrides: &HashMap<String, Vec<String>>,
 ) -> Result<()> {
     for replacement in replacement_receipts {
-        let result = uninstall_package(layout, &replacement.name)?;
+        let result = uninstall_package_with_dependency_overrides(
+            layout,
+            &replacement.name,
+            planned_dependency_overrides,
+        )?;
         if result.status == UninstallStatus::BlockedByDependents {
             return Err(anyhow!(
                 "cannot replace '{}' {}: still required by roots {}",
@@ -1390,6 +1416,25 @@ fn build_dependency_receipts(
         .collect::<Vec<_>>();
     deps.sort();
     deps
+}
+
+fn build_planned_dependency_overrides(
+    selected: &[ResolvedInstall],
+) -> HashMap<String, Vec<String>> {
+    selected
+        .iter()
+        .map(|package| {
+            let mut dependencies = package
+                .manifest
+                .dependencies
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            dependencies.sort();
+            dependencies.dedup();
+            (package.manifest.name.clone(), dependencies)
+        })
+        .collect()
 }
 
 fn determine_install_reason(
@@ -1693,7 +1738,7 @@ mod tests {
         SourceUpdateStatus,
     };
     use semver::VersionReq;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2948,8 +2993,9 @@ ripgrep-legacy = "*"
         write_install_receipt(&layout, &app).expect("must seed app receipt");
         write_install_receipt(&layout, &replaced).expect("must seed replaced receipt");
 
-        let err = apply_replacement_handoff(&layout, std::slice::from_ref(&replaced))
-            .expect_err("replacement must fail while rooted dependents remain");
+        let err =
+            apply_replacement_handoff(&layout, std::slice::from_ref(&replaced), &HashMap::new())
+                .expect_err("replacement must fail while rooted dependents remain");
         assert!(err.to_string().contains("still required by roots app"));
 
         let remaining = read_install_receipts(&layout).expect("must read receipts");
@@ -2958,6 +3004,59 @@ ripgrep-legacy = "*"
             2,
             "blocked replacement must not mutate state"
         );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn apply_replacement_handoff_uses_planned_dependency_overrides() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let app = InstallReceipt {
+            name: "app".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["ripgrep-legacy@1.0.0".to_string()],
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["app".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let replaced = InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_install_receipt(&layout, &app).expect("must seed app receipt");
+        write_install_receipt(&layout, &replaced).expect("must seed replaced receipt");
+
+        let planned_dependency_overrides =
+            HashMap::from([("app".to_string(), vec!["ripgrep".to_string()])]);
+
+        apply_replacement_handoff(
+            &layout,
+            std::slice::from_ref(&replaced),
+            &planned_dependency_overrides,
+        )
+        .expect("planned dependency graph should allow replacement handoff");
+
+        let remaining = read_install_receipts(&layout).expect("must read receipts");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "app");
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
@@ -2983,7 +3082,7 @@ ripgrep-legacy = "*"
         };
         write_install_receipt(&layout, &replaced).expect("must seed replaced receipt");
 
-        apply_replacement_handoff(&layout, std::slice::from_ref(&replaced))
+        apply_replacement_handoff(&layout, std::slice::from_ref(&replaced), &HashMap::new())
             .expect("safe replacement handoff should uninstall target");
 
         let remaining = read_install_receipts(&layout).expect("must read receipts");
