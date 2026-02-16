@@ -1347,7 +1347,8 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn parse_old_receipt_shape() {
@@ -2019,18 +2020,36 @@ mod tests {
         .expect("must write receipt");
     }
 
-    fn test_layout() -> PrefixLayout {
+    static TEST_LAYOUT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn build_test_layout_path(nanos: u128) -> PathBuf {
         let mut path = std::env::temp_dir();
+        let sequence = TEST_LAYOUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!(
+            "crosspack-installer-tests-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            sequence
+        ));
+        path
+    }
+
+    #[test]
+    fn build_test_layout_path_disambiguates_same_timestamp_calls() {
+        let first = build_test_layout_path(42);
+        let second = build_test_layout_path(42);
+        assert_ne!(
+            first, second,
+            "installer test layout paths must remain unique when timestamp granularity is coarse"
+        );
+    }
+
+    fn test_layout() -> PrefixLayout {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        path.push(format!(
-            "crosspack-installer-tests-{}-{}",
-            std::process::id(),
-            nanos
-        ));
-        PrefixLayout::new(path)
+        PrefixLayout::new(build_test_layout_path(nanos))
     }
 
     #[test]
