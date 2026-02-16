@@ -937,7 +937,8 @@ fn status_allows_stale_marker_cleanup(status: &str) -> bool {
 }
 
 fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
-    ensure_no_active_transaction(layout).map_err(|err| anyhow!("cannot {command}: {err}"))
+    ensure_no_active_transaction(layout)
+        .map_err(|err| anyhow!("cannot {command} (command={command}): {err}"))
 }
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
@@ -1674,7 +1675,7 @@ mod tests {
             .expect_err("blocked transaction should include command context");
         assert!(
             err.to_string().contains(
-                "cannot uninstall: transaction tx-blocked requires repair (reason=failed)"
+                "cannot uninstall (command=uninstall): transaction tx-blocked requires repair (reason=failed)"
             ),
             "unexpected error: {err}"
         );
