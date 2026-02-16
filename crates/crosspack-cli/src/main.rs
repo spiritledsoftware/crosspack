@@ -938,6 +938,11 @@ fn status_allows_stale_marker_cleanup(status: &str) -> bool {
 
 fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
     let command = command.trim().to_ascii_lowercase();
+    let command = if command.is_empty() {
+        "unknown".to_string()
+    } else {
+        command
+    };
     ensure_no_active_transaction(layout).map_err(|err| {
         anyhow!("cannot {command} (reason=active_transaction command={command}): {err}")
     })
@@ -1706,6 +1711,35 @@ mod tests {
         assert!(
             err.to_string().contains(
                 "cannot uninstall (reason=active_transaction command=uninstall): transaction tx-blocked-normalized requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_for_uses_unknown_when_command_missing() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-empty-command".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_262,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-empty-command")
+            .expect("must write active marker");
+
+        let err = ensure_no_active_transaction_for(&layout, "   ")
+            .expect_err("blocked transaction should fallback command token");
+        assert!(
+            err.to_string().contains(
+                "cannot unknown (reason=active_transaction command=unknown): transaction tx-blocked-empty-command requires repair (reason=failed)"
             ),
             "unexpected error: {err}"
         );
