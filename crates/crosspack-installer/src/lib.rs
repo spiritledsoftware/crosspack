@@ -1163,8 +1163,14 @@ fn parse_transaction_metadata(raw: &str) -> Result<TransactionMetadata> {
 
         let key = raw_key.trim().trim_matches('"').to_string();
         let value = raw_value.trim();
-        if value.starts_with('"') && value.ends_with('"') {
-            let inner = &value[1..value.len().saturating_sub(1)];
+        if value.starts_with('"') || value.ends_with('"') {
+            if !(value.starts_with('"') && value.ends_with('"') && value.len() >= 2) {
+                return Err(anyhow!(
+                    "invalid quoted transaction metadata value for field: {key}"
+                ));
+            }
+
+            let inner = &value[1..value.len() - 1];
             string_fields.insert(key, unescape_json(inner)?);
         } else {
             number_fields.insert(key, value.to_string());
@@ -1389,6 +1395,27 @@ mod tests {
             .expect("metadata should exist");
 
         assert_eq!(loaded, metadata);
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_transaction_metadata_rejects_truncated_quoted_value() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-corrupt-quote";
+        let raw = "{\n  \"version\": 1,\n  \"txid\": \",\n  \"operation\": \"install\",\n  \"status\": \"planning\",\n  \"started_at_unix\": 1771001250\n}\n";
+        fs::write(layout.transaction_metadata_path(txid), raw)
+            .expect("must write malformed metadata file");
+
+        let err = read_transaction_metadata(&layout, txid)
+            .expect_err("truncated quoted value should be recoverable parse error");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text.contains("invalid quoted transaction metadata value for field: txid"),
+            "unexpected error: {err_text}"
+        );
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
