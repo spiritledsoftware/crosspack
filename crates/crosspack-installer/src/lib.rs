@@ -218,12 +218,44 @@ pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathB
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(&path, format!("{txid}\n")).with_context(|| {
+
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            let existing = read_active_transaction(layout).ok().flatten();
+            let detail = existing
+                .map(|existing_txid| format!(" (txid={existing_txid})"))
+                .unwrap_or_default();
+            return Err(anyhow!("active transaction marker already exists{detail}"));
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to claim active transaction file: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    file.write_all(format!("{txid}\n").as_bytes())
+        .with_context(|| {
+            format!(
+                "failed to write active transaction file: {}",
+                path.display()
+            )
+        })?;
+    file.flush().with_context(|| {
         format!(
-            "failed to write active transaction file: {}",
+            "failed to flush active transaction file: {}",
             path.display()
         )
     })?;
+
     Ok(path)
 }
 
@@ -1466,6 +1498,32 @@ mod tests {
         assert!(read_active_transaction(&layout)
             .expect("must read active transaction")
             .is_none());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn set_active_transaction_rejects_when_marker_already_exists() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-first").expect("must claim first active marker");
+
+        let err = set_active_transaction(&layout, "tx-second")
+            .expect_err("second active claim should fail atomically");
+        assert!(
+            err.to_string()
+                .contains("active transaction marker already exists (txid=tx-first)"),
+            "unexpected error: {err}"
+        );
+
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active marker")
+                .as_deref(),
+            Some("tx-first"),
+            "first active marker should remain intact"
+        );
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
