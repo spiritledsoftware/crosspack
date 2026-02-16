@@ -935,7 +935,7 @@ where
 }
 
 fn status_allows_stale_marker_cleanup(status: &str) -> bool {
-    matches!(status, "planning" | "committed" | "rolled_back")
+    matches!(status, "committed" | "rolled_back")
 }
 
 fn normalize_command_token(command: &str) -> String {
@@ -2024,7 +2024,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_no_active_transaction_clears_planning_marker() {
+    fn ensure_no_active_transaction_blocks_planning_without_mutating_status() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -2039,14 +2039,25 @@ mod tests {
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
         set_active_transaction(&layout, "tx-planning").expect("must write active marker");
 
-        ensure_no_active_transaction(&layout)
-            .expect("planning transaction marker should be auto-cleaned");
-
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("planning transaction should block concurrent mutation");
         assert!(
+            err.to_string().contains(
+                "transaction tx-planning is active (reason=active_status status=planning)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let updated = read_transaction_metadata(&layout, "tx-planning")
+            .expect("must read metadata")
+            .expect("metadata should exist");
+        assert_eq!(updated.status, "planning");
+        assert_eq!(
             read_active_transaction(&layout)
                 .expect("must read active transaction")
-                .is_none(),
-            "planning active marker should be cleared"
+                .as_deref(),
+            Some("tx-planning"),
+            "planning marker should remain active"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -2519,7 +2530,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_transaction_health_line_treats_planning_marker_as_clean() {
+    fn doctor_transaction_health_line_treats_planning_marker_as_active() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -2536,7 +2547,7 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for planning marker");
-        assert_eq!(line, "transaction: clean");
+        assert_eq!(line, "transaction: active tx-planning");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
