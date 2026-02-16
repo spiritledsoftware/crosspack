@@ -146,7 +146,7 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
-            ensure_no_active_transaction(&layout)?;
+            ensure_no_active_transaction_for(&layout, "install")?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
 
             execute_with_transaction(&layout, "install", None, |tx| {
@@ -212,7 +212,7 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
-            ensure_no_active_transaction(&layout)?;
+            ensure_no_active_transaction_for(&layout, "upgrade")?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
 
             let receipts = read_install_receipts(&layout)?;
@@ -439,7 +439,7 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
-            ensure_no_active_transaction(&layout)?;
+            ensure_no_active_transaction_for(&layout, "uninstall")?;
 
             execute_with_transaction(&layout, "uninstall", None, |tx| {
                 let mut journal_seq = 1_u64;
@@ -934,6 +934,10 @@ where
 
 fn status_allows_stale_marker_cleanup(status: &str) -> bool {
     matches!(status, "planning" | "committed" | "rolled_back")
+}
+
+fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
+    ensure_no_active_transaction(layout).map_err(|err| anyhow!("cannot {command}: {err}"))
 }
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
@@ -1575,8 +1579,8 @@ mod tests {
         begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
         determine_install_reason, doctor_transaction_health_line,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
-        ensure_update_succeeded, execute_with_transaction, format_registry_add_lines,
-        format_registry_list_lines, format_registry_list_snapshot_state,
+        ensure_no_active_transaction_for, ensure_update_succeeded, execute_with_transaction,
+        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
         parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
         select_metadata_backend, set_transaction_status, update_failure_reason_code,
@@ -1644,6 +1648,34 @@ mod tests {
         );
         assert!(
             err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_for_includes_command_context() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_260,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked").expect("must write active marker");
+
+        let err = ensure_no_active_transaction_for(&layout, "uninstall")
+            .expect_err("blocked transaction should include command context");
+        assert!(
+            err.to_string().contains(
+                "cannot uninstall: transaction tx-blocked requires repair (reason=failed)"
+            ),
             "unexpected error: {err}"
         );
 
