@@ -578,6 +578,28 @@ pub fn remove_pin(layout: &PrefixLayout, name: &str) -> Result<bool> {
 }
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
+    uninstall_package_with_dependency_overrides(layout, name, &HashMap::new())
+}
+
+pub fn uninstall_package_with_dependency_overrides(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+) -> Result<UninstallResult> {
+    uninstall_package_with_dependency_overrides_and_ignored_roots(
+        layout,
+        name,
+        dependency_overrides,
+        &HashSet::new(),
+    )
+}
+
+pub fn uninstall_package_with_dependency_overrides_and_ignored_roots(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+    ignored_root_names: &HashSet<String>,
+) -> Result<UninstallResult> {
     let receipts = read_install_receipts(layout)?;
     let Some(target_receipt) = receipts
         .iter()
@@ -598,14 +620,10 @@ pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallR
         .cloned()
         .map(|receipt| (receipt.name.clone(), receipt))
         .collect();
-    let dependencies = dependency_map(&receipt_map);
+    let mut dependencies = dependency_map(&receipt_map);
+    apply_dependency_overrides(&mut dependencies, dependency_overrides);
 
-    let remaining_roots = receipt_map
-        .values()
-        .filter(|receipt| receipt.name != name)
-        .filter(|receipt| receipt.install_reason == InstallReason::Root)
-        .map(|receipt| receipt.name.clone())
-        .collect::<Vec<_>>();
+    let remaining_roots = collect_remaining_roots(&receipt_map, name, ignored_root_names);
     let reachable = reachable_packages(&remaining_roots, &dependencies);
 
     if reachable.contains(name) {
@@ -678,6 +696,73 @@ pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallR
         pruned_dependencies,
         blocked_by_roots: Vec::new(),
     })
+}
+
+pub fn uninstall_blocked_by_roots_with_dependency_overrides(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+) -> Result<Vec<String>> {
+    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots(
+        layout,
+        name,
+        dependency_overrides,
+        &HashSet::new(),
+    )
+}
+
+pub fn uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+    ignored_root_names: &HashSet<String>,
+) -> Result<Vec<String>> {
+    let receipts = read_install_receipts(layout)?;
+    let receipt_map: HashMap<String, InstallReceipt> = receipts
+        .iter()
+        .cloned()
+        .map(|receipt| (receipt.name.clone(), receipt))
+        .collect();
+
+    if !receipt_map.contains_key(name) {
+        return Ok(Vec::new());
+    }
+
+    let mut dependencies = dependency_map(&receipt_map);
+    apply_dependency_overrides(&mut dependencies, dependency_overrides);
+
+    let remaining_roots = collect_remaining_roots(&receipt_map, name, ignored_root_names);
+    let reachable = reachable_packages(&remaining_roots, &dependencies);
+
+    if !reachable.contains(name) {
+        return Ok(Vec::new());
+    }
+
+    let mut blocked_by_roots = remaining_roots
+        .iter()
+        .filter(|root| package_reachable(root, name, &dependencies))
+        .cloned()
+        .collect::<Vec<_>>();
+    blocked_by_roots.sort();
+    blocked_by_roots.dedup();
+    Ok(blocked_by_roots)
+}
+
+fn collect_remaining_roots(
+    receipt_map: &HashMap<String, InstallReceipt>,
+    target_name: &str,
+    ignored_root_names: &HashSet<String>,
+) -> Vec<String> {
+    let mut remaining_roots = receipt_map
+        .values()
+        .filter(|receipt| receipt.name != target_name)
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .filter(|receipt| !ignored_root_names.contains(&receipt.name))
+        .map(|receipt| receipt.name.clone())
+        .collect::<Vec<_>>();
+    remaining_roots.sort();
+    remaining_roots.dedup();
+    remaining_roots
 }
 
 fn safe_cache_prune_path(layout: &PrefixLayout, cache_path: &str) -> Option<PathBuf> {
@@ -797,6 +882,19 @@ fn dependency_map(receipts: &HashMap<String, InstallReceipt>) -> HashMap<String,
             (name.clone(), deps)
         })
         .collect()
+}
+
+fn apply_dependency_overrides(
+    dependencies: &mut HashMap<String, BTreeSet<String>>,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+) {
+    for (package, override_dependencies) in dependency_overrides {
+        let projected = override_dependencies
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        dependencies.insert(package.clone(), projected);
+    }
 }
 
 fn parse_dependency_name(entry: &str) -> Option<&str> {
@@ -1312,12 +1410,15 @@ mod tests {
         append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
         parse_receipt, read_active_transaction, read_all_pins, read_pin, read_transaction_metadata,
         remove_exposed_binary, remove_pin, set_active_transaction, strip_rel_components,
-        uninstall_package, update_transaction_status, write_install_receipt, write_pin,
-        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-        TransactionJournalEntry, TransactionMetadata, UninstallStatus,
+        uninstall_package, uninstall_package_with_dependency_overrides, update_transaction_status,
+        write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
+        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
+        UninstallStatus,
     };
+    use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn parse_old_receipt_shape() {
@@ -1731,6 +1832,91 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_with_dependency_overrides_allows_planned_root_transition() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["shared@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "shared",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let dependency_overrides =
+            HashMap::from([("app".to_string(), vec!["replacement".to_string()])]);
+        let result =
+            uninstall_package_with_dependency_overrides(&layout, "shared", &dependency_overrides)
+                .expect("planned dependency override should allow uninstall");
+
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!layout.receipt_path("shared").exists());
+        assert!(layout.receipt_path("app").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_with_dependency_overrides_keeps_transitive_edges_for_planned_packages() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["legacy@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "legacy",
+            "1.0.0",
+            &["lib@1.0.0"],
+            InstallReason::Dependency,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "lib",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let dependency_overrides = HashMap::from([
+            ("app".to_string(), vec!["new".to_string()]),
+            ("new".to_string(), vec!["lib".to_string()]),
+        ]);
+        let result =
+            uninstall_package_with_dependency_overrides(&layout, "legacy", &dependency_overrides)
+                .expect("planned transitive overrides should preserve shared dependencies");
+
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(
+            result.pruned_dependencies.is_empty(),
+            "shared lib must not be pruned when planned graph still requires it"
+        );
+        assert!(!layout.receipt_path("legacy").exists());
+        assert!(layout.receipt_path("app").exists());
+        assert!(layout.receipt_path("lib").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn uninstall_prunes_orphans_when_root_removed() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -1954,18 +2140,36 @@ mod tests {
         .expect("must write receipt");
     }
 
-    fn test_layout() -> PrefixLayout {
+    static TEST_LAYOUT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn build_test_layout_path(nanos: u128) -> PathBuf {
         let mut path = std::env::temp_dir();
+        let sequence = TEST_LAYOUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!(
+            "crosspack-installer-tests-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            sequence
+        ));
+        path
+    }
+
+    #[test]
+    fn build_test_layout_path_disambiguates_same_timestamp_calls() {
+        let first = build_test_layout_path(42);
+        let second = build_test_layout_path(42);
+        assert_ne!(
+            first, second,
+            "installer test layout paths must remain unique when timestamp granularity is coarse"
+        );
+    }
+
+    fn test_layout() -> PrefixLayout {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        path.push(format!(
-            "crosspack-installer-tests-{}-{}",
-            std::process::id(),
-            nanos
-        ));
-        PrefixLayout::new(path)
+        PrefixLayout::new(build_test_layout_path(nanos))
     }
 
     #[test]
