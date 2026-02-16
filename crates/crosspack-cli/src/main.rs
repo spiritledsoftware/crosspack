@@ -937,6 +937,7 @@ fn status_allows_stale_marker_cleanup(status: &str) -> bool {
 }
 
 fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
+    let command = command.trim().to_ascii_lowercase();
     ensure_no_active_transaction(layout)
         .map_err(|err| anyhow!("cannot {command} (command={command}): {err}"))
 }
@@ -1676,6 +1677,34 @@ mod tests {
         assert!(
             err.to_string().contains(
                 "cannot uninstall (command=uninstall): transaction tx-blocked requires repair (reason=failed)"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_for_normalizes_command_token() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-normalized".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_261,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-normalized").expect("must write active marker");
+
+        let err = ensure_no_active_transaction_for(&layout, "  UnInstall  ")
+            .expect_err("blocked transaction should normalize command token");
+        assert!(
+            err.to_string().contains(
+                "cannot uninstall (command=uninstall): transaction tx-blocked-normalized requires repair (reason=failed)"
             ),
             "unexpected error: {err}"
         );
