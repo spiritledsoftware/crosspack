@@ -10,7 +10,8 @@ use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
     read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
-    remove_file_if_exists, set_active_transaction, uninstall_package,
+    remove_file_if_exists, set_active_transaction,
+    uninstall_blocked_by_roots_with_dependency_overrides, uninstall_package,
     uninstall_package_with_dependency_overrides, update_transaction_status, write_install_receipt,
     write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
     TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
@@ -1329,6 +1330,22 @@ fn apply_replacement_handoff(
     replacement_receipts: &[InstallReceipt],
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
 ) -> Result<()> {
+    for replacement in replacement_receipts {
+        let blocked_by_roots = uninstall_blocked_by_roots_with_dependency_overrides(
+            layout,
+            &replacement.name,
+            planned_dependency_overrides,
+        )?;
+        if !blocked_by_roots.is_empty() {
+            return Err(anyhow!(
+                "cannot replace '{}' {}: still required by roots {}",
+                replacement.name,
+                replacement.version,
+                blocked_by_roots.join(", ")
+            ));
+        }
+    }
+
     for replacement in replacement_receipts {
         let result = uninstall_package_with_dependency_overrides(
             layout,
@@ -3004,6 +3021,78 @@ ripgrep-legacy = "*"
             remaining.len(),
             2,
             "blocked replacement must not mutate state"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn apply_replacement_handoff_preflights_all_targets_before_mutation() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let app = InstallReceipt {
+            name: "app".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["legacy-b@1.0.0".to_string()],
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["app".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let legacy_a = InstallReceipt {
+            name: "legacy-a".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["legacy-a".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let legacy_b = InstallReceipt {
+            name: "legacy-b".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["legacy-b".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_install_receipt(&layout, &app).expect("must seed app receipt");
+        write_install_receipt(&layout, &legacy_a).expect("must seed first replacement target");
+        write_install_receipt(&layout, &legacy_b).expect("must seed second replacement target");
+
+        let err = apply_replacement_handoff(
+            &layout,
+            &[legacy_a.clone(), legacy_b.clone()],
+            &HashMap::new(),
+        )
+        .expect_err("blocked replacement must fail before any uninstall mutation");
+        assert!(err.to_string().contains("still required by roots app"));
+
+        let remaining = read_install_receipts(&layout).expect("must read receipts");
+        let remaining_names = remaining
+            .iter()
+            .map(|receipt| receipt.name.as_str())
+            .collect::<HashSet<_>>();
+        assert!(
+            remaining_names.contains("legacy-a") && remaining_names.contains("legacy-b"),
+            "preflight failure must keep every replacement target installed"
         );
 
         let _ = fs::remove_dir_all(layout.prefix());

@@ -607,7 +607,7 @@ pub fn uninstall_package_with_dependency_overrides(
         .map(|receipt| (receipt.name.clone(), receipt))
         .collect();
     let mut dependencies = dependency_map(&receipt_map);
-    apply_dependency_overrides(&mut dependencies, &receipt_map, dependency_overrides);
+    apply_dependency_overrides(&mut dependencies, dependency_overrides);
 
     let remaining_roots = receipt_map
         .values()
@@ -687,6 +687,47 @@ pub fn uninstall_package_with_dependency_overrides(
         pruned_dependencies,
         blocked_by_roots: Vec::new(),
     })
+}
+
+pub fn uninstall_blocked_by_roots_with_dependency_overrides(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+) -> Result<Vec<String>> {
+    let receipts = read_install_receipts(layout)?;
+    let receipt_map: HashMap<String, InstallReceipt> = receipts
+        .iter()
+        .cloned()
+        .map(|receipt| (receipt.name.clone(), receipt))
+        .collect();
+
+    if !receipt_map.contains_key(name) {
+        return Ok(Vec::new());
+    }
+
+    let mut dependencies = dependency_map(&receipt_map);
+    apply_dependency_overrides(&mut dependencies, dependency_overrides);
+
+    let remaining_roots = receipt_map
+        .values()
+        .filter(|receipt| receipt.name != name)
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .map(|receipt| receipt.name.clone())
+        .collect::<Vec<_>>();
+    let reachable = reachable_packages(&remaining_roots, &dependencies);
+
+    if !reachable.contains(name) {
+        return Ok(Vec::new());
+    }
+
+    let mut blocked_by_roots = remaining_roots
+        .iter()
+        .filter(|root| package_reachable(root, name, &dependencies))
+        .cloned()
+        .collect::<Vec<_>>();
+    blocked_by_roots.sort();
+    blocked_by_roots.dedup();
+    Ok(blocked_by_roots)
 }
 
 fn safe_cache_prune_path(layout: &PrefixLayout, cache_path: &str) -> Option<PathBuf> {
@@ -810,17 +851,11 @@ fn dependency_map(receipts: &HashMap<String, InstallReceipt>) -> HashMap<String,
 
 fn apply_dependency_overrides(
     dependencies: &mut HashMap<String, BTreeSet<String>>,
-    receipts: &HashMap<String, InstallReceipt>,
     dependency_overrides: &HashMap<String, Vec<String>>,
 ) {
     for (package, override_dependencies) in dependency_overrides {
-        if !receipts.contains_key(package) {
-            continue;
-        }
-
         let projected = override_dependencies
             .iter()
-            .filter(|dependency| receipts.contains_key(dependency.as_str()))
             .cloned()
             .collect::<BTreeSet<_>>();
         dependencies.insert(package.clone(), projected);
@@ -1792,6 +1827,56 @@ mod tests {
         assert_eq!(result.status, UninstallStatus::Uninstalled);
         assert!(!layout.receipt_path("shared").exists());
         assert!(layout.receipt_path("app").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_with_dependency_overrides_keeps_transitive_edges_for_planned_packages() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_receipt(
+            &layout,
+            "app",
+            "1.0.0",
+            &["legacy@1.0.0"],
+            InstallReason::Root,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "legacy",
+            "1.0.0",
+            &["lib@1.0.0"],
+            InstallReason::Dependency,
+            None,
+        );
+        write_receipt(
+            &layout,
+            "lib",
+            "1.0.0",
+            &[],
+            InstallReason::Dependency,
+            None,
+        );
+
+        let dependency_overrides = HashMap::from([
+            ("app".to_string(), vec!["new".to_string()]),
+            ("new".to_string(), vec!["lib".to_string()]),
+        ]);
+        let result =
+            uninstall_package_with_dependency_overrides(&layout, "legacy", &dependency_overrides)
+                .expect("planned transitive overrides should preserve shared dependencies");
+
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(
+            result.pruned_dependencies.is_empty(),
+            "shared lib must not be pruned when planned graph still requires it"
+        );
+        assert!(!layout.receipt_path("legacy").exists());
+        assert!(layout.receipt_path("app").exists());
+        assert!(layout.receipt_path("lib").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
