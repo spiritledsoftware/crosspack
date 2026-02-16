@@ -1668,24 +1668,24 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
-        collect_replacement_receipts, determine_install_reason, doctor_transaction_health_line,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
-        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
-        execute_with_transaction, format_registry_add_lines, format_registry_list_lines,
-        format_registry_list_snapshot_state, format_registry_remove_lines,
-        format_uninstall_messages, format_update_summary_line, normalize_command_token,
-        parse_pin_spec, registry_state_root, run_uninstall_command, run_update_command,
-        run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
+        apply_replacement_handoff, begin_transaction, build_update_report, build_upgrade_plans,
+        build_upgrade_roots, collect_replacement_receipts, determine_install_reason,
+        doctor_transaction_health_line, enforce_disjoint_multi_target_upgrade,
+        enforce_no_downgrades, ensure_no_active_transaction, ensure_no_active_transaction_for,
+        ensure_update_succeeded, ensure_upgrade_command_ready, execute_with_transaction,
+        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
+        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
+        normalize_command_token, parse_pin_spec, registry_state_root, run_uninstall_command,
+        run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
         set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
         CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        bin_path, read_active_transaction, read_transaction_metadata, set_active_transaction,
-        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-        TransactionMetadata, UninstallResult, UninstallStatus,
+        bin_path, read_active_transaction, read_install_receipts, read_transaction_metadata,
+        set_active_transaction, write_install_receipt, write_transaction_metadata, InstallReason,
+        InstallReceipt, PrefixLayout, TransactionMetadata, UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -2875,6 +2875,124 @@ ripgrep-legacy = "<2.0.0"
             collect_replacement_receipts(&manifest, &receipts).expect("replacement match expected");
         assert_eq!(replacements.len(), 1);
         assert_eq!(replacements[0].name, "ripgrep-legacy");
+    }
+
+    #[test]
+    fn collect_replacement_receipts_rejects_invalid_installed_version() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "ripgrep"
+version = "2.0.0"
+
+[replaces]
+ripgrep-legacy = "*"
+"#,
+        )
+        .expect("manifest should parse");
+
+        let receipts = vec![InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "not-a-semver".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let err = collect_replacement_receipts(&manifest, &receipts)
+            .expect_err("invalid installed semver should fail replacement preflight");
+        assert!(err
+            .to_string()
+            .contains("invalid version for replacement preflight"));
+    }
+
+    #[test]
+    fn apply_replacement_handoff_blocks_when_dependents_remain() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let app = InstallReceipt {
+            name: "app".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["ripgrep-legacy@1.0.0".to_string()],
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["app".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let replaced = InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_install_receipt(&layout, &app).expect("must seed app receipt");
+        write_install_receipt(&layout, &replaced).expect("must seed replaced receipt");
+
+        let err = apply_replacement_handoff(&layout, std::slice::from_ref(&replaced))
+            .expect_err("replacement must fail while rooted dependents remain");
+        assert!(err.to_string().contains("still required by roots app"));
+
+        let remaining = read_install_receipts(&layout).expect("must read receipts");
+        assert_eq!(
+            remaining.len(),
+            2,
+            "blocked replacement must not mutate state"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn apply_replacement_handoff_uninstalls_safe_target() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let replaced = InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_install_receipt(&layout, &replaced).expect("must seed replaced receipt");
+
+        apply_replacement_handoff(&layout, std::slice::from_ref(&replaced))
+            .expect("safe replacement handoff should uninstall target");
+
+        let remaining = read_install_receipts(&layout).expect("must read receipts");
+        assert!(
+            remaining.is_empty(),
+            "replacement handoff must remove target receipt"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
