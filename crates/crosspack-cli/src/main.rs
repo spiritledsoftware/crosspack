@@ -878,7 +878,11 @@ fn begin_transaction(
     };
 
     write_transaction_metadata(layout, &metadata)?;
-    set_active_transaction(layout, &metadata.txid)?;
+    if let Err(err) = set_active_transaction(layout, &metadata.txid) {
+        let _ = remove_file_if_exists(&layout.transaction_metadata_path(&metadata.txid));
+        let _ = std::fs::remove_dir_all(layout.transaction_staging_path(&metadata.txid));
+        return Err(err);
+    }
 
     Ok(metadata)
 }
@@ -981,12 +985,6 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
                 clear_active_transaction(layout)?;
                 return Ok(());
             }
-            if metadata.status == "applying" {
-                let _ = set_transaction_status(layout, &txid, "failed");
-                return Err(anyhow!(
-                    "transaction {txid} requires repair (reason=applying_incomplete)"
-                ));
-            }
             if metadata.status == "rolling_back" {
                 return Err(anyhow!(
                     "transaction {txid} requires repair (reason=rolling_back)"
@@ -1045,11 +1043,6 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         ));
     };
 
-    if metadata.status == "applying" {
-        return Ok(format!(
-            "transaction: failed {txid} (reason=applying_incomplete)"
-        ));
-    }
     if metadata.status == "rolling_back" {
         return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
     }
@@ -1643,6 +1636,43 @@ mod tests {
             .expect("must read metadata");
         assert!(metadata.contains("\"status\": \"planning\""));
         assert!(metadata.contains("\"operation\": \"install\""));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn begin_transaction_cleans_up_metadata_when_active_claim_fails() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        set_active_transaction(&layout, "tx-existing").expect("must seed existing active marker");
+
+        let started_at_unix = 1_771_001_256;
+        let expected_txid = format!("tx-{started_at_unix}-{}", std::process::id());
+        let err = begin_transaction(&layout, "install", None, started_at_unix)
+            .expect_err("existing active marker should block transaction start");
+        assert!(
+            err.to_string()
+                .contains("active transaction marker already exists (txid=tx-existing)"),
+            "unexpected error: {err}"
+        );
+
+        assert!(
+            !layout.transaction_metadata_path(&expected_txid).exists(),
+            "metadata file should be cleaned up when active claim fails"
+        );
+        assert!(
+            !layout.transaction_staging_path(&expected_txid).exists(),
+            "staging dir should be cleaned up when active claim fails"
+        );
+
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-existing"),
+            "existing active marker should remain unchanged"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -2278,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_no_active_transaction_marks_applying_as_failed() {
+    fn ensure_no_active_transaction_blocks_applying_without_mutating_status() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -2294,24 +2324,25 @@ mod tests {
         set_active_transaction(&layout, "tx-applying").expect("must write active marker");
 
         let err = ensure_no_active_transaction(&layout)
-            .expect_err("applying transaction should transition to failed and block");
+            .expect_err("applying transaction should block concurrent mutation");
         assert!(
-            err.to_string()
-                .contains("transaction tx-applying requires repair (reason=applying_incomplete)"),
+            err.to_string().contains(
+                "transaction tx-applying is active (reason=active_status status=applying)"
+            ),
             "unexpected error: {err}"
         );
 
         let updated = read_transaction_metadata(&layout, "tx-applying")
             .expect("must read metadata")
             .expect("metadata should exist");
-        assert_eq!(updated.status, "failed");
+        assert_eq!(updated.status, "applying");
 
         let second_err = ensure_no_active_transaction(&layout)
             .expect_err("second preflight call should remain blocked and deterministic");
         assert!(
-            second_err
-                .to_string()
-                .contains("transaction tx-applying requires repair (reason=failed)"),
+            second_err.to_string().contains(
+                "transaction tx-applying is active (reason=active_status status=applying)"
+            ),
             "unexpected second error: {second_err}"
         );
 
@@ -2458,7 +2489,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_transaction_health_line_treats_applying_as_failed() {
+    fn doctor_transaction_health_line_treats_applying_as_active() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -2475,10 +2506,7 @@ mod tests {
 
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for applying tx");
-        assert_eq!(
-            line,
-            "transaction: failed tx-applying-health (reason=applying_incomplete)"
-        );
+        assert_eq!(line, "transaction: active tx-applying-health");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
