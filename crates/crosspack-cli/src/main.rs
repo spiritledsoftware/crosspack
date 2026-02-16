@@ -211,8 +211,7 @@ fn main() -> Result<()> {
         Commands::Upgrade { spec } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            layout.ensure_base_dirs()?;
-            ensure_no_active_transaction_for(&layout, "upgrade")?;
+            ensure_upgrade_command_ready(&layout)?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
 
             let receipts = read_install_receipts(&layout)?;
@@ -650,6 +649,11 @@ fn update_failure_reason_code(error: Option<&str>) -> String {
     }
 
     "unknown".to_string()
+}
+
+fn ensure_upgrade_command_ready(layout: &PrefixLayout) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    ensure_no_active_transaction_for(layout, "upgrade")
 }
 
 fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
@@ -1597,13 +1601,14 @@ mod tests {
         begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
         determine_install_reason, doctor_transaction_health_line,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
-        ensure_no_active_transaction_for, ensure_update_succeeded, execute_with_transaction,
-        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        normalize_command_token, parse_pin_spec, registry_state_root, run_uninstall_command,
-        run_update_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
+        execute_with_transaction, format_registry_add_lines, format_registry_list_lines,
+        format_registry_list_snapshot_state, format_registry_remove_lines,
+        format_uninstall_messages, format_update_summary_line, normalize_command_token,
+        parse_pin_spec, registry_state_root, run_uninstall_command, run_update_command,
+        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
+        update_failure_reason_code, validate_binary_preflight, Cli, CliRegistryKind, Commands,
+        MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1666,6 +1671,35 @@ mod tests {
         );
         assert!(
             err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_upgrade_command_ready_reports_preflight_context_when_transaction_active() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-blocked-upgrade-command".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_258,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-blocked-upgrade-command")
+            .expect("must write active marker");
+
+        let err = ensure_upgrade_command_ready(&layout)
+            .expect_err("active transaction should block upgrade preflight");
+        assert!(
+            err.to_string().contains(
+                "cannot upgrade (reason=active_transaction command=upgrade): transaction tx-blocked-upgrade-command requires repair (reason=failed)"
+            ),
             "unexpected error: {err}"
         );
 
