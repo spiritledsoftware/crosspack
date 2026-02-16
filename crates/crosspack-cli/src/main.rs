@@ -148,7 +148,7 @@ fn main() -> Result<()> {
             provider,
         } => {
             let (name, requirement) = parse_spec(&spec)?;
-            let _provider_overrides = parse_provider_overrides(&provider)?;
+            let provider_overrides = parse_provider_overrides(&provider)?;
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -163,7 +163,13 @@ fn main() -> Result<()> {
                     .iter()
                     .map(|root| root.name.clone())
                     .collect::<Vec<_>>();
-                let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
+                let resolved = resolve_install_graph(
+                    &layout,
+                    &backend,
+                    &roots,
+                    target.as_deref(),
+                    &provider_overrides,
+                )?;
 
                 append_transaction_journal_entry(
                     &layout,
@@ -219,10 +225,15 @@ fn main() -> Result<()> {
             })?;
         }
         Commands::Upgrade { spec, provider } => {
-            let _provider_overrides = parse_provider_overrides(&provider)?;
+            let provider_overrides = parse_provider_overrides(&provider)?;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            run_upgrade_command(&layout, cli.registry_root.as_deref(), spec)?;
+            run_upgrade_command(
+                &layout,
+                cli.registry_root.as_deref(),
+                spec,
+                &provider_overrides,
+            )?;
         }
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
@@ -450,6 +461,7 @@ fn run_upgrade_command(
     layout: &PrefixLayout,
     registry_root: Option<&Path>,
     spec: Option<String>,
+    provider_overrides: &BTreeMap<String, String>,
 ) -> Result<()> {
     ensure_upgrade_command_ready(layout)?;
     let backend = select_metadata_backend(registry_root, layout)?;
@@ -482,6 +494,7 @@ fn run_upgrade_command(
                     &backend,
                     &roots,
                     installed_receipt.target.as_deref(),
+                    provider_overrides,
                 )?;
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
@@ -556,6 +569,7 @@ fn run_upgrade_command(
                         &backend,
                         &plan.roots,
                         plan.target.as_deref(),
+                        provider_overrides,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
 
@@ -917,6 +931,38 @@ fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
     lines
 }
 
+fn apply_provider_override(
+    requested_name: &str,
+    candidates: Vec<PackageManifest>,
+    provider_overrides: &BTreeMap<String, String>,
+) -> Result<Vec<PackageManifest>> {
+    let Some(provider_name) = provider_overrides.get(requested_name) else {
+        return Ok(candidates);
+    };
+
+    let filtered = candidates
+        .into_iter()
+        .filter(|manifest| {
+            manifest.name == *provider_name
+                && (manifest.name == requested_name
+                    || manifest
+                        .provides
+                        .iter()
+                        .any(|provided| provided == requested_name))
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        return Err(anyhow!(
+            "provider override '{}={}' did not match any candidate packages",
+            requested_name,
+            provider_name
+        ));
+    }
+
+    Ok(filtered)
+}
+
 #[cfg(test)]
 fn select_manifest_with_pin<'a>(
     versions: &'a [PackageManifest],
@@ -1170,6 +1216,7 @@ fn resolve_install_graph(
     index: &MetadataBackend,
     roots: &[RootInstallRequest],
     requested_target: Option<&str>,
+    provider_overrides: &BTreeMap<String, String>,
 ) -> Result<Vec<ResolvedInstall>> {
     let mut pins = BTreeMap::new();
     for (name, raw_req) in read_all_pins(layout)? {
@@ -1187,7 +1234,8 @@ fn resolve_install_graph(
         .collect();
 
     let graph = resolve_dependency_graph(&root_reqs, &pins, |package_name| {
-        index.package_versions(package_name)
+        let versions = index.package_versions(package_name)?;
+        apply_provider_override(package_name, versions, provider_overrides)
     })?;
 
     let resolved_target = requested_target
@@ -1836,18 +1884,19 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_replacement_handoff, begin_transaction, build_update_report, build_upgrade_plans,
-        build_upgrade_roots, collect_replacement_receipts, determine_install_reason,
-        doctor_transaction_health_line, enforce_disjoint_multi_target_upgrade,
-        enforce_no_downgrades, ensure_no_active_transaction, ensure_no_active_transaction_for,
-        ensure_update_succeeded, ensure_upgrade_command_ready, execute_with_transaction,
-        format_info_lines, format_registry_add_lines, format_registry_list_lines,
-        format_registry_list_snapshot_state, format_registry_remove_lines,
-        format_uninstall_messages, format_update_summary_line, normalize_command_token,
-        parse_pin_spec, parse_provider_overrides, registry_state_root, run_uninstall_command,
-        run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        apply_provider_override, apply_replacement_handoff, begin_transaction, build_update_report,
+        build_upgrade_plans, build_upgrade_roots, collect_replacement_receipts,
+        determine_install_reason, doctor_transaction_health_line,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
+        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
+        execute_with_transaction, format_info_lines, format_registry_add_lines,
+        format_registry_list_lines, format_registry_list_snapshot_state,
+        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
+        normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
+        run_uninstall_command, run_update_command, run_upgrade_command, select_manifest_with_pin,
+        select_metadata_backend, set_transaction_status, update_failure_reason_code,
+        validate_binary_preflight, Cli, CliRegistryKind, Commands, MetadataBackend,
+        ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1862,7 +1911,7 @@ mod tests {
         SourceUpdateStatus,
     };
     use semver::VersionReq;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2001,7 +2050,7 @@ mod tests {
         set_active_transaction(&layout, "tx-blocked-upgrade-dispatch")
             .expect("must write active marker");
 
-        let err = run_upgrade_command(&layout, None, None)
+        let err = run_upgrade_command(&layout, None, None, &BTreeMap::new())
             .expect_err("active transaction should block upgrade command");
         assert!(
             err.to_string().contains(
@@ -3777,6 +3826,69 @@ ripgrep-legacy = "*"
         let err = parse_provider_overrides(&["BadCap=clang".to_string()])
             .expect_err("invalid capability token must fail");
         assert!(err.to_string().contains("capability 'BadCap'"));
+    }
+
+    #[test]
+    fn apply_provider_override_selects_requested_capability_provider() {
+        let gcc = PackageManifest::from_toml_str(
+            r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+        )
+        .expect("gcc manifest must parse");
+        let llvm = PackageManifest::from_toml_str(
+            r#"
+name = "llvm"
+version = "2.1.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.1.0.tar.zst"
+sha256 = "llvm"
+"#,
+        )
+        .expect("llvm manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+
+        let selected = apply_provider_override("compiler", vec![gcc, llvm], &overrides)
+            .expect("provider override must filter candidate set");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "llvm");
+    }
+
+    #[test]
+    fn apply_provider_override_errors_when_requested_provider_missing() {
+        let gcc = PackageManifest::from_toml_str(
+            r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "clang".to_string());
+
+        let err = apply_provider_override("compiler", vec![gcc], &overrides)
+            .expect_err("missing requested provider must fail early");
+        assert!(
+            err.to_string()
+                .contains("provider override 'compiler=clang'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
