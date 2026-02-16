@@ -11,10 +11,10 @@ use crosspack_installer::{
     default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
     read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
     remove_file_if_exists, set_active_transaction,
-    uninstall_blocked_by_roots_with_dependency_overrides, uninstall_package,
-    uninstall_package_with_dependency_overrides, update_transaction_status, write_install_receipt,
-    write_pin, write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
+    uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
+    write_install_receipt, write_pin, write_transaction_metadata, InstallReason, InstallReceipt,
+    PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -1330,12 +1330,20 @@ fn apply_replacement_handoff(
     replacement_receipts: &[InstallReceipt],
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
 ) -> Result<()> {
+    let replacement_root_names = replacement_receipts
+        .iter()
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .map(|receipt| receipt.name.clone())
+        .collect::<HashSet<_>>();
+
     for replacement in replacement_receipts {
-        let blocked_by_roots = uninstall_blocked_by_roots_with_dependency_overrides(
-            layout,
-            &replacement.name,
-            planned_dependency_overrides,
-        )?;
+        let blocked_by_roots =
+            uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots(
+                layout,
+                &replacement.name,
+                planned_dependency_overrides,
+                &replacement_root_names,
+            )?;
         if !blocked_by_roots.is_empty() {
             return Err(anyhow!(
                 "cannot replace '{}' {}: still required by roots {}",
@@ -1347,10 +1355,11 @@ fn apply_replacement_handoff(
     }
 
     for replacement in replacement_receipts {
-        let result = uninstall_package_with_dependency_overrides(
+        let result = uninstall_package_with_dependency_overrides_and_ignored_roots(
             layout,
             &replacement.name,
             planned_dependency_overrides,
+            &replacement_root_names,
         )?;
         if result.status == UninstallStatus::BlockedByDependents {
             return Err(anyhow!(
@@ -1464,17 +1473,21 @@ fn determine_install_reason(
         return InstallReason::Root;
     }
 
+    let promotes_from_replacement_root = replacement_receipts
+        .iter()
+        .any(|receipt| receipt.install_reason == InstallReason::Root);
+
     if let Some(existing) = existing_receipts
         .iter()
         .find(|receipt| receipt.name == package_name)
     {
+        if promotes_from_replacement_root {
+            return InstallReason::Root;
+        }
         return existing.install_reason.clone();
     }
 
-    if replacement_receipts
-        .iter()
-        .any(|receipt| receipt.install_reason == InstallReason::Root)
-    {
+    if promotes_from_replacement_root {
         return InstallReason::Root;
     }
 
@@ -3099,6 +3112,58 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn apply_replacement_handoff_allows_interdependent_replacement_roots() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let legacy_a = InstallReceipt {
+            name: "legacy-a".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["legacy-b@1.0.0".to_string()],
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["legacy-a".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let legacy_b = InstallReceipt {
+            name: "legacy-b".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["legacy-b".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_install_receipt(&layout, &legacy_a).expect("must seed first replacement root");
+        write_install_receipt(&layout, &legacy_b).expect("must seed second replacement root");
+
+        apply_replacement_handoff(
+            &layout,
+            &[legacy_a.clone(), legacy_b.clone()],
+            &HashMap::new(),
+        )
+        .expect("replacement handoff should allow roots that are all being replaced");
+
+        let remaining = read_install_receipts(&layout).expect("must read receipts");
+        assert!(
+            remaining.is_empty(),
+            "all replacement roots should be removed in a successful handoff"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn apply_replacement_handoff_uses_planned_dependency_overrides() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -3277,6 +3342,41 @@ ripgrep-legacy = "*"
         }];
 
         let reason = determine_install_reason("shared", &["shared".to_string()], &existing, &[]);
+        assert_eq!(reason, InstallReason::Root);
+    }
+
+    #[test]
+    fn determine_install_reason_promotes_existing_dependency_when_replacing_root() {
+        let existing = vec![InstallReceipt {
+            name: "ripgrep".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+        let replacement = vec![InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let reason = determine_install_reason("ripgrep", &[], &existing, &replacement);
         assert_eq!(reason, InstallReason::Root);
     }
 

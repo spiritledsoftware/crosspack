@@ -586,6 +586,20 @@ pub fn uninstall_package_with_dependency_overrides(
     name: &str,
     dependency_overrides: &HashMap<String, Vec<String>>,
 ) -> Result<UninstallResult> {
+    uninstall_package_with_dependency_overrides_and_ignored_roots(
+        layout,
+        name,
+        dependency_overrides,
+        &HashSet::new(),
+    )
+}
+
+pub fn uninstall_package_with_dependency_overrides_and_ignored_roots(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+    ignored_root_names: &HashSet<String>,
+) -> Result<UninstallResult> {
     let receipts = read_install_receipts(layout)?;
     let Some(target_receipt) = receipts
         .iter()
@@ -609,12 +623,7 @@ pub fn uninstall_package_with_dependency_overrides(
     let mut dependencies = dependency_map(&receipt_map);
     apply_dependency_overrides(&mut dependencies, dependency_overrides);
 
-    let remaining_roots = receipt_map
-        .values()
-        .filter(|receipt| receipt.name != name)
-        .filter(|receipt| receipt.install_reason == InstallReason::Root)
-        .map(|receipt| receipt.name.clone())
-        .collect::<Vec<_>>();
+    let remaining_roots = collect_remaining_roots(&receipt_map, name, ignored_root_names);
     let reachable = reachable_packages(&remaining_roots, &dependencies);
 
     if reachable.contains(name) {
@@ -694,6 +703,20 @@ pub fn uninstall_blocked_by_roots_with_dependency_overrides(
     name: &str,
     dependency_overrides: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<String>> {
+    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots(
+        layout,
+        name,
+        dependency_overrides,
+        &HashSet::new(),
+    )
+}
+
+pub fn uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots(
+    layout: &PrefixLayout,
+    name: &str,
+    dependency_overrides: &HashMap<String, Vec<String>>,
+    ignored_root_names: &HashSet<String>,
+) -> Result<Vec<String>> {
     let receipts = read_install_receipts(layout)?;
     let receipt_map: HashMap<String, InstallReceipt> = receipts
         .iter()
@@ -708,12 +731,7 @@ pub fn uninstall_blocked_by_roots_with_dependency_overrides(
     let mut dependencies = dependency_map(&receipt_map);
     apply_dependency_overrides(&mut dependencies, dependency_overrides);
 
-    let remaining_roots = receipt_map
-        .values()
-        .filter(|receipt| receipt.name != name)
-        .filter(|receipt| receipt.install_reason == InstallReason::Root)
-        .map(|receipt| receipt.name.clone())
-        .collect::<Vec<_>>();
+    let remaining_roots = collect_remaining_roots(&receipt_map, name, ignored_root_names);
     let reachable = reachable_packages(&remaining_roots, &dependencies);
 
     if !reachable.contains(name) {
@@ -728,6 +746,23 @@ pub fn uninstall_blocked_by_roots_with_dependency_overrides(
     blocked_by_roots.sort();
     blocked_by_roots.dedup();
     Ok(blocked_by_roots)
+}
+
+fn collect_remaining_roots(
+    receipt_map: &HashMap<String, InstallReceipt>,
+    target_name: &str,
+    ignored_root_names: &HashSet<String>,
+) -> Vec<String> {
+    let mut remaining_roots = receipt_map
+        .values()
+        .filter(|receipt| receipt.name != target_name)
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .filter(|receipt| !ignored_root_names.contains(&receipt.name))
+        .map(|receipt| receipt.name.clone())
+        .collect::<Vec<_>>();
+    remaining_roots.sort();
+    remaining_roots.dedup();
+    remaining_roots
 }
 
 fn safe_cache_prune_path(layout: &PrefixLayout, cache_path: &str) -> Option<PathBuf> {
