@@ -1129,8 +1129,23 @@ fn install_resolved(
     force_redownload: bool,
 ) -> Result<InstallOutcome> {
     let receipts = read_install_receipts(layout)?;
+    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, &receipts)?;
+    let replacement_targets = replacement_receipts
+        .iter()
+        .map(|receipt| receipt.name.as_str())
+        .collect::<HashSet<_>>();
+
     let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
-    validate_binary_preflight(layout, &resolved.manifest.name, &exposed_bins, &receipts)?;
+    validate_binary_preflight(
+        layout,
+        &resolved.manifest.name,
+        &exposed_bins,
+        &receipts,
+        &replacement_targets,
+    )?;
+    apply_replacement_handoff(layout, &replacement_receipts)?;
+
+    let receipts = read_install_receipts(layout)?;
 
     let cache_path = layout.artifact_cache_path(
         &resolved.manifest.name,
@@ -1187,7 +1202,12 @@ fn install_resolved(
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
         snapshot_id: None,
-        install_reason: determine_install_reason(&resolved.manifest.name, root_names, &receipts),
+        install_reason: determine_install_reason(
+            &resolved.manifest.name,
+            root_names,
+            &receipts,
+            &replacement_receipts,
+        ),
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
@@ -1255,11 +1275,59 @@ fn validate_binary_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn collect_replacement_receipts(
+    manifest: &PackageManifest,
+    receipts: &[InstallReceipt],
+) -> Result<Vec<InstallReceipt>> {
+    let mut matched = receipts
+        .iter()
+        .filter_map(|receipt| {
+            let requirement = manifest.replaces.get(&receipt.name)?;
+            let installed = Version::parse(&receipt.version).ok()?;
+            requirement.matches(&installed).then_some(receipt.clone())
+        })
+        .collect::<Vec<_>>();
+
+    for receipt in receipts {
+        if manifest.replaces.contains_key(&receipt.name) {
+            Version::parse(&receipt.version).with_context(|| {
+                format!(
+                    "installed receipt for '{}' has invalid version for replacement preflight: {}",
+                    receipt.name, receipt.version
+                )
+            })?;
+        }
+    }
+
+    matched.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(matched)
+}
+
+fn apply_replacement_handoff(
+    layout: &PrefixLayout,
+    replacement_receipts: &[InstallReceipt],
+) -> Result<()> {
+    for replacement in replacement_receipts {
+        let result = uninstall_package(layout, &replacement.name)?;
+        if result.status == UninstallStatus::BlockedByDependents {
+            return Err(anyhow!(
+                "cannot replace '{}' {}: still required by roots {}",
+                replacement.name,
+                replacement.version,
+                result.blocked_by_roots.join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_binary_preflight(
     layout: &PrefixLayout,
     package_name: &str,
     desired_bins: &[String],
     receipts: &[InstallReceipt],
+    replacement_targets: &HashSet<&str>,
 ) -> Result<()> {
     let owned_by_self: HashSet<&str> = receipts
         .iter()
@@ -1267,9 +1335,15 @@ fn validate_binary_preflight(
         .map(|receipt| receipt.exposed_bins.iter().map(String::as_str).collect())
         .unwrap_or_default();
 
+    let owned_by_replacements: HashSet<&str> = receipts
+        .iter()
+        .filter(|receipt| replacement_targets.contains(receipt.name.as_str()))
+        .flat_map(|receipt| receipt.exposed_bins.iter().map(String::as_str))
+        .collect();
+
     for desired in desired_bins {
         for receipt in receipts {
-            if receipt.name == package_name {
+            if receipt.name == package_name || replacement_targets.contains(receipt.name.as_str()) {
                 continue;
             }
             if receipt.exposed_bins.iter().any(|bin| bin == desired) {
@@ -1282,7 +1356,10 @@ fn validate_binary_preflight(
         }
 
         let path = bin_path(layout, desired);
-        if path.exists() && !owned_by_self.contains(desired.as_str()) {
+        if path.exists()
+            && !owned_by_self.contains(desired.as_str())
+            && !owned_by_replacements.contains(desired.as_str())
+        {
             return Err(anyhow!(
                 "binary '{}' at {} already exists and is not managed by crosspack",
                 desired,
@@ -1319,6 +1396,7 @@ fn determine_install_reason(
     package_name: &str,
     root_names: &[String],
     existing_receipts: &[InstallReceipt],
+    replacement_receipts: &[InstallReceipt],
 ) -> InstallReason {
     if root_names.iter().any(|root| root == package_name) {
         return InstallReason::Root;
@@ -1329,6 +1407,13 @@ fn determine_install_reason(
         .find(|receipt| receipt.name == package_name)
     {
         return existing.install_reason.clone();
+    }
+
+    if replacement_receipts
+        .iter()
+        .any(|receipt| receipt.install_reason == InstallReason::Root)
+    {
+        return InstallReason::Root;
     }
 
     InstallReason::Dependency
@@ -1584,7 +1669,7 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 mod tests {
     use super::{
         begin_transaction, build_update_report, build_upgrade_plans, build_upgrade_roots,
-        determine_install_reason, doctor_transaction_health_line,
+        collect_replacement_receipts, determine_install_reason, doctor_transaction_health_line,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
         ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
         execute_with_transaction, format_registry_add_lines, format_registry_list_lines,
@@ -1608,6 +1693,7 @@ mod tests {
         SourceUpdateStatus,
     };
     use semver::VersionReq;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
 
@@ -2669,8 +2755,14 @@ sha256 = "def"
             installed_at_unix: 1,
         }];
 
-        let err = validate_binary_preflight(&layout, "ripgrep", &["rg".to_string()], &receipts)
-            .expect_err("must reject conflict");
+        let err = validate_binary_preflight(
+            &layout,
+            "ripgrep",
+            &["rg".to_string()],
+            &receipts,
+            &HashSet::new(),
+        )
+        .expect_err("must reject conflict");
         assert!(err.to_string().contains("already owned by package 'fd'"));
 
         let _ = fs::remove_dir_all(layout.prefix());
@@ -2684,13 +2776,105 @@ sha256 = "def"
         let existing = bin_path(&layout, "rg");
         fs::write(&existing, b"#!/bin/sh\n").expect("must write existing file");
 
-        let err = validate_binary_preflight(&layout, "ripgrep", &["rg".to_string()], &[])
-            .expect_err("must reject unmanaged file");
+        let err = validate_binary_preflight(
+            &layout,
+            "ripgrep",
+            &["rg".to_string()],
+            &[],
+            &HashSet::new(),
+        )
+        .expect_err("must reject unmanaged file");
         assert!(err
             .to_string()
             .contains("already exists and is not managed by crosspack"));
 
         let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_binary_preflight_allows_replacement_owned_binary() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let existing = bin_path(&layout, "rg");
+        fs::write(&existing, b"#!/bin/sh\n").expect("must write existing file");
+
+        let receipts = vec![InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let replacement_targets = HashSet::from(["ripgrep-legacy"]);
+        validate_binary_preflight(
+            &layout,
+            "ripgrep",
+            &["rg".to_string()],
+            &receipts,
+            &replacement_targets,
+        )
+        .expect("replacement-owned binary should be allowed");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn collect_replacement_receipts_matches_manifest_rules() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "ripgrep"
+version = "2.0.0"
+
+[replaces]
+ripgrep-legacy = "<2.0.0"
+"#,
+        )
+        .expect("manifest should parse");
+
+        let receipts = vec![
+            InstallReceipt {
+                name: "ripgrep-legacy".to_string(),
+                version: "1.5.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: vec!["rg".to_string()],
+                snapshot_id: None,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+            InstallReceipt {
+                name: "other".to_string(),
+                version: "3.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: vec!["other".to_string()],
+                snapshot_id: None,
+                install_reason: InstallReason::Dependency,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        ];
+
+        let replacements =
+            collect_replacement_receipts(&manifest, &receipts).expect("replacement match expected");
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].name, "ripgrep-legacy");
     }
 
     #[test]
@@ -2737,13 +2921,13 @@ sha256 = "def"
 
     #[test]
     fn determine_install_reason_sets_requested_root() {
-        let reason = determine_install_reason("tool", &["tool".to_string()], &[]);
+        let reason = determine_install_reason("tool", &["tool".to_string()], &[], &[]);
         assert_eq!(reason, InstallReason::Root);
     }
 
     #[test]
     fn determine_install_reason_sets_dependency_for_non_root() {
-        let reason = determine_install_reason("shared", &["app".to_string()], &[]);
+        let reason = determine_install_reason("shared", &["app".to_string()], &[], &[]);
         assert_eq!(reason, InstallReason::Dependency);
     }
 
@@ -2764,7 +2948,7 @@ sha256 = "def"
             installed_at_unix: 1,
         }];
 
-        let reason = determine_install_reason("shared", &["app".to_string()], &existing);
+        let reason = determine_install_reason("shared", &["app".to_string()], &existing, &[]);
         assert_eq!(reason, InstallReason::Root);
     }
 
@@ -2785,7 +2969,28 @@ sha256 = "def"
             installed_at_unix: 1,
         }];
 
-        let reason = determine_install_reason("shared", &["shared".to_string()], &existing);
+        let reason = determine_install_reason("shared", &["shared".to_string()], &existing, &[]);
+        assert_eq!(reason, InstallReason::Root);
+    }
+
+    #[test]
+    fn determine_install_reason_preserves_root_from_replacement_target() {
+        let replacement = vec![InstallReceipt {
+            name: "ripgrep-legacy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let reason = determine_install_reason("ripgrep", &[], &[], &replacement);
         assert_eq!(reason, InstallReason::Root);
     }
 
