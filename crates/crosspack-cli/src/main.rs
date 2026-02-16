@@ -53,9 +53,13 @@ enum Commands {
         target: Option<String>,
         #[arg(long)]
         force_redownload: bool,
+        #[arg(long = "provider", value_name = "capability=package")]
+        provider: Vec<String>,
     },
     Upgrade {
         spec: Option<String>,
+        #[arg(long = "provider", value_name = "capability=package")]
+        provider: Vec<String>,
     },
     Uninstall {
         name: String,
@@ -132,9 +136,8 @@ fn main() -> Result<()> {
             if versions.is_empty() {
                 println!("No package found: {name}");
             } else {
-                println!("Package: {name}");
-                for manifest in versions {
-                    println!("- {}", manifest.version);
+                for line in format_info_lines(&name, &versions) {
+                    println!("{line}");
                 }
             }
         }
@@ -142,8 +145,10 @@ fn main() -> Result<()> {
             spec,
             target,
             force_redownload,
+            provider,
         } => {
             let (name, requirement) = parse_spec(&spec)?;
+            let _provider_overrides = parse_provider_overrides(&provider)?;
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -213,7 +218,8 @@ fn main() -> Result<()> {
                 Ok(())
             })?;
         }
-        Commands::Upgrade { spec } => {
+        Commands::Upgrade { spec, provider } => {
+            let _provider_overrides = parse_provider_overrides(&provider)?;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             run_upgrade_command(&layout, cli.registry_root.as_deref(), spec)?;
@@ -822,6 +828,93 @@ fn parse_pin_spec(spec: &str) -> Result<(String, VersionReq)> {
     let requirement = VersionReq::parse(req)
         .with_context(|| format!("invalid pin requirement for '{name}': {req}"))?;
     Ok((name.to_string(), requirement))
+}
+
+fn parse_provider_overrides(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut overrides = BTreeMap::new();
+    for value in values {
+        let (capability, package) = value.split_once('=').ok_or_else(|| {
+            anyhow!(
+                "invalid provider override '{}': expected capability=package",
+                value
+            )
+        })?;
+
+        if !is_policy_token(capability) {
+            return Err(anyhow!(
+                "invalid provider override '{}': capability '{}' must use package-name grammar",
+                value,
+                capability
+            ));
+        }
+        if !is_policy_token(package) {
+            return Err(anyhow!(
+                "invalid provider override '{}': package '{}' must use package-name grammar",
+                value,
+                package
+            ));
+        }
+
+        if overrides
+            .insert(capability.to_string(), package.to_string())
+            .is_some()
+        {
+            return Err(anyhow!(
+                "invalid provider override '{}': duplicate override for capability '{}': use one binding per capability",
+                value,
+                capability
+            ));
+        }
+    }
+
+    Ok(overrides)
+}
+
+fn is_policy_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+
+    let starts_valid = bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit();
+    starts_valid
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._+-".contains(b))
+}
+
+fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
+    let mut manifests = versions.iter().collect::<Vec<_>>();
+    manifests.sort_by(|left, right| right.version.cmp(&left.version));
+
+    let mut lines = vec![format!("Package: {name}")];
+    for manifest in manifests {
+        lines.push(format!("- {}", manifest.version));
+
+        if !manifest.provides.is_empty() {
+            lines.push(format!("  Provides: {}", manifest.provides.join(", ")));
+        }
+
+        if !manifest.conflicts.is_empty() {
+            let conflicts = manifest
+                .conflicts
+                .iter()
+                .map(|(name, req)| format!("{}({})", name, req))
+                .collect::<Vec<_>>();
+            lines.push(format!("  Conflicts: {}", conflicts.join(", ")));
+        }
+
+        if !manifest.replaces.is_empty() {
+            let replaces = manifest
+                .replaces
+                .iter()
+                .map(|(name, req)| format!("{}({})", name, req))
+                .collect::<Vec<_>>();
+            lines.push(format!("  Replaces: {}", replaces.join(", ")));
+        }
+    }
+
+    lines
 }
 
 #[cfg(test)]
@@ -1748,9 +1841,10 @@ mod tests {
         doctor_transaction_health_line, enforce_disjoint_multi_target_upgrade,
         enforce_no_downgrades, ensure_no_active_transaction, ensure_no_active_transaction_for,
         ensure_update_succeeded, ensure_upgrade_command_ready, execute_with_transaction,
-        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        normalize_command_token, parse_pin_spec, registry_state_root, run_uninstall_command,
+        format_info_lines, format_registry_add_lines, format_registry_list_lines,
+        format_registry_list_snapshot_state, format_registry_remove_lines,
+        format_uninstall_messages, format_update_summary_line, normalize_command_token,
+        parse_pin_spec, parse_provider_overrides, registry_state_root, run_uninstall_command,
         run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
         set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
         CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
@@ -3627,6 +3721,87 @@ ripgrep-legacy = "*"
         let lines = format_uninstall_messages(&result);
         assert_eq!(lines[0], "uninstalled app 1.0.0");
         assert_eq!(lines[1], "pruned orphan dependencies: shared, zlib");
+    }
+
+    #[test]
+    fn cli_parses_install_with_repeatable_provider_overrides() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "install",
+            "compiler@^2",
+            "--provider",
+            "c-compiler=clang",
+            "--provider",
+            "rust-toolchain=rustup",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Install { provider, .. } => {
+                assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_with_repeatable_provider_overrides() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "upgrade",
+            "compiler@^2",
+            "--provider",
+            "c-compiler=clang",
+            "--provider",
+            "rust-toolchain=rustup",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Upgrade { provider, .. } => {
+                assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_provider_overrides_rejects_invalid_shape() {
+        let err = parse_provider_overrides(&["missing-equals".to_string()])
+            .expect_err("override must require capability=package shape");
+        assert!(err.to_string().contains("expected capability=package"));
+    }
+
+    #[test]
+    fn parse_provider_overrides_rejects_invalid_capability_token() {
+        let err = parse_provider_overrides(&["BadCap=clang".to_string()])
+            .expect_err("invalid capability token must fail");
+        assert!(err.to_string().contains("capability 'BadCap'"));
+    }
+
+    #[test]
+    fn format_info_lines_includes_policy_sections_when_present() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+provides = ["c-compiler", "cc"]
+
+[conflicts]
+legacy-cc = "*"
+
+[replaces]
+old-cc = "<2.0.0"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines = format_info_lines("compiler", &[manifest]);
+        assert_eq!(lines[0], "Package: compiler");
+        assert_eq!(lines[1], "- 2.1.0");
+        assert_eq!(lines[2], "  Provides: c-compiler, cc");
+        assert_eq!(lines[3], "  Conflicts: legacy-cc(*)");
+        assert_eq!(lines[4], "  Replaces: old-cc(<2.0.0)");
     }
 
     #[test]
