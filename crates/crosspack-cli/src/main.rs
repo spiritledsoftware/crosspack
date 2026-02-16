@@ -936,13 +936,17 @@ fn status_allows_stale_marker_cleanup(status: &str) -> bool {
     matches!(status, "planning" | "committed" | "rolled_back")
 }
 
-fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
+fn normalize_command_token(command: &str) -> String {
     let command = command.trim().to_ascii_lowercase();
-    let command = if command.is_empty() {
+    if command.is_empty() {
         "unknown".to_string()
     } else {
         command
-    };
+    }
+}
+
+fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Result<()> {
+    let command = normalize_command_token(command);
     ensure_no_active_transaction(layout).map_err(|err| {
         anyhow!("cannot {command} (reason=active_transaction command={command}): {err}")
     })
@@ -1590,10 +1594,10 @@ mod tests {
         ensure_no_active_transaction_for, ensure_update_succeeded, execute_with_transaction,
         format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        parse_pin_spec, registry_state_root, run_update_command, select_manifest_with_pin,
-        select_metadata_backend, set_transaction_status, update_failure_reason_code,
-        validate_binary_preflight, Cli, CliRegistryKind, Commands, MetadataBackend,
-        ResolvedInstall,
+        normalize_command_token, parse_pin_spec, registry_state_root, run_update_command,
+        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
+        update_failure_reason_code, validate_binary_preflight, Cli, CliRegistryKind, Commands,
+        MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1660,6 +1664,12 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn normalize_command_token_trims_lowercases_and_falls_back() {
+        assert_eq!(normalize_command_token("  UnInstall  "), "uninstall");
+        assert_eq!(normalize_command_token("   \t  "), "unknown");
     }
 
     #[test]
