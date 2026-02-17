@@ -64,6 +64,7 @@ enum Commands {
     Rollback {
         txid: Option<String>,
     },
+    Repair,
     Uninstall {
         name: String,
     },
@@ -242,6 +243,11 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             run_rollback_command(&layout, txid)?;
+        }
+        Commands::Repair => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_repair_command(&layout)?;
         }
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
@@ -705,8 +711,16 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
             .ok_or_else(|| anyhow!("no active transaction to rollback; pass a txid"))?,
     };
 
-    read_transaction_metadata(layout, &target_txid)?
+    let metadata = read_transaction_metadata(layout, &target_txid)?
         .ok_or_else(|| anyhow!("transaction metadata missing for rollback txid={target_txid}"))?;
+
+    if metadata.status == "committed" || metadata.status == "rolled_back" {
+        if read_active_transaction(layout)?.as_deref() == Some(target_txid.as_str()) {
+            clear_active_transaction(layout)?;
+        }
+        println!("no rollback needed");
+        return Ok(());
+    }
 
     set_transaction_status(layout, &target_txid, "rolling_back")?;
     set_transaction_status(layout, &target_txid, "rolled_back")?;
@@ -717,6 +731,39 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
 
     println!("rolled back transaction {target_txid}");
     Ok(())
+}
+
+fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
+    layout.ensure_base_dirs()?;
+
+    let Some(txid) = read_active_transaction(layout)? else {
+        println!("repair: no action needed");
+        return Ok(());
+    };
+
+    let metadata = read_transaction_metadata(layout, &txid)?;
+    let Some(metadata) = metadata else {
+        clear_active_transaction(layout)?;
+        println!("repair: cleared stale marker {txid}");
+        return Ok(());
+    };
+
+    if status_allows_stale_marker_cleanup(&metadata.status) {
+        clear_active_transaction(layout)?;
+        println!("repair: cleared stale marker {txid}");
+        return Ok(());
+    }
+
+    match metadata.status.as_str() {
+        "failed" | "rolling_back" | "planning" | "applying" => {
+            run_rollback_command(layout, Some(txid.clone()))?;
+            println!("recovered interrupted transaction {txid}: rolled back");
+            Ok(())
+        }
+        status => Err(anyhow!(
+            "transaction {txid} requires manual repair (reason=unsupported_status status={status})"
+        )),
+    }
 }
 
 fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
@@ -1987,10 +2034,11 @@ mod tests {
         format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
         normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
-        run_rollback_command, run_uninstall_command, run_update_command, run_upgrade_command,
-        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
-        update_failure_reason_code, validate_binary_preflight, validate_provider_overrides_used,
-        Cli, CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        run_repair_command, run_rollback_command, run_uninstall_command, run_update_command,
+        run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
+        set_transaction_status, update_failure_reason_code, validate_binary_preflight,
+        validate_provider_overrides_used, Cli, CliRegistryKind, Commands, MetadataBackend,
+        ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -2211,6 +2259,37 @@ mod tests {
             read_active_transaction(&layout).expect("must read active marker"),
             None,
             "rollback should clear active transaction marker"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_repair_command_recovers_failed_active_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-needs-repair".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_263,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-needs-repair").expect("must write active marker");
+
+        run_repair_command(&layout).expect("repair command must succeed");
+
+        let updated = read_transaction_metadata(&layout, "tx-needs-repair")
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+        assert_eq!(
+            read_active_transaction(&layout).expect("must read active marker"),
+            None,
+            "repair should clear active marker for recovered tx"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
