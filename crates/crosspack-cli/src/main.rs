@@ -945,6 +945,18 @@ fn apply_provider_override(
         return Ok(candidates);
     };
 
+    let has_direct_package_candidates = candidates
+        .iter()
+        .any(|manifest| manifest.name == requested_name);
+    if has_direct_package_candidates && provider_name != requested_name {
+        return Err(anyhow!(
+            "provider override '{}={}' is invalid: '{}' resolves directly to package manifests; direct package names cannot be overridden",
+            requested_name,
+            provider_name,
+            requested_name
+        ));
+    }
+
     let filtered = candidates
         .into_iter()
         .filter(|manifest| {
@@ -3938,6 +3950,44 @@ sha256 = "gcc"
         assert!(
             err.to_string()
                 .contains("provider override 'compiler=clang'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_provider_override_rejects_overriding_direct_package_tokens() {
+        let foo = PackageManifest::from_toml_str(
+            r#"
+name = "foo"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+        )
+        .expect("foo manifest must parse");
+        let bar = PackageManifest::from_toml_str(
+            r#"
+name = "bar"
+version = "1.0.0"
+provides = ["foo"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#,
+        )
+        .expect("bar manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("foo".to_string(), "bar".to_string());
+
+        let err = apply_provider_override("foo", vec![foo, bar], &overrides)
+            .expect_err("direct package tokens must not be overridable");
+        assert!(
+            err.to_string()
+                .contains("direct package names cannot be overridden"),
             "unexpected error: {err}"
         );
     }
