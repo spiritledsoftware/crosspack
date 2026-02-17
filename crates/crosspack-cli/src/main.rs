@@ -563,13 +563,15 @@ fn run_upgrade_command(
                 }
 
                 let mut grouped_resolved = Vec::new();
+                let mut resolved_dependency_tokens = HashSet::new();
                 for plan in &plans {
-                    let resolved = resolve_install_graph(
+                    let (resolved, plan_tokens) = resolve_install_graph_with_tokens(
                         layout,
                         &backend,
                         &plan.roots,
                         plan.target.as_deref(),
                         provider_overrides,
+                        false,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
 
@@ -588,8 +590,11 @@ fn run_upgrade_command(
                     )?;
                     journal_seq += 1;
 
+                    resolved_dependency_tokens.extend(plan_tokens);
                     grouped_resolved.push(resolved);
                 }
+
+                validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
 
                 let overlap_check = grouped_resolved
                     .iter()
@@ -1238,6 +1243,25 @@ fn resolve_install_graph(
     requested_target: Option<&str>,
     provider_overrides: &BTreeMap<String, String>,
 ) -> Result<Vec<ResolvedInstall>> {
+    let (resolved, _) = resolve_install_graph_with_tokens(
+        layout,
+        index,
+        roots,
+        requested_target,
+        provider_overrides,
+        true,
+    )?;
+    Ok(resolved)
+}
+
+fn resolve_install_graph_with_tokens(
+    layout: &PrefixLayout,
+    index: &MetadataBackend,
+    roots: &[RootInstallRequest],
+    requested_target: Option<&str>,
+    provider_overrides: &BTreeMap<String, String>,
+    validate_overrides: bool,
+) -> Result<(Vec<ResolvedInstall>, HashSet<String>)> {
     let mut pins = BTreeMap::new();
     for (name, raw_req) in read_all_pins(layout)? {
         let parsed = VersionReq::parse(&raw_req)
@@ -1259,13 +1283,15 @@ fn resolve_install_graph(
     })?;
 
     let resolved_dependency_tokens = graph.manifests.keys().cloned().collect::<HashSet<_>>();
-    validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
+    if validate_overrides {
+        validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
+    }
 
     let resolved_target = requested_target
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| host_target_triple().to_string());
 
-    graph
+    let resolved = graph
         .install_order
         .iter()
         .map(|name| {
@@ -1297,7 +1323,9 @@ fn resolve_install_graph(
                 archive_type,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok((resolved, resolved_dependency_tokens))
 }
 
 fn install_resolved(
@@ -3945,6 +3973,23 @@ sha256 = "gcc"
                 .contains("unused provider override(s): rust-toolchain=rustup"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn validate_provider_overrides_used_accepts_union_of_multi_plan_tokens() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+        overrides.insert("rust-toolchain".to_string(), "rustup".to_string());
+
+        let plan_a_tokens = HashSet::from(["compiler".to_string()]);
+        let plan_b_tokens = HashSet::from(["rust-toolchain".to_string()]);
+
+        let mut combined_tokens = HashSet::new();
+        combined_tokens.extend(plan_a_tokens);
+        combined_tokens.extend(plan_b_tokens);
+
+        validate_provider_overrides_used(&overrides, &combined_tokens)
+            .expect("overrides consumed across plans should pass");
     }
 
     #[test]
