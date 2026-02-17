@@ -702,6 +702,15 @@ fn run_upgrade_command(
     Ok(())
 }
 
+fn is_valid_txid_input(txid: &str) -> bool {
+    !txid.is_empty()
+        && txid.starts_with("tx-")
+        && txid.len() <= 128
+        && txid
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 fn txid_process_id(txid: &str) -> Option<u32> {
     txid.rsplit('-').next()?.parse().ok()
 }
@@ -811,7 +820,12 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
     layout.ensure_base_dirs()?;
 
     let target_txid = match txid {
-        Some(txid) => txid,
+        Some(txid) => {
+            if !is_valid_txid_input(&txid) {
+                return Err(anyhow!("invalid rollback txid: {txid}"));
+            }
+            txid
+        }
         None => {
             if let Some(active_txid) = read_active_transaction(layout)? {
                 active_txid
@@ -2491,6 +2505,21 @@ mod tests {
             .expect("must read metadata")
             .expect("metadata should still exist");
         assert_eq!(updated.status, "failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_rejects_invalid_txid_path_components() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let err = run_rollback_command(&layout, Some("../escape".to_string()))
+            .expect_err("rollback must reject invalid txid input");
+        assert!(
+            err.to_string().contains("invalid rollback txid"),
+            "unexpected error: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
