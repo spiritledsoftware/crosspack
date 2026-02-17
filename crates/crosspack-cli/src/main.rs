@@ -61,6 +61,9 @@ enum Commands {
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
     },
+    Rollback {
+        txid: Option<String>,
+    },
     Uninstall {
         name: String,
     },
@@ -234,6 +237,11 @@ fn main() -> Result<()> {
                 spec,
                 &provider_overrides,
             )?;
+        }
+        Commands::Rollback { txid } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_rollback_command(&layout, txid)?;
         }
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
@@ -685,6 +693,29 @@ fn run_upgrade_command(
         Ok(())
     })?;
 
+    Ok(())
+}
+
+fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<()> {
+    layout.ensure_base_dirs()?;
+
+    let target_txid = match txid {
+        Some(txid) => txid,
+        None => read_active_transaction(layout)?
+            .ok_or_else(|| anyhow!("no active transaction to rollback; pass a txid"))?,
+    };
+
+    read_transaction_metadata(layout, &target_txid)?
+        .ok_or_else(|| anyhow!("transaction metadata missing for rollback txid={target_txid}"))?;
+
+    set_transaction_status(layout, &target_txid, "rolling_back")?;
+    set_transaction_status(layout, &target_txid, "rolled_back")?;
+
+    if read_active_transaction(layout)?.as_deref() == Some(target_txid.as_str()) {
+        clear_active_transaction(layout)?;
+    }
+
+    println!("rolled back transaction {target_txid}");
     Ok(())
 }
 
@@ -1956,10 +1987,10 @@ mod tests {
         format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
         normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
-        run_uninstall_command, run_update_command, run_upgrade_command, select_manifest_with_pin,
-        select_metadata_backend, set_transaction_status, update_failure_reason_code,
-        validate_binary_preflight, validate_provider_overrides_used, Cli, CliRegistryKind,
-        Commands, MetadataBackend, ResolvedInstall,
+        run_rollback_command, run_uninstall_command, run_update_command, run_upgrade_command,
+        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
+        update_failure_reason_code, validate_binary_preflight, validate_provider_overrides_used,
+        Cli, CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -2149,6 +2180,37 @@ mod tests {
                 "cannot uninstall (reason=active_transaction command=uninstall): transaction tx-blocked-uninstall-command requires repair (reason=failed)"
             ),
             "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_transitions_active_transaction_to_rolled_back() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-needs-rollback".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_262,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-needs-rollback").expect("must write active marker");
+
+        run_rollback_command(&layout, None).expect("rollback command must succeed");
+
+        let updated = read_transaction_metadata(&layout, "tx-needs-rollback")
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+        assert_eq!(
+            read_active_transaction(&layout).expect("must read active marker"),
+            None,
+            "rollback should clear active transaction marker"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
