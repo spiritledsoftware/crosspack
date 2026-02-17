@@ -765,7 +765,16 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
     }
 
     match metadata.status.as_str() {
-        "failed" | "rolling_back" | "planning" | "applying" => {
+        "planning" | "applying" => {
+            set_transaction_status(layout, &txid, "rolling_back")?;
+            set_transaction_status(layout, &txid, "rolled_back")?;
+            if read_active_transaction(layout)?.as_deref() == Some(txid.as_str()) {
+                clear_active_transaction(layout)?;
+            }
+            println!("recovered interrupted transaction {txid}: rolled back");
+            Ok(())
+        }
+        "failed" | "rolling_back" => {
             run_rollback_command(layout, Some(txid.clone()))?;
             println!("recovered interrupted transaction {txid}: rolled back");
             Ok(())
@@ -2300,6 +2309,37 @@ mod tests {
             read_active_transaction(&layout).expect("must read active marker"),
             None,
             "repair should clear active marker for recovered tx"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_repair_command_recovers_active_applying_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-applying-repair".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_265,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-applying-repair").expect("must write active marker");
+
+        run_repair_command(&layout).expect("repair must recover active applying tx");
+
+        let updated = read_transaction_metadata(&layout, "tx-applying-repair")
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+        assert_eq!(
+            read_active_transaction(&layout).expect("must read active marker"),
+            None,
+            "repair should clear active marker after recovery"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
