@@ -702,13 +702,75 @@ fn run_upgrade_command(
     Ok(())
 }
 
+fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String>> {
+    let entries = match std::fs::read_dir(layout.transactions_dir()) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to read transactions directory: {}",
+                    layout.transactions_dir().display()
+                )
+            })
+        }
+    };
+
+    let mut latest: Option<(u64, String)> = None;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to iterate transactions directory: {}",
+                layout.transactions_dir().display()
+            )
+        })?;
+        let path = entry.path();
+
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+
+        let Some(txid) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+
+        let Some(metadata) = read_transaction_metadata(layout, txid)? else {
+            continue;
+        };
+        if matches!(metadata.status.as_str(), "committed" | "rolled_back") {
+            continue;
+        }
+
+        match &latest {
+            None => latest = Some((metadata.started_at_unix, metadata.txid)),
+            Some((best_started_at, best_txid)) => {
+                if metadata.started_at_unix > *best_started_at
+                    || (metadata.started_at_unix == *best_started_at && metadata.txid > *best_txid)
+                {
+                    latest = Some((metadata.started_at_unix, metadata.txid));
+                }
+            }
+        }
+    }
+
+    Ok(latest.map(|(_, txid)| txid))
+}
+
 fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<()> {
     layout.ensure_base_dirs()?;
 
     let target_txid = match txid {
         Some(txid) => txid,
-        None => read_active_transaction(layout)?
-            .ok_or_else(|| anyhow!("no active transaction to rollback; pass a txid"))?,
+        None => {
+            if let Some(active_txid) = read_active_transaction(layout)? {
+                active_txid
+            } else if let Some(candidate_txid) = latest_rollback_candidate_txid(layout)? {
+                candidate_txid
+            } else {
+                println!("no rollback needed");
+                return Ok(());
+            }
+        }
     };
 
     let metadata = read_transaction_metadata(layout, &target_txid)?
@@ -2341,6 +2403,46 @@ mod tests {
             None,
             "repair should clear active marker after recovery"
         );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_without_active_marker_uses_latest_non_final_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let older = TransactionMetadata {
+            version: 1,
+            txid: "tx-old-failed".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_100,
+            snapshot_id: None,
+        };
+        let newer = TransactionMetadata {
+            version: 1,
+            txid: "tx-new-failed".to_string(),
+            operation: "upgrade".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_200,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &older).expect("must write older metadata");
+        write_transaction_metadata(&layout, &newer).expect("must write newer metadata");
+
+        run_rollback_command(&layout, None)
+            .expect("rollback without active marker should use latest non-final tx");
+
+        let updated_newer = read_transaction_metadata(&layout, "tx-new-failed")
+            .expect("must read newer metadata")
+            .expect("newer metadata should exist");
+        assert_eq!(updated_newer.status, "rolled_back");
+
+        let updated_older = read_transaction_metadata(&layout, "tx-old-failed")
+            .expect("must read older metadata")
+            .expect("older metadata should exist");
+        assert_eq!(updated_older.status, "failed");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
