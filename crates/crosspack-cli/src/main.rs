@@ -711,8 +711,15 @@ fn is_valid_txid_input(txid: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+const ACTIVE_TRANSACTION_OWNER_GRACE_SECONDS: u64 = 300;
+
 fn txid_process_id(txid: &str) -> Option<u32> {
     txid.rsplit('-').next()?.parse().ok()
+}
+
+fn transaction_started_recently(started_at_unix: u64, grace_seconds: u64) -> bool {
+    let now = current_unix_timestamp().unwrap_or(started_at_unix);
+    now.saturating_sub(started_at_unix) <= grace_seconds
 }
 
 fn transaction_owner_process_alive(txid: &str) -> bool {
@@ -758,11 +765,20 @@ fn transaction_owner_process_alive(txid: &str) -> bool {
     }
 }
 
-fn transaction_journal_requires_replay(layout: &PrefixLayout, txid: &str) -> Result<bool> {
+fn transaction_journal_requires_replay(
+    layout: &PrefixLayout,
+    txid: &str,
+    operation: &str,
+    status: &str,
+) -> Result<bool> {
     let path = layout.transaction_journal_path(txid);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(
+                matches!(operation, "uninstall") && matches!(status, "failed" | "rolling_back")
+            );
+        }
         Err(err) => {
             return Err(err).with_context(|| {
                 format!("failed reading transaction journal: {}", path.display())
@@ -866,6 +882,10 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
     if matches!(metadata.status.as_str(), "planning" | "applying")
         && active_txid.as_deref() == Some(target_txid.as_str())
         && transaction_owner_process_alive(&target_txid)
+        && transaction_started_recently(
+            metadata.started_at_unix,
+            ACTIVE_TRANSACTION_OWNER_GRACE_SECONDS,
+        )
     {
         return Err(anyhow!(
             "cannot rollback while transaction is active (status={})",
@@ -881,7 +901,12 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         return Ok(());
     }
 
-    if transaction_journal_requires_replay(layout, &target_txid)? {
+    if transaction_journal_requires_replay(
+        layout,
+        &target_txid,
+        &metadata.operation,
+        &metadata.status,
+    )? {
         return Err(anyhow!(
             "rollback failed {target_txid}: transaction journal replay required"
         ));
@@ -2192,7 +2217,7 @@ mod tests {
     use super::{
         apply_provider_override, apply_replacement_handoff, begin_transaction, build_update_report,
         build_upgrade_plans, build_upgrade_roots, collect_replacement_receipts,
-        determine_install_reason, doctor_transaction_health_line,
+        current_unix_timestamp, determine_install_reason, doctor_transaction_health_line,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
         ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
         execute_with_transaction, format_info_lines, format_registry_add_lines,
@@ -2531,6 +2556,41 @@ mod tests {
     }
 
     #[test]
+    fn run_rollback_command_fails_when_uninstall_journal_missing_for_failed_tx() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-uninstall-no-journal".to_string(),
+            operation: "uninstall".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_267,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-uninstall-no-journal")
+            .expect("must write active marker");
+
+        let err = run_rollback_command(&layout, Some("tx-uninstall-no-journal".to_string()))
+            .expect_err("rollback should fail when uninstall journal is missing");
+        assert!(
+            err.to_string()
+                .contains("rollback failed tx-uninstall-no-journal"),
+            "unexpected error: {err}"
+        );
+
+        let active = read_active_transaction(&layout).expect("must read active marker");
+        assert_eq!(active.as_deref(), Some("tx-uninstall-no-journal"));
+        let updated = read_transaction_metadata(&layout, "tx-uninstall-no-journal")
+            .expect("must read metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn run_rollback_command_rejects_invalid_txid_path_components() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -2596,7 +2656,7 @@ mod tests {
             txid: txid.clone(),
             operation: "install".to_string(),
             status: "applying".to_string(),
-            started_at_unix: 1_771_001_264,
+            started_at_unix: current_unix_timestamp().expect("must read current timestamp"),
             snapshot_id: None,
         };
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
@@ -2616,6 +2676,36 @@ mod tests {
             .expect("must read updated metadata")
             .expect("metadata should still exist");
         assert_eq!(updated.status, "applying");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_allows_stale_active_applying_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = format!("tx-stale-applying-{}", std::process::id());
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.clone(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, &txid).expect("must write active marker");
+
+        run_rollback_command(&layout, Some(txid.clone()))
+            .expect("rollback should recover stale active transaction");
+
+        let active = read_active_transaction(&layout).expect("must read active marker");
+        assert_eq!(active, None);
+        let updated = read_transaction_metadata(&layout, &txid)
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
