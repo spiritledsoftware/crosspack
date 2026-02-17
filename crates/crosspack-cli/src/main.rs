@@ -713,9 +713,19 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
 
     let metadata = read_transaction_metadata(layout, &target_txid)?
         .ok_or_else(|| anyhow!("transaction metadata missing for rollback txid={target_txid}"))?;
+    let active_txid = read_active_transaction(layout)?;
+
+    if matches!(metadata.status.as_str(), "planning" | "applying")
+        && active_txid.as_deref() == Some(target_txid.as_str())
+    {
+        return Err(anyhow!(
+            "cannot rollback while transaction is active (status={})",
+            metadata.status
+        ));
+    }
 
     if metadata.status == "committed" || metadata.status == "rolled_back" {
-        if read_active_transaction(layout)?.as_deref() == Some(target_txid.as_str()) {
+        if active_txid.as_deref() == Some(target_txid.as_str()) {
             clear_active_transaction(layout)?;
         }
         println!("no rollback needed");
@@ -725,7 +735,7 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
     set_transaction_status(layout, &target_txid, "rolling_back")?;
     set_transaction_status(layout, &target_txid, "rolled_back")?;
 
-    if read_active_transaction(layout)?.as_deref() == Some(target_txid.as_str()) {
+    if active_txid.as_deref() == Some(target_txid.as_str()) {
         clear_active_transaction(layout)?;
     }
 
@@ -2291,6 +2301,40 @@ mod tests {
             None,
             "repair should clear active marker for recovered tx"
         );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_rejects_active_applying_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-live-applying".to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_264,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-live-applying").expect("must write active marker");
+
+        let err = run_rollback_command(&layout, Some("tx-live-applying".to_string()))
+            .expect_err("rollback must reject active applying transactions");
+        assert!(
+            err.to_string()
+                .contains("cannot rollback while transaction is active (status=applying)"),
+            "unexpected error: {err}"
+        );
+
+        let active = read_active_transaction(&layout).expect("must read active marker");
+        assert_eq!(active.as_deref(), Some("tx-live-applying"));
+        let updated = read_transaction_metadata(&layout, "tx-live-applying")
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "applying");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
