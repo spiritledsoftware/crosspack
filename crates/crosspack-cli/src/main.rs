@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -711,57 +711,51 @@ fn is_valid_txid_input(txid: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-const ACTIVE_TRANSACTION_OWNER_GRACE_SECONDS: u64 = 300;
-
 fn txid_process_id(txid: &str) -> Option<u32> {
     txid.rsplit('-').next()?.parse().ok()
 }
 
-fn transaction_started_recently(started_at_unix: u64, grace_seconds: u64) -> bool {
-    let now = current_unix_timestamp().unwrap_or(started_at_unix);
-    now.saturating_sub(started_at_unix) <= grace_seconds
-}
-
-fn transaction_owner_process_alive(txid: &str) -> bool {
+fn transaction_owner_process_alive(txid: &str) -> Result<bool> {
     let Some(pid) = txid_process_id(txid) else {
-        return false;
+        return Ok(false);
     };
 
     #[cfg(unix)]
     {
-        Command::new("kill")
+        let status = Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+            .with_context(|| format!("failed executing owner liveness probe for pid={pid}"))?;
+        Ok(status.success())
     }
 
     #[cfg(windows)]
     {
         let output = Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output();
+            .output()
+            .with_context(|| format!("failed executing owner liveness probe for pid={pid}"))?;
 
-        output
-            .ok()
-            .and_then(|result| {
-                if !result.status.success() {
-                    return None;
-                }
-                Some(String::from_utf8_lossy(&result.stdout).to_string())
-            })
-            .map(|stdout| {
-                stdout.contains(&format!(",\"{pid}\""))
-                    && !stdout.to_ascii_lowercase().contains("no tasks are running")
-            })
-            .unwrap_or(false)
+        if !output.status.success() {
+            return Err(anyhow!(
+                "owner liveness probe failed for pid={pid}: status={} stderr='{}'",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout.contains(&format!(",\"{pid}\""))
+            && !stdout.to_ascii_lowercase().contains("no tasks are running"))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
-        false
+        Ok(true)
     }
 }
 
@@ -881,11 +875,7 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
 
     if matches!(metadata.status.as_str(), "planning" | "applying")
         && active_txid.as_deref() == Some(target_txid.as_str())
-        && transaction_owner_process_alive(&target_txid)
-        && transaction_started_recently(
-            metadata.started_at_unix,
-            ACTIVE_TRANSACTION_OWNER_GRACE_SECONDS,
-        )
+        && transaction_owner_process_alive(&target_txid)?
     {
         return Err(anyhow!(
             "cannot rollback while transaction is active (status={})",
@@ -2685,13 +2675,13 @@ mod tests {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
-        let txid = format!("tx-stale-applying-{}", std::process::id());
+        let txid = "tx-stale-applying-99999999".to_string();
         let metadata = TransactionMetadata {
             version: 1,
             txid: txid.clone(),
             operation: "install".to_string(),
             status: "applying".to_string(),
-            started_at_unix: 1,
+            started_at_unix: current_unix_timestamp().expect("must read current timestamp"),
             snapshot_id: None,
         };
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
