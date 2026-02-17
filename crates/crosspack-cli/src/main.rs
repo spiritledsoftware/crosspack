@@ -730,7 +730,28 @@ fn transaction_owner_process_alive(txid: &str) -> bool {
             .unwrap_or(false)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output();
+
+        output
+            .ok()
+            .and_then(|result| {
+                if !result.status.success() {
+                    return None;
+                }
+                Some(String::from_utf8_lossy(&result.stdout).to_string())
+            })
+            .map(|stdout| {
+                stdout.contains(&format!(",\"{pid}\""))
+                    && !stdout.to_ascii_lowercase().contains("no tasks are running")
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
