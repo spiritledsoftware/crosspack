@@ -53,9 +53,13 @@ enum Commands {
         target: Option<String>,
         #[arg(long)]
         force_redownload: bool,
+        #[arg(long = "provider", value_name = "capability=package")]
+        provider: Vec<String>,
     },
     Upgrade {
         spec: Option<String>,
+        #[arg(long = "provider", value_name = "capability=package")]
+        provider: Vec<String>,
     },
     Uninstall {
         name: String,
@@ -132,9 +136,8 @@ fn main() -> Result<()> {
             if versions.is_empty() {
                 println!("No package found: {name}");
             } else {
-                println!("Package: {name}");
-                for manifest in versions {
-                    println!("- {}", manifest.version);
+                for line in format_info_lines(&name, &versions) {
+                    println!("{line}");
                 }
             }
         }
@@ -142,8 +145,10 @@ fn main() -> Result<()> {
             spec,
             target,
             force_redownload,
+            provider,
         } => {
             let (name, requirement) = parse_spec(&spec)?;
+            let provider_overrides = parse_provider_overrides(&provider)?;
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -158,7 +163,13 @@ fn main() -> Result<()> {
                     .iter()
                     .map(|root| root.name.clone())
                     .collect::<Vec<_>>();
-                let resolved = resolve_install_graph(&layout, &backend, &roots, target.as_deref())?;
+                let resolved = resolve_install_graph(
+                    &layout,
+                    &backend,
+                    &roots,
+                    target.as_deref(),
+                    &provider_overrides,
+                )?;
 
                 append_transaction_journal_entry(
                     &layout,
@@ -213,10 +224,16 @@ fn main() -> Result<()> {
                 Ok(())
             })?;
         }
-        Commands::Upgrade { spec } => {
+        Commands::Upgrade { spec, provider } => {
+            let provider_overrides = parse_provider_overrides(&provider)?;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            run_upgrade_command(&layout, cli.registry_root.as_deref(), spec)?;
+            run_upgrade_command(
+                &layout,
+                cli.registry_root.as_deref(),
+                spec,
+                &provider_overrides,
+            )?;
         }
         Commands::Uninstall { name } => {
             let prefix = default_user_prefix()?;
@@ -444,6 +461,7 @@ fn run_upgrade_command(
     layout: &PrefixLayout,
     registry_root: Option<&Path>,
     spec: Option<String>,
+    provider_overrides: &BTreeMap<String, String>,
 ) -> Result<()> {
     ensure_upgrade_command_ready(layout)?;
     let backend = select_metadata_backend(registry_root, layout)?;
@@ -476,6 +494,7 @@ fn run_upgrade_command(
                     &backend,
                     &roots,
                     installed_receipt.target.as_deref(),
+                    provider_overrides,
                 )?;
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
@@ -544,12 +563,15 @@ fn run_upgrade_command(
                 }
 
                 let mut grouped_resolved = Vec::new();
+                let mut resolved_dependency_tokens = HashSet::new();
                 for plan in &plans {
-                    let resolved = resolve_install_graph(
+                    let (resolved, plan_tokens) = resolve_install_graph_with_tokens(
                         layout,
                         &backend,
                         &plan.roots,
                         plan.target.as_deref(),
+                        provider_overrides,
+                        false,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
 
@@ -568,8 +590,11 @@ fn run_upgrade_command(
                     )?;
                     journal_seq += 1;
 
+                    resolved_dependency_tokens.extend(plan_tokens);
                     grouped_resolved.push(resolved);
                 }
+
+                validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
 
                 let overlap_check = grouped_resolved
                     .iter()
@@ -822,6 +847,157 @@ fn parse_pin_spec(spec: &str) -> Result<(String, VersionReq)> {
     let requirement = VersionReq::parse(req)
         .with_context(|| format!("invalid pin requirement for '{name}': {req}"))?;
     Ok((name.to_string(), requirement))
+}
+
+fn parse_provider_overrides(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut overrides = BTreeMap::new();
+    for value in values {
+        let (capability, package) = value.split_once('=').ok_or_else(|| {
+            anyhow!(
+                "invalid provider override '{}': expected capability=package",
+                value
+            )
+        })?;
+
+        if !is_policy_token(capability) {
+            return Err(anyhow!(
+                "invalid provider override '{}': capability '{}' must use package-name grammar",
+                value,
+                capability
+            ));
+        }
+        if !is_policy_token(package) {
+            return Err(anyhow!(
+                "invalid provider override '{}': package '{}' must use package-name grammar",
+                value,
+                package
+            ));
+        }
+
+        if overrides
+            .insert(capability.to_string(), package.to_string())
+            .is_some()
+        {
+            return Err(anyhow!(
+                "invalid provider override '{}': duplicate override for capability '{}': use one binding per capability",
+                value,
+                capability
+            ));
+        }
+    }
+
+    Ok(overrides)
+}
+
+fn is_policy_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+
+    let starts_valid = bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit();
+    starts_valid
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._+-".contains(b))
+}
+
+fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
+    let mut manifests = versions.iter().collect::<Vec<_>>();
+    manifests.sort_by(|left, right| right.version.cmp(&left.version));
+
+    let mut lines = vec![format!("Package: {name}")];
+    for manifest in manifests {
+        lines.push(format!("- {}", manifest.version));
+
+        if !manifest.provides.is_empty() {
+            lines.push(format!("  Provides: {}", manifest.provides.join(", ")));
+        }
+
+        if !manifest.conflicts.is_empty() {
+            let conflicts = manifest
+                .conflicts
+                .iter()
+                .map(|(name, req)| format!("{}({})", name, req))
+                .collect::<Vec<_>>();
+            lines.push(format!("  Conflicts: {}", conflicts.join(", ")));
+        }
+
+        if !manifest.replaces.is_empty() {
+            let replaces = manifest
+                .replaces
+                .iter()
+                .map(|(name, req)| format!("{}({})", name, req))
+                .collect::<Vec<_>>();
+            lines.push(format!("  Replaces: {}", replaces.join(", ")));
+        }
+    }
+
+    lines
+}
+
+fn apply_provider_override(
+    requested_name: &str,
+    candidates: Vec<PackageManifest>,
+    provider_overrides: &BTreeMap<String, String>,
+) -> Result<Vec<PackageManifest>> {
+    let Some(provider_name) = provider_overrides.get(requested_name) else {
+        return Ok(candidates);
+    };
+
+    let has_direct_package_candidates = candidates
+        .iter()
+        .any(|manifest| manifest.name == requested_name);
+    if has_direct_package_candidates && provider_name != requested_name {
+        return Err(anyhow!(
+            "provider override '{}={}' is invalid: '{}' resolves directly to package manifests; direct package names cannot be overridden",
+            requested_name,
+            provider_name,
+            requested_name
+        ));
+    }
+
+    let filtered = candidates
+        .into_iter()
+        .filter(|manifest| {
+            manifest.name == *provider_name
+                && (manifest.name == requested_name
+                    || manifest
+                        .provides
+                        .iter()
+                        .any(|provided| provided == requested_name))
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        return Err(anyhow!(
+            "provider override '{}={}' did not match any candidate packages",
+            requested_name,
+            provider_name
+        ));
+    }
+
+    Ok(filtered)
+}
+
+fn validate_provider_overrides_used(
+    provider_overrides: &BTreeMap<String, String>,
+    resolved_dependency_tokens: &HashSet<String>,
+) -> Result<()> {
+    let unused = provider_overrides
+        .iter()
+        .filter(|(capability, _)| !resolved_dependency_tokens.contains(*capability))
+        .map(|(capability, provider)| format!("{capability}={provider}"))
+        .collect::<Vec<_>>();
+
+    if unused.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "unused provider override(s): {}",
+        unused.join(", ")
+    ))
 }
 
 #[cfg(test)]
@@ -1077,7 +1253,27 @@ fn resolve_install_graph(
     index: &MetadataBackend,
     roots: &[RootInstallRequest],
     requested_target: Option<&str>,
+    provider_overrides: &BTreeMap<String, String>,
 ) -> Result<Vec<ResolvedInstall>> {
+    let (resolved, _) = resolve_install_graph_with_tokens(
+        layout,
+        index,
+        roots,
+        requested_target,
+        provider_overrides,
+        true,
+    )?;
+    Ok(resolved)
+}
+
+fn resolve_install_graph_with_tokens(
+    layout: &PrefixLayout,
+    index: &MetadataBackend,
+    roots: &[RootInstallRequest],
+    requested_target: Option<&str>,
+    provider_overrides: &BTreeMap<String, String>,
+    validate_overrides: bool,
+) -> Result<(Vec<ResolvedInstall>, HashSet<String>)> {
     let mut pins = BTreeMap::new();
     for (name, raw_req) in read_all_pins(layout)? {
         let parsed = VersionReq::parse(&raw_req)
@@ -1094,14 +1290,20 @@ fn resolve_install_graph(
         .collect();
 
     let graph = resolve_dependency_graph(&root_reqs, &pins, |package_name| {
-        index.package_versions(package_name)
+        let versions = index.package_versions(package_name)?;
+        apply_provider_override(package_name, versions, provider_overrides)
     })?;
+
+    let resolved_dependency_tokens = graph.manifests.keys().cloned().collect::<HashSet<_>>();
+    if validate_overrides {
+        validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
+    }
 
     let resolved_target = requested_target
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| host_target_triple().to_string());
 
-    graph
+    let resolved = graph
         .install_order
         .iter()
         .map(|name| {
@@ -1133,7 +1335,9 @@ fn resolve_install_graph(
                 archive_type,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok((resolved, resolved_dependency_tokens))
 }
 
 fn install_resolved(
@@ -1743,17 +1947,19 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_replacement_handoff, begin_transaction, build_update_report, build_upgrade_plans,
-        build_upgrade_roots, collect_replacement_receipts, determine_install_reason,
-        doctor_transaction_health_line, enforce_disjoint_multi_target_upgrade,
-        enforce_no_downgrades, ensure_no_active_transaction, ensure_no_active_transaction_for,
-        ensure_update_succeeded, ensure_upgrade_command_ready, execute_with_transaction,
-        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
+        apply_provider_override, apply_replacement_handoff, begin_transaction, build_update_report,
+        build_upgrade_plans, build_upgrade_roots, collect_replacement_receipts,
+        determine_install_reason, doctor_transaction_health_line,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
+        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
+        execute_with_transaction, format_info_lines, format_registry_add_lines,
+        format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        normalize_command_token, parse_pin_spec, registry_state_root, run_uninstall_command,
-        run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight, Cli,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
+        run_uninstall_command, run_update_command, run_upgrade_command, select_manifest_with_pin,
+        select_metadata_backend, set_transaction_status, update_failure_reason_code,
+        validate_binary_preflight, validate_provider_overrides_used, Cli, CliRegistryKind,
+        Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -1768,7 +1974,7 @@ mod tests {
         SourceUpdateStatus,
     };
     use semver::VersionReq;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1907,7 +2113,7 @@ mod tests {
         set_active_transaction(&layout, "tx-blocked-upgrade-dispatch")
             .expect("must write active marker");
 
-        let err = run_upgrade_command(&layout, None, None)
+        let err = run_upgrade_command(&layout, None, None, &BTreeMap::new())
             .expect_err("active transaction should block upgrade command");
         assert!(
             err.to_string().contains(
@@ -3627,6 +3833,238 @@ ripgrep-legacy = "*"
         let lines = format_uninstall_messages(&result);
         assert_eq!(lines[0], "uninstalled app 1.0.0");
         assert_eq!(lines[1], "pruned orphan dependencies: shared, zlib");
+    }
+
+    #[test]
+    fn cli_parses_install_with_repeatable_provider_overrides() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "install",
+            "compiler@^2",
+            "--provider",
+            "c-compiler=clang",
+            "--provider",
+            "rust-toolchain=rustup",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Install { provider, .. } => {
+                assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_with_repeatable_provider_overrides() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "upgrade",
+            "compiler@^2",
+            "--provider",
+            "c-compiler=clang",
+            "--provider",
+            "rust-toolchain=rustup",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Upgrade { provider, .. } => {
+                assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_provider_overrides_rejects_invalid_shape() {
+        let err = parse_provider_overrides(&["missing-equals".to_string()])
+            .expect_err("override must require capability=package shape");
+        assert!(err.to_string().contains("expected capability=package"));
+    }
+
+    #[test]
+    fn parse_provider_overrides_rejects_invalid_capability_token() {
+        let err = parse_provider_overrides(&["BadCap=clang".to_string()])
+            .expect_err("invalid capability token must fail");
+        assert!(err.to_string().contains("capability 'BadCap'"));
+    }
+
+    #[test]
+    fn apply_provider_override_selects_requested_capability_provider() {
+        let gcc = PackageManifest::from_toml_str(
+            r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+        )
+        .expect("gcc manifest must parse");
+        let llvm = PackageManifest::from_toml_str(
+            r#"
+name = "llvm"
+version = "2.1.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.1.0.tar.zst"
+sha256 = "llvm"
+"#,
+        )
+        .expect("llvm manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+
+        let selected = apply_provider_override("compiler", vec![gcc, llvm], &overrides)
+            .expect("provider override must filter candidate set");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "llvm");
+    }
+
+    #[test]
+    fn apply_provider_override_errors_when_requested_provider_missing() {
+        let gcc = PackageManifest::from_toml_str(
+            r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "clang".to_string());
+
+        let err = apply_provider_override("compiler", vec![gcc], &overrides)
+            .expect_err("missing requested provider must fail early");
+        assert!(
+            err.to_string()
+                .contains("provider override 'compiler=clang'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_provider_override_rejects_overriding_direct_package_tokens() {
+        let foo = PackageManifest::from_toml_str(
+            r#"
+name = "foo"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+        )
+        .expect("foo manifest must parse");
+        let bar = PackageManifest::from_toml_str(
+            r#"
+name = "bar"
+version = "1.0.0"
+provides = ["foo"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#,
+        )
+        .expect("bar manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("foo".to_string(), "bar".to_string());
+
+        let err = apply_provider_override("foo", vec![foo, bar], &overrides)
+            .expect_err("direct package tokens must not be overridable");
+        assert!(
+            err.to_string()
+                .contains("direct package names cannot be overridden"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_provider_overrides_used_accepts_consumed_overrides() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+        overrides.insert("rust-toolchain".to_string(), "rustup".to_string());
+
+        let resolved_dependency_tokens = HashSet::from([
+            "compiler".to_string(),
+            "rust-toolchain".to_string(),
+            "ripgrep".to_string(),
+        ]);
+
+        validate_provider_overrides_used(&overrides, &resolved_dependency_tokens)
+            .expect("all overrides should be consumed by the resolved graph");
+    }
+
+    #[test]
+    fn validate_provider_overrides_used_rejects_unused_overrides() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+        overrides.insert("rust-toolchain".to_string(), "rustup".to_string());
+
+        let resolved_dependency_tokens = HashSet::from(["compiler".to_string()]);
+
+        let err = validate_provider_overrides_used(&overrides, &resolved_dependency_tokens)
+            .expect_err("unused overrides must fail fast");
+        assert!(
+            err.to_string()
+                .contains("unused provider override(s): rust-toolchain=rustup"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_provider_overrides_used_accepts_union_of_multi_plan_tokens() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+        overrides.insert("rust-toolchain".to_string(), "rustup".to_string());
+
+        let plan_a_tokens = HashSet::from(["compiler".to_string()]);
+        let plan_b_tokens = HashSet::from(["rust-toolchain".to_string()]);
+
+        let mut combined_tokens = HashSet::new();
+        combined_tokens.extend(plan_a_tokens);
+        combined_tokens.extend(plan_b_tokens);
+
+        validate_provider_overrides_used(&overrides, &combined_tokens)
+            .expect("overrides consumed across plans should pass");
+    }
+
+    #[test]
+    fn format_info_lines_includes_policy_sections_when_present() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+provides = ["c-compiler", "cc"]
+
+[conflicts]
+legacy-cc = "*"
+
+[replaces]
+old-cc = "<2.0.0"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines = format_info_lines("compiler", &[manifest]);
+        assert_eq!(lines[0], "Package: compiler");
+        assert_eq!(lines[1], "- 2.1.0");
+        assert_eq!(lines[2], "  Provides: c-compiler, cc");
+        assert_eq!(lines[3], "  Conflicts: legacy-cc(*)");
+        assert_eq!(lines[4], "  Replaces: old-cc(<2.0.0)");
     }
 
     #[test]
