@@ -963,6 +963,26 @@ fn apply_provider_override(
     Ok(filtered)
 }
 
+fn validate_provider_overrides_used(
+    provider_overrides: &BTreeMap<String, String>,
+    resolved_dependency_tokens: &HashSet<String>,
+) -> Result<()> {
+    let unused = provider_overrides
+        .iter()
+        .filter(|(capability, _)| !resolved_dependency_tokens.contains(*capability))
+        .map(|(capability, provider)| format!("{capability}={provider}"))
+        .collect::<Vec<_>>();
+
+    if unused.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "unused provider override(s): {}",
+        unused.join(", ")
+    ))
+}
+
 #[cfg(test)]
 fn select_manifest_with_pin<'a>(
     versions: &'a [PackageManifest],
@@ -1237,6 +1257,9 @@ fn resolve_install_graph(
         let versions = index.package_versions(package_name)?;
         apply_provider_override(package_name, versions, provider_overrides)
     })?;
+
+    let resolved_dependency_tokens = graph.manifests.keys().cloned().collect::<HashSet<_>>();
+    validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
 
     let resolved_target = requested_target
         .map(ToOwned::to_owned)
@@ -1895,8 +1918,8 @@ mod tests {
         normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
         run_uninstall_command, run_update_command, run_upgrade_command, select_manifest_with_pin,
         select_metadata_backend, set_transaction_status, update_failure_reason_code,
-        validate_binary_preflight, Cli, CliRegistryKind, Commands, MetadataBackend,
-        ResolvedInstall,
+        validate_binary_preflight, validate_provider_overrides_used, Cli, CliRegistryKind,
+        Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -3887,6 +3910,39 @@ sha256 = "gcc"
         assert!(
             err.to_string()
                 .contains("provider override 'compiler=clang'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_provider_overrides_used_accepts_consumed_overrides() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+        overrides.insert("rust-toolchain".to_string(), "rustup".to_string());
+
+        let resolved_dependency_tokens = HashSet::from([
+            "compiler".to_string(),
+            "rust-toolchain".to_string(),
+            "ripgrep".to_string(),
+        ]);
+
+        validate_provider_overrides_used(&overrides, &resolved_dependency_tokens)
+            .expect("all overrides should be consumed by the resolved graph");
+    }
+
+    #[test]
+    fn validate_provider_overrides_used_rejects_unused_overrides() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "llvm".to_string());
+        overrides.insert("rust-toolchain".to_string(), "rustup".to_string());
+
+        let resolved_dependency_tokens = HashSet::from(["compiler".to_string()]);
+
+        let err = validate_provider_overrides_used(&overrides, &resolved_dependency_tokens)
+            .expect_err("unused overrides must fail fast");
+        assert!(
+            err.to_string()
+                .contains("unused provider override(s): rust-toolchain=rustup"),
             "unexpected error: {err}"
         );
     }
