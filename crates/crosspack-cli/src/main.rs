@@ -702,6 +702,57 @@ fn run_upgrade_command(
     Ok(())
 }
 
+fn txid_process_id(txid: &str) -> Option<u32> {
+    txid.rsplit('-').next()?.parse().ok()
+}
+
+fn transaction_owner_process_alive(txid: &str) -> bool {
+    let Some(pid) = txid_process_id(txid) else {
+        return false;
+    };
+
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn transaction_journal_requires_replay(layout: &PrefixLayout, txid: &str) -> Result<bool> {
+    let path = layout.transaction_journal_path(txid);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed reading transaction journal: {}", path.display())
+            });
+        }
+    };
+
+    for line in raw.lines() {
+        if line.contains("\"step\":\"install_package:")
+            || line.contains("\"step\":\"upgrade_package:")
+            || line.contains("\"step\":\"uninstall_target:")
+            || line.contains("\"step\":\"prune_dependency:")
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String>> {
     let entries = match std::fs::read_dir(layout.transactions_dir()) {
         Ok(entries) => entries,
@@ -779,6 +830,7 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
 
     if matches!(metadata.status.as_str(), "planning" | "applying")
         && active_txid.as_deref() == Some(target_txid.as_str())
+        && transaction_owner_process_alive(&target_txid)
     {
         return Err(anyhow!(
             "cannot rollback while transaction is active (status={})",
@@ -792,6 +844,12 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         }
         println!("no rollback needed");
         return Ok(());
+    }
+
+    if transaction_journal_requires_replay(layout, &target_txid)? {
+        return Err(anyhow!(
+            "rollback failed {target_txid}: transaction journal replay required"
+        ));
     }
 
     set_transaction_status(layout, &target_txid, "rolling_back")?;
@@ -827,16 +885,7 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
     }
 
     match metadata.status.as_str() {
-        "planning" | "applying" => {
-            set_transaction_status(layout, &txid, "rolling_back")?;
-            set_transaction_status(layout, &txid, "rolled_back")?;
-            if read_active_transaction(layout)?.as_deref() == Some(txid.as_str()) {
-                clear_active_transaction(layout)?;
-            }
-            println!("recovered interrupted transaction {txid}: rolled back");
-            Ok(())
-        }
-        "failed" | "rolling_back" => {
+        "planning" | "applying" | "failed" | "rolling_back" => {
             run_rollback_command(layout, Some(txid.clone()))?;
             println!("recovered interrupted transaction {txid}: rolled back");
             Ok(())
@@ -2408,6 +2457,45 @@ mod tests {
     }
 
     #[test]
+    fn run_rollback_command_fails_when_journal_replay_required() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-needs-replay".to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_266,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-needs-replay").expect("must write active marker");
+
+        std::fs::write(
+            layout.transaction_journal_path("tx-needs-replay"),
+            r#"{"seq":1,"step":"install_package:demo","state":"done"}"#,
+        )
+        .expect("must write journal fixture");
+
+        let err = run_rollback_command(&layout, Some("tx-needs-replay".to_string()))
+            .expect_err("rollback should fail when replay is required");
+        assert!(
+            err.to_string().contains("rollback failed tx-needs-replay"),
+            "unexpected error: {err}"
+        );
+
+        let active = read_active_transaction(&layout).expect("must read active marker");
+        assert_eq!(active.as_deref(), Some("tx-needs-replay"));
+        let updated = read_transaction_metadata(&layout, "tx-needs-replay")
+            .expect("must read metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn run_rollback_command_without_active_marker_uses_latest_non_final_transaction() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -2452,18 +2540,19 @@ mod tests {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
+        let txid = format!("tx-live-applying-{}", std::process::id());
         let metadata = TransactionMetadata {
             version: 1,
-            txid: "tx-live-applying".to_string(),
+            txid: txid.clone(),
             operation: "install".to_string(),
             status: "applying".to_string(),
             started_at_unix: 1_771_001_264,
             snapshot_id: None,
         };
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
-        set_active_transaction(&layout, "tx-live-applying").expect("must write active marker");
+        set_active_transaction(&layout, &txid).expect("must write active marker");
 
-        let err = run_rollback_command(&layout, Some("tx-live-applying".to_string()))
+        let err = run_rollback_command(&layout, Some(txid.clone()))
             .expect_err("rollback must reject active applying transactions");
         assert!(
             err.to_string()
@@ -2472,8 +2561,8 @@ mod tests {
         );
 
         let active = read_active_transaction(&layout).expect("must read active marker");
-        assert_eq!(active.as_deref(), Some("tx-live-applying"));
-        let updated = read_transaction_metadata(&layout, "tx-live-applying")
+        assert_eq!(active.as_deref(), Some(txid.as_str()));
+        let updated = read_transaction_metadata(&layout, &txid)
             .expect("must read updated metadata")
             .expect("metadata should still exist");
         assert_eq!(updated.status, "applying");
