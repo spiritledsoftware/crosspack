@@ -162,7 +162,11 @@ fn main() -> Result<()> {
             ensure_no_active_transaction_for(&layout, "install")?;
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
 
-            execute_with_transaction(&layout, "install", None, |tx| {
+            let snapshot_id = match cli.registry_root.as_deref() {
+                Some(_) => None,
+                None => Some(resolve_transaction_snapshot_id(&layout)?),
+            };
+            execute_with_transaction(&layout, "install", snapshot_id.as_deref(), |tx| {
                 let mut journal_seq = 1_u64;
                 let roots = vec![RootInstallRequest { name, requirement }];
                 let root_names = roots
@@ -211,6 +215,7 @@ fn main() -> Result<()> {
                         &dependencies,
                         &root_names,
                         &planned_dependency_overrides,
+                        snapshot_id.as_deref(),
                         force_redownload,
                     )?;
                     print_install_outcome(&outcome);
@@ -399,6 +404,40 @@ fn select_metadata_backend(
     Ok(MetadataBackend::Configured(configured))
 }
 
+fn resolve_transaction_snapshot_id(layout: &PrefixLayout) -> Result<String> {
+    let source_state_root = registry_state_root(layout);
+    let store = RegistrySourceStore::new(&source_state_root);
+    let sources = store.list_sources_with_snapshot_state()?;
+
+    let mut ready = sources
+        .into_iter()
+        .filter(|source| source.source.enabled)
+        .filter_map(|source| match source.snapshot {
+            RegistrySourceSnapshotState::Ready { snapshot_id } => {
+                Some((source.source.name, snapshot_id))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if ready.is_empty() {
+        anyhow::bail!(METADATA_CONFIG_GUIDANCE);
+    }
+
+    ready.sort_by(|left, right| left.0.cmp(&right.0));
+    let snapshot_id = ready[0].1.clone();
+    if ready.iter().any(|(_, candidate)| candidate != &snapshot_id) {
+        let summary = ready
+            .iter()
+            .map(|(name, snapshot)| format!("{name}={snapshot}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!("metadata snapshot mismatch across configured sources: {summary}");
+    }
+
+    Ok(snapshot_id)
+}
+
 struct UpdateReport {
     lines: Vec<String>,
     updated: u32,
@@ -488,7 +527,11 @@ fn run_upgrade_command(
         return Ok(());
     }
 
-    execute_with_transaction(layout, "upgrade", None, |tx| {
+    let snapshot_id = match registry_root {
+        Some(_) => None,
+        None => Some(resolve_transaction_snapshot_id(layout)?),
+    };
+    execute_with_transaction(layout, "upgrade", snapshot_id.as_deref(), |tx| {
         let mut journal_seq = 1_u64;
 
         match spec.as_deref() {
@@ -560,6 +603,7 @@ fn run_upgrade_command(
                         &dependencies,
                         &root_names,
                         &planned_dependency_overrides,
+                        snapshot_id.as_deref(),
                         false,
                     )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
@@ -667,6 +711,7 @@ fn run_upgrade_command(
                             &dependencies,
                             &plan.root_names,
                             &planned_dependency_overrides,
+                            snapshot_id.as_deref(),
                             false,
                         )?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
@@ -1606,6 +1651,7 @@ fn install_resolved(
     dependency_receipts: &[String],
     root_names: &[String],
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
+    snapshot_id: Option<&str>,
     force_redownload: bool,
 ) -> Result<InstallOutcome> {
     let receipts = read_install_receipts(layout)?;
@@ -1687,7 +1733,7 @@ fn install_resolved(
         artifact_sha256: Some(resolved.artifact.sha256.clone()),
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
-        snapshot_id: None,
+        snapshot_id: snapshot_id.map(ToOwned::to_owned),
         install_reason: determine_install_reason(
             &resolved.manifest.name,
             root_names,
@@ -2216,11 +2262,11 @@ mod tests {
         format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
         normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
-        run_repair_command, run_rollback_command, run_uninstall_command, run_update_command,
-        run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight,
-        validate_provider_overrides_used, Cli, CliRegistryKind, Commands, MetadataBackend,
-        ResolvedInstall,
+        resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
+        run_uninstall_command, run_update_command, run_upgrade_command, select_manifest_with_pin,
+        select_metadata_backend, set_transaction_status, update_failure_reason_code,
+        validate_binary_preflight, validate_provider_overrides_used, Cli, CliRegistryKind,
+        Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -4848,6 +4894,191 @@ old-cc = "<2.0.0"
             reason_code: "snapshot-unreadable".to_string(),
         });
         assert_eq!(line, "error:snapshot-unreadable");
+    }
+
+    #[test]
+    fn resolve_transaction_snapshot_id_ignores_disabled_sources() {
+        let layout = test_layout();
+        let state_root = registry_state_root(&layout);
+        let store = RegistrySourceStore::new(&state_root);
+        let snap_root = |name: &str| state_root.join("cache").join(name).join("snapshot.json");
+
+        store
+            .add_source(RegistrySourceRecord {
+                name: "alpha".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/alpha".to_string(),
+                fingerprint_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                enabled: true,
+                priority: 1,
+            })
+            .expect("must add alpha source");
+        store
+            .add_source(RegistrySourceRecord {
+                name: "beta".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/beta".to_string(),
+                fingerprint_sha256:
+                    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+                enabled: false,
+                priority: 2,
+            })
+            .expect("must add beta source");
+
+        std::fs::create_dir_all(state_root.join("cache/alpha"))
+            .expect("must create alpha cache directory");
+        std::fs::create_dir_all(state_root.join("cache/beta"))
+            .expect("must create beta cache directory");
+        std::fs::write(
+            snap_root("alpha"),
+            r#"{"version":1,"source":"alpha","snapshot_id":"snapshot-a","updated_at_unix":1,"manifest_count":0,"status":"ready"}"#,
+        )
+        .expect("must write alpha snapshot");
+        std::fs::write(
+            snap_root("beta"),
+            r#"{"version":1,"source":"beta","snapshot_id":"snapshot-b","updated_at_unix":1,"manifest_count":0,"status":"ready"}"#,
+        )
+        .expect("must write beta snapshot");
+
+        let snapshot_id =
+            resolve_transaction_snapshot_id(&layout).expect("must ignore disabled source snapshot");
+        assert_eq!(snapshot_id, "snapshot-a");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn resolve_transaction_snapshot_id_rejects_mixed_ready_snapshots() {
+        let layout = test_layout();
+        let state_root = registry_state_root(&layout);
+        let store = RegistrySourceStore::new(&state_root);
+        let snap_root = |name: &str| state_root.join("cache").join(name).join("snapshot.json");
+
+        store
+            .add_source(RegistrySourceRecord {
+                name: "alpha".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/alpha".to_string(),
+                fingerprint_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                enabled: true,
+                priority: 1,
+            })
+            .expect("must add alpha source");
+        store
+            .add_source(RegistrySourceRecord {
+                name: "beta".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/beta".to_string(),
+                fingerprint_sha256:
+                    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+                enabled: true,
+                priority: 2,
+            })
+            .expect("must add beta source");
+
+        std::fs::create_dir_all(state_root.join("cache/alpha"))
+            .expect("must create alpha cache directory");
+        std::fs::create_dir_all(state_root.join("cache/beta"))
+            .expect("must create beta cache directory");
+        std::fs::write(
+            snap_root("alpha"),
+            r#"{"version":1,"source":"alpha","snapshot_id":"snapshot-a","updated_at_unix":1,"manifest_count":0,"status":"ready"}"#,
+        )
+        .expect("must write alpha snapshot");
+        std::fs::write(
+            snap_root("beta"),
+            r#"{"version":1,"source":"beta","snapshot_id":"snapshot-b","updated_at_unix":1,"manifest_count":0,"status":"ready"}"#,
+        )
+        .expect("must write beta snapshot");
+
+        let err = resolve_transaction_snapshot_id(&layout).expect_err("must fail mixed snapshots");
+        let rendered = err.to_string();
+        assert!(rendered.contains("metadata snapshot mismatch across configured sources"));
+        assert!(rendered.contains("alpha=snapshot-a"));
+        assert!(rendered.contains("beta=snapshot-b"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn resolve_transaction_snapshot_id_uses_shared_snapshot_id() {
+        let layout = test_layout();
+        let state_root = registry_state_root(&layout);
+        let store = RegistrySourceStore::new(&state_root);
+        let snap_root = |name: &str| state_root.join("cache").join(name).join("snapshot.json");
+
+        store
+            .add_source(RegistrySourceRecord {
+                name: "alpha".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/alpha".to_string(),
+                fingerprint_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                enabled: true,
+                priority: 1,
+            })
+            .expect("must add alpha source");
+        store
+            .add_source(RegistrySourceRecord {
+                name: "beta".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/beta".to_string(),
+                fingerprint_sha256:
+                    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+                enabled: true,
+                priority: 2,
+            })
+            .expect("must add beta source");
+
+        std::fs::create_dir_all(state_root.join("cache/alpha"))
+            .expect("must create alpha cache directory");
+        std::fs::create_dir_all(state_root.join("cache/beta"))
+            .expect("must create beta cache directory");
+        std::fs::write(
+            snap_root("alpha"),
+            r#"{"version":1,"source":"alpha","snapshot_id":"snapshot-shared","updated_at_unix":1,"manifest_count":0,"status":"ready"}"#,
+        )
+        .expect("must write alpha snapshot");
+        std::fs::write(
+            snap_root("beta"),
+            r#"{"version":1,"source":"beta","snapshot_id":"snapshot-shared","updated_at_unix":1,"manifest_count":0,"status":"ready"}"#,
+        )
+        .expect("must write beta snapshot");
+
+        let snapshot_id =
+            resolve_transaction_snapshot_id(&layout).expect("must choose shared snapshot id");
+        assert_eq!(snapshot_id, "snapshot-shared");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn resolve_transaction_snapshot_id_requires_ready_snapshot() {
+        let layout = test_layout();
+        let state_root = registry_state_root(&layout);
+        let store = RegistrySourceStore::new(&state_root);
+
+        store
+            .add_source(RegistrySourceRecord {
+                name: "alpha".to_string(),
+                kind: RegistrySourceKind::Filesystem,
+                location: "/tmp/alpha".to_string(),
+                fingerprint_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                enabled: true,
+                priority: 1,
+            })
+            .expect("must add alpha source");
+
+        let err =
+            resolve_transaction_snapshot_id(&layout).expect_err("must fail without ready snapshot");
+        assert!(err
+            .to_string()
+            .contains("no configured registry snapshots available; run `crosspack registry add` and `crosspack update`"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
