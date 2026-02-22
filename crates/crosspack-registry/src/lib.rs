@@ -403,6 +403,9 @@ fn base_git_command() -> Command {
         .arg("core.autocrlf=false")
         .arg("-c")
         .arg("core.eol=lf");
+    if cfg!(windows) {
+        command.arg("-c").arg("core.longpaths=true");
+    }
     command
 }
 
@@ -2582,12 +2585,12 @@ version = "{version}"
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let sequence = TEST_REGISTRY_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let counter = TEST_REGISTRY_ROOT_COUNTER.fetch_add(1, Ordering::SeqCst);
         path.push(format!(
             "crosspack-registry-tests-{}-{}-{}",
             std::process::id(),
             nanos,
-            sequence
+            counter
         ));
         path
     }
