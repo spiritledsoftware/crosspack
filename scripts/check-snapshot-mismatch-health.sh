@@ -3,7 +3,16 @@ set -euo pipefail
 
 threshold=3
 window_seconds=900
-prefix_path="${CROSSPACK_PREFIX:-$HOME/.crosspack}"
+
+if [ -n "${CROSSPACK_PREFIX:-}" ]; then
+  prefix_path="$CROSSPACK_PREFIX"
+elif [ -n "${LOCALAPPDATA:-}" ]; then
+  # Match CLI default on Windows: LOCALAPPDATA/Crosspack
+  prefix_path="${LOCALAPPDATA//\\//}/Crosspack"
+else
+  prefix_path="$HOME/.crosspack"
+fi
+
 log_path=""
 
 usage() {
