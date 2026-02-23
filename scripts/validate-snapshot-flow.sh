@@ -99,6 +99,22 @@ else
   fi
 fi
 
+if [ -x scripts/check-snapshot-mismatch-health.sh ]; then
+  health_output="$(scripts/check-snapshot-mismatch-health.sh 2>&1)" || {
+    record_crit "SF-301" "snapshot mismatch health check alerted repeated failures" "$health_output"
+    health_output=""
+  }
+  if [ -n "${health_output:-}" ]; then
+    if printf '%s\n' "$health_output" | grep -q '^WARN \[SM-102\]'; then
+      record_warn "SF-301" "snapshot mismatch health check observed recent mismatches" "$(printf '%s\n' "$health_output" | tail -n 2 | tr '\n' ' ')"
+    else
+      record_pass "SF-301" "snapshot mismatch health check did not alert repeated failures" ""
+    fi
+  fi
+else
+  record_crit "SF-301" "snapshot mismatch health check script missing or not executable" "restore scripts/check-snapshot-mismatch-health.sh and executable bit"
+fi
+
 printf '\nsummary: pass=%s warn=%s crit=%s\n' "$pass_count" "$warn_count" "$crit_failures"
 
 if [ "$crit_failures" -gt 0 ]; then
