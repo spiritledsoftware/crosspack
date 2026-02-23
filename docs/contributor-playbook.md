@@ -121,6 +121,7 @@ git checkout --theirs <path>  # prefer incoming version
 ### Post-launch
 - Monitor CI dashboards for regression windows (especially snapshot checks).
 - Run `scripts/validate-snapshot-flow.sh` before promoting a release candidate.
+- Run `scripts/check-snapshot-mismatch-health.sh` to detect repeated `snapshot-id-mismatch` errors.
 - Verify no unexpected snapshot mismatch failures in logs.
 - Capture and triage any failed jobs before public rollout.
 
@@ -130,9 +131,19 @@ git checkout --theirs <path>  # prefer incoming version
   1. Revert merge or release commit.
   2. Reopen/patch the failing work item quickly.
   3. Re-run checks, then re-merge once stable.
+- If `scripts/check-snapshot-mismatch-health.sh` returns `CRIT`, open a launch blocker review and include output and mitigation status.
 - Announce blocker status and mitigation steps in the issue/thread.
 
 ## 6) SPI-19 follow-through
 
 - Contributor playbook now includes local setup, build/test, merge flow, conflict handling, and launch checklist.
 - Include the snapshot post-merge validation in merge and release gates.
+
+### SPI-21 troubleshooting: snapshot mismatch monitoring
+
+Use this runbook when snapshot consistency mismatches repeat during release monitoring:
+
+1. Run `scripts/check-snapshot-mismatch-health.sh` and capture the output in the issue thread.
+2. Run `cargo run -p crosspack-cli -- registry list` and confirm enabled sources report a shared `ready:<snapshot-id>`.
+3. Run `cargo run -p crosspack-cli -- update` and rerun the health check.
+4. If the check is still `CRIT`, open launch blocker review, pause promotion, and assign source owners for mismatch triage.

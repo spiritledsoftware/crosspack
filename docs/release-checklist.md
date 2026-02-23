@@ -12,3 +12,16 @@ Interpretation:
 - `PASS`: all snapshot-flow hardening checks passed.
 - `WARN`: validation passed but environment or speed hints were raised; review and address when practical.
 - `CRIT`: one or more snapshot consistency checks failed; release must not proceed until fixed.
+
+## Snapshot Mismatch Health Check (SPI-21)
+
+Validate that release telemetry is not showing repeated `snapshot-id-mismatch` errors:
+
+```bash
+scripts/check-snapshot-mismatch-health.sh
+```
+
+Interpretation:
+- `PASS`: no recent mismatch bursts; proceed with normal launch review.
+- `WARN`: recent mismatches observed; investigate before promotion.
+- `CRIT`: repeated mismatches detected; open a launch blocker review and attach check output before proceeding.

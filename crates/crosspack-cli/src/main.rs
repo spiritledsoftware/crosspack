@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
@@ -40,6 +42,7 @@ struct Cli {
 const NO_ROOT_PACKAGES_TO_UPGRADE: &str = "No root packages installed";
 const METADATA_CONFIG_GUIDANCE: &str =
     "no configured registry snapshots available; run `crosspack registry add` and `crosspack update`";
+const SNAPSHOT_ID_MISMATCH_ERROR_CODE: &str = "snapshot-id-mismatch";
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -164,7 +167,7 @@ fn main() -> Result<()> {
 
             let snapshot_id = match cli.registry_root.as_deref() {
                 Some(_) => None,
-                None => Some(resolve_transaction_snapshot_id(&layout)?),
+                None => Some(resolve_transaction_snapshot_id(&layout, "install")?),
             };
             execute_with_transaction(&layout, "install", snapshot_id.as_deref(), |tx| {
                 let mut journal_seq = 1_u64;
@@ -404,7 +407,7 @@ fn select_metadata_backend(
     Ok(MetadataBackend::Configured(configured))
 }
 
-fn resolve_transaction_snapshot_id(layout: &PrefixLayout) -> Result<String> {
+fn resolve_transaction_snapshot_id(layout: &PrefixLayout, operation: &str) -> Result<String> {
     let source_state_root = registry_state_root(layout);
     let store = RegistrySourceStore::new(&source_state_root);
     let sources = store.list_sources_with_snapshot_state()?;
@@ -427,6 +430,7 @@ fn resolve_transaction_snapshot_id(layout: &PrefixLayout) -> Result<String> {
     ready.sort_by(|left, right| left.0.cmp(&right.0));
     let snapshot_id = ready[0].1.clone();
     if ready.iter().any(|(_, candidate)| candidate != &snapshot_id) {
+        let _ = record_snapshot_id_mismatch(layout, operation, &ready);
         let summary = ready
             .iter()
             .map(|(name, snapshot)| format!("{name}={snapshot}"))
@@ -436,6 +440,62 @@ fn resolve_transaction_snapshot_id(layout: &PrefixLayout) -> Result<String> {
     }
 
     Ok(snapshot_id)
+}
+
+fn snapshot_monitor_log_path(layout: &PrefixLayout) -> PathBuf {
+    layout.transactions_dir().join("snapshot-monitor.log")
+}
+
+fn record_snapshot_id_mismatch(
+    layout: &PrefixLayout,
+    operation: &str,
+    ready: &[(String, String)],
+) -> Result<()> {
+    fs::create_dir_all(layout.transactions_dir()).with_context(|| {
+        format!(
+            "failed creating snapshot monitor state dir: {}",
+            layout.transactions_dir().display()
+        )
+    })?;
+
+    let timestamp_unix = current_unix_timestamp()?;
+    let source_count = ready.len();
+    let unique_snapshot_ids = ready
+        .iter()
+        .map(|(_, snapshot_id)| snapshot_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let source_summary = ready
+        .iter()
+        .map(|(name, snapshot)| format!("{name}={snapshot}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let monitor_path = snapshot_monitor_log_path(layout);
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&monitor_path)
+        .with_context(|| {
+            format!(
+                "failed opening snapshot monitor log for append: {}",
+                monitor_path.display()
+            )
+        })?;
+
+    writeln!(
+        file,
+        "timestamp_unix={timestamp_unix} level=error event=snapshot_id_consistency_mismatch error_code={} operation={operation} source_count={source_count} unique_snapshot_ids={unique_snapshot_ids} sources={source_summary}",
+        SNAPSHOT_ID_MISMATCH_ERROR_CODE
+    )
+    .with_context(|| {
+        format!(
+            "failed writing snapshot monitor log entry: {}",
+            monitor_path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 struct UpdateReport {
@@ -529,7 +589,7 @@ fn run_upgrade_command(
 
     let snapshot_id = match registry_root {
         Some(_) => None,
-        None => Some(resolve_transaction_snapshot_id(layout)?),
+        None => Some(resolve_transaction_snapshot_id(layout, "upgrade")?),
     };
     execute_with_transaction(layout, "upgrade", snapshot_id.as_deref(), |tx| {
         let mut journal_seq = 1_u64;
@@ -4941,8 +5001,8 @@ old-cc = "<2.0.0"
         )
         .expect("must write beta snapshot");
 
-        let snapshot_id =
-            resolve_transaction_snapshot_id(&layout).expect("must ignore disabled source snapshot");
+        let snapshot_id = resolve_transaction_snapshot_id(&layout, "install")
+            .expect("must ignore disabled source snapshot");
         assert_eq!(snapshot_id, "snapshot-a");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -4993,11 +5053,21 @@ old-cc = "<2.0.0"
         )
         .expect("must write beta snapshot");
 
-        let err = resolve_transaction_snapshot_id(&layout).expect_err("must fail mixed snapshots");
+        let err = resolve_transaction_snapshot_id(&layout, "install")
+            .expect_err("must fail mixed snapshots");
         let rendered = err.to_string();
         assert!(rendered.contains("metadata snapshot mismatch across configured sources"));
         assert!(rendered.contains("alpha=snapshot-a"));
         assert!(rendered.contains("beta=snapshot-b"));
+        let monitor_raw =
+            std::fs::read_to_string(layout.transactions_dir().join("snapshot-monitor.log"))
+                .expect("must write mismatch telemetry log");
+        assert!(monitor_raw.contains("event=snapshot_id_consistency_mismatch"));
+        assert!(monitor_raw.contains("error_code=snapshot-id-mismatch"));
+        assert!(monitor_raw.contains("operation=install"));
+        assert!(monitor_raw.contains("source_count=2"));
+        assert!(monitor_raw.contains("unique_snapshot_ids=2"));
+        assert!(monitor_raw.contains("sources=alpha=snapshot-a,beta=snapshot-b"));
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -5047,9 +5117,16 @@ old-cc = "<2.0.0"
         )
         .expect("must write beta snapshot");
 
-        let snapshot_id =
-            resolve_transaction_snapshot_id(&layout).expect("must choose shared snapshot id");
+        let snapshot_id = resolve_transaction_snapshot_id(&layout, "upgrade")
+            .expect("must choose shared snapshot id");
         assert_eq!(snapshot_id, "snapshot-shared");
+        assert!(
+            !layout
+                .transactions_dir()
+                .join("snapshot-monitor.log")
+                .exists(),
+            "shared snapshot id should not emit mismatch telemetry"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -5072,8 +5149,8 @@ old-cc = "<2.0.0"
             })
             .expect("must add alpha source");
 
-        let err =
-            resolve_transaction_snapshot_id(&layout).expect_err("must fail without ready snapshot");
+        let err = resolve_transaction_snapshot_id(&layout, "install")
+            .expect_err("must fail without ready snapshot");
         assert!(err
             .to_string()
             .contains("no configured registry snapshots available; run `crosspack registry add` and `crosspack update`"));
