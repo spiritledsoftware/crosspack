@@ -2,7 +2,9 @@
 
 ## Post-Merge Snapshot Validation (SPI-20)
 
-Run focused snapshot-flow checks after merge and before release packaging:
+Automated enforcement location: `.github/workflows/ci.yml` (`Snapshot-flow validation` step in job `test`) runs `scripts/validate-snapshot-flow.sh` on push and pull_request events for non-doc changes.
+
+For release gating, still run focused snapshot-flow checks after merge and before release packaging:
 
 ```bash
 scripts/validate-snapshot-flow.sh
