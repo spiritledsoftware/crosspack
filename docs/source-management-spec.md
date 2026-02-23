@@ -38,6 +38,27 @@ This spec does not cover:
 - Fingerprint: SHA-256 hex digest of the raw `registry.pub` bytes.
 - Source precedence: deterministic ordering used when the same package exists in multiple sources.
 
+## Official Bootstrap Contract (SPI-26)
+
+Crosspack publishes one official default source for first-run bootstrap:
+
+- Source name: `core`
+- Source kind: `git`
+- Source URL: `https://github.com/spiritledsoftware/crosspack-registry.git`
+- Fingerprint publication channel:
+  - `docs/trust/core-registry-fingerprint.txt` in this repository
+  - Matching GitHub Release note entry for the same `updated_at` and `key_id`
+
+Bootstrap sequence:
+
+```text
+crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <fingerprint-from-trust-bulletin>
+crosspack update
+crosspack registry list
+```
+
+Users must verify both fingerprint channels match before adding or updating trusted source records.
+
 ## CLI Contract
 
 ### `crosspack registry add`
@@ -147,9 +168,9 @@ version = 1
 [[sources]]
 name = "core"
 kind = "git"
-location = "https://example.test/crosspack-index.git"
+location = "https://github.com/spiritledsoftware/crosspack-registry.git"
 priority = 100
-fingerprint_sha256 = "4f9f2b7f52e6c9f4d0b77f3b9a0d6d8553cb4f4d2c5e8a4462f2386e2b1c0e17"
+fingerprint_sha256 = "65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2"
 enabled = true
 ```
 
@@ -228,12 +249,36 @@ Required error classes:
 
 Errors must include source name and actionable context.
 
+## Fingerprint and Key Rotation
+
+Rotation is explicit and fail-closed. Operators must complete all steps in order:
+
+1. Generate and publish new `registry.pub` in the source index at the target cutover revision.
+2. Compute new SHA-256 fingerprint from raw `registry.pub` bytes.
+3. Update `docs/trust/core-registry-fingerprint.txt` with:
+   - `fingerprint_sha256`
+   - `updated_at`
+   - `key_id`
+4. Publish a matching GitHub Release note entry with the same three values.
+5. Announce cutover window and required user action.
+6. Keep old key material available only for rollback interval; remove once cutover is complete.
+
+User recovery commands after announced rotation:
+
+```text
+crosspack registry remove core
+crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <new-fingerprint>
+crosspack update
+```
+
+If local cache is suspected stale, users may use `crosspack registry remove core --purge-cache` before re-adding.
+
 ## Backward Compatibility
 
 - Existing single-root usage via `--registry_root` remains valid for development and tests.
 - If `sources.toml` is absent, commands behave as follows:
   - with `--registry_root`: current behavior.
-  - without `--registry_root`: fail with guidance to run `crosspack registry add` and `crosspack update`.
+  - without `--registry_root`: fail with guidance to run the official `core` bootstrap flow and then `crosspack update`.
 - Receipt format remains backward compatible in v0.3, but new optional fields may be added in later versions.
 
 ## Testing Requirements
@@ -264,3 +309,4 @@ Errors must include source name and actionable context.
 - `docs/architecture.md`: add source-management module flow.
 - `docs/registry-spec.md`: document source snapshot cache model.
 - `docs/install-flow.md`: include precondition that dependency resolution reads verified snapshots.
+- `docs/registry-bootstrap-runbook.md`: canonical operator/user runbook for bootstrap, rotation, and failure handling.

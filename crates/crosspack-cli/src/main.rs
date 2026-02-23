@@ -42,7 +42,7 @@ struct Cli {
 
 const NO_ROOT_PACKAGES_TO_UPGRADE: &str = "No root packages installed";
 const METADATA_CONFIG_GUIDANCE: &str =
-    "no configured registry snapshots available; run `crosspack registry add` and `crosspack update`";
+    "no configured registry snapshots available; bootstrap trusted source `core` with `crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <64-hex>` then run `crosspack update` (see https://github.com/spiritledsoftware/crosspack/blob/main/docs/registry-bootstrap-runbook.md and https://github.com/spiritledsoftware/crosspack/blob/main/docs/trust/core-registry-fingerprint.txt)";
 const SNAPSHOT_ID_MISMATCH_ERROR_CODE: &str = "snapshot-id-mismatch";
 
 #[derive(Subcommand, Debug)]
@@ -6290,9 +6290,9 @@ old-cc = "<2.0.0"
 
         let err = resolve_transaction_snapshot_id(&layout, "install")
             .expect_err("must fail without ready snapshot");
-        assert!(err
-            .to_string()
-            .contains("no configured registry snapshots available; run `crosspack registry add` and `crosspack update`"));
+        assert!(err.to_string().contains(
+            "no configured registry snapshots available; bootstrap trusted source `core`"
+        ));
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
