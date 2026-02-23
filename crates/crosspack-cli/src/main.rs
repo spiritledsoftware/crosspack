@@ -1133,11 +1133,88 @@ fn capture_package_state_snapshot(
     Ok(snapshot_root)
 }
 
+fn binary_entry_points_to_package_root(bin_entry: &Path, package_root: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::symlink_metadata(bin_entry)
+            .with_context(|| format!("failed to inspect binary entry: {}", bin_entry.display()))?;
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(bin_entry).with_context(|| {
+                format!("failed to read binary symlink target: {}", bin_entry.display())
+            })?;
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                bin_entry
+                    .parent()
+                    .map(|parent| parent.join(&target))
+                    .unwrap_or(target)
+            };
+            return Ok(resolved.starts_with(package_root));
+        }
+        Ok(false)
+    }
+
+    #[cfg(windows)]
+    {
+        let metadata = std::fs::metadata(bin_entry)
+            .with_context(|| format!("failed to inspect binary entry: {}", bin_entry.display()))?;
+        if !metadata.is_file() {
+            return Ok(false);
+        }
+
+        let shim = std::fs::read_to_string(bin_entry)
+            .with_context(|| format!("failed to read binary shim: {}", bin_entry.display()))?;
+        let Some(start) = shim.find('"') else {
+            return Ok(false);
+        };
+        let rest = &shim[start + 1..];
+        let Some(end) = rest.find('"') else {
+            return Ok(false);
+        };
+
+        let source = PathBuf::from(&rest[..end]);
+        Ok(source.starts_with(package_root))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = bin_entry;
+        let _ = package_root;
+        Ok(false)
+    }
+}
+
+fn remove_binary_entries_for_package_root(layout: &PrefixLayout, package_root: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(layout.bin_dir()) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read bin directory: {}", layout.bin_dir().display()));
+        }
+    };
+
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to iterate bin directory: {}", layout.bin_dir().display()))?;
+        let path = entry.path();
+        if binary_entry_points_to_package_root(&path, package_root)? {
+            remove_file_if_exists(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn restore_package_state_snapshot(
     layout: &PrefixLayout,
     package_name: &str,
     snapshot_root: Option<&Path>,
 ) -> Result<()> {
+    let package_root = layout.pkgs_dir().join(package_name);
+    remove_binary_entries_for_package_root(layout, &package_root)?;
+
     let existing_receipt = read_install_receipts(layout)?
         .into_iter()
         .find(|receipt| receipt.name == package_name);
@@ -1149,7 +1226,6 @@ fn restore_package_state_snapshot(
         remove_exposed_binary(layout, &bin_name)?;
     }
 
-    let package_root = layout.pkgs_dir().join(package_name);
     if package_root.exists() {
         std::fs::remove_dir_all(&package_root).with_context(|| {
             format!("failed to remove package path: {}", package_root.display())
@@ -1351,6 +1427,11 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         return Ok(());
     }
 
+    let journal_records = read_transaction_journal_records(layout, &target_txid)?;
+    let has_completed_mutating_steps = journal_records
+        .iter()
+        .any(|record| record.state == "done" && rollback_package_from_step(&record.step).is_some());
+
     set_transaction_status(layout, &target_txid, "rolling_back")?;
     let replayed = match replay_rollback_journal(layout, &target_txid) {
         Ok(replayed) => replayed,
@@ -1362,16 +1443,7 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         }
     };
 
-    if !replayed
-        && matches!(
-            metadata.operation.as_str(),
-            "install" | "upgrade" | "uninstall"
-        )
-        && matches!(
-            metadata.status.as_str(),
-            "applying" | "rolling_back" | "failed"
-        )
-    {
+    if !replayed && has_completed_mutating_steps {
         let _ = set_transaction_status(layout, &target_txid, "failed");
         return Err(anyhow!(
             "rollback failed {target_txid}: transaction journal replay required"
@@ -3458,7 +3530,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rollback_command_fails_when_uninstall_journal_missing_for_failed_tx() {
+    fn run_rollback_command_succeeds_when_failed_tx_has_no_journal_entries() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -3474,20 +3546,94 @@ mod tests {
         set_active_transaction(&layout, "tx-uninstall-no-journal")
             .expect("must write active marker");
 
-        let err = run_rollback_command(&layout, Some("tx-uninstall-no-journal".to_string()))
-            .expect_err("rollback should fail when uninstall journal is missing");
-        assert!(
-            err.to_string()
-                .contains("rollback failed tx-uninstall-no-journal"),
-            "unexpected error: {err}"
-        );
+        run_rollback_command(&layout, Some("tx-uninstall-no-journal".to_string()))
+            .expect("rollback should succeed when no mutating journal entries were recorded");
 
         let active = read_active_transaction(&layout).expect("must read active marker");
-        assert_eq!(active.as_deref(), Some("tx-uninstall-no-journal"));
+        assert!(active.is_none(), "active marker should be cleared");
         let updated = read_transaction_metadata(&layout, "tx-uninstall-no-journal")
             .expect("must read metadata")
             .expect("metadata should still exist");
-        assert_eq!(updated.status, "failed");
+        assert_eq!(updated.status, "rolled_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_removes_orphan_bins_when_no_receipt_snapshot_exists() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-install-no-receipt";
+        let package_name = "demo";
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_267,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(txid)
+            .join("rollback")
+            .join(package_name);
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+
+        let install_root = layout.pkgs_dir().join(package_name).join("2.0.0");
+        std::fs::create_dir_all(&install_root).expect("must create install root");
+        std::fs::write(install_root.join("demo"), "new-bin").expect("must write binary payload");
+        expose_binary(&layout, &install_root, "demo", "demo")
+            .expect("must expose binary without receipt");
+        assert!(bin_path(&layout, "demo").exists(), "binary should exist before rollback");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup journal step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("install_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append mutating journal step");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback should remove orphaned binaries for unsnapshotted install");
+
+        assert!(
+            !bin_path(&layout, "demo").exists(),
+            "rollback should remove stale binary entry"
+        );
+        assert!(
+            !layout.pkgs_dir().join(package_name).exists(),
+            "rollback should remove interrupted package directory"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
