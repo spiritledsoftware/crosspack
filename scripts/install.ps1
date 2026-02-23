@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "v0.0.3",
+  [string]$Version = "",
   [string]$Repo = "spiritledsoftware/crosspack",
   [string]$BinDir = (Join-Path $env:LOCALAPPDATA "Crosspack\\bin")
 )
@@ -7,11 +7,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$asset = "crosspack-$Version-x86_64-pc-windows-msvc.zip"
-$baseUrl = "https://github.com/$Repo/releases/download/$Version"
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("crosspack-install-" + [guid]::NewGuid().ToString("N"))
 
 try {
+  if ([string]::IsNullOrWhiteSpace($Version)) {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+    $Version = $release.tag_name
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+      throw "Failed to resolve latest release tag from GitHub API"
+    }
+  }
+
+  $asset = "crosspack-$Version-x86_64-pc-windows-msvc.zip"
+  $baseUrl = "https://github.com/$Repo/releases/download/$Version"
   New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
   $zipPath = Join-Path $tmpDir $asset

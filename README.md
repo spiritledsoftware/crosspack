@@ -66,9 +66,11 @@ curl -fsSL https://raw.githubusercontent.com/spiritledsoftware/crosspack/main/sc
 irm https://raw.githubusercontent.com/spiritledsoftware/crosspack/main/scripts/install.ps1 | iex
 ```
 
+By default, both scripts install the latest GitHub release.
+
 Optional version pinning:
-- macOS/Linux: `CROSSPACK_VERSION=v0.0.3` before running the one-liner.
-- Windows: download `scripts/install.ps1` and run it with `-Version v0.0.3`.
+- macOS/Linux: set `CROSSPACK_VERSION` before running the one-liner.
+- Windows: download `scripts/install.ps1` and run it with `-Version <tag>`.
 
 After install, add the bin directory to your `PATH`:
 - macOS/Linux: `~/.crosspack/bin`

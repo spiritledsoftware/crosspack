@@ -2,7 +2,7 @@
 set -eu
 
 REPO="${CROSSPACK_REPO:-spiritledsoftware/crosspack}"
-VERSION="${CROSSPACK_VERSION:-v0.0.3}"
+VERSION="${CROSSPACK_VERSION:-}"
 PREFIX="${CROSSPACK_PREFIX:-$HOME/.crosspack}"
 BIN_DIR="${CROSSPACK_BIN_DIR:-$PREFIX/bin}"
 
@@ -61,14 +61,21 @@ case "$os" in
     ;;
 esac
 
-asset="crosspack-${VERSION}-${target}.tar.gz"
-base_url="https://github.com/${REPO}/releases/download/${VERSION}"
-
 tmp_dir="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT INT TERM
+
+if [ -z "$VERSION" ]; then
+  release_meta="${tmp_dir}/latest-release.json"
+  download "https://api.github.com/repos/${REPO}/releases/latest" "$release_meta"
+  VERSION="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$release_meta" | head -n1)"
+  [ -n "$VERSION" ] || err "failed to resolve latest release tag from GitHub API"
+fi
+
+asset="crosspack-${VERSION}-${target}.tar.gz"
+base_url="https://github.com/${REPO}/releases/download/${VERSION}"
 
 echo "==> Downloading ${asset}"
 download "${base_url}/${asset}" "${tmp_dir}/${asset}"
