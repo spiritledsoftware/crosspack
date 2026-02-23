@@ -8,7 +8,7 @@ Crosspack is a native, cross-platform package manager with first-class Windows s
 - `crosspack-core`: shared domain models (manifest and artifact metadata).
 - `crosspack-registry`: reads and searches the package index.
 - `crosspack-resolver`: resolves version constraints against available manifests.
-- `crosspack-installer`: prefix layout and install/uninstall filesystem mechanics.
+- `crosspack-installer`: prefix layout, install/uninstall filesystem mechanics, and transaction apply/rollback coordination.
 - `crosspack-security`: checksum verification and registry metadata signature verification helpers.
 
 ## Install Layout
@@ -60,6 +60,11 @@ Default user prefixes:
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
+- Transaction recovery commands are shipped and operational:
+  - `rollback [txid]` replays rollback for eligible failed/incomplete transactions.
+  - `repair` clears stale transaction markers and reconciles interrupted state.
+  - `doctor` reports prefix paths and transaction health status.
+- Successful multi-package install/upgrade receipts in one transaction share a single `snapshot_id` to preserve metadata provenance.
 - `list` reads install receipts from `<prefix>/state/installed/`.
 
 ## GA Scope Statement
@@ -76,10 +81,14 @@ Roadmap specs (v0.4/v0.5) are design targets and non-GA until merged and validat
 
 The next architecture milestones are specified in dedicated docs. These are design targets and are not fully implemented yet.
 
+Planned (non-GA) additions include resolver provider/conflict/replacement phases and expanded transaction coordinator policies beyond current shipped rollback/repair behavior.
+
 - Dependency policy (`provides`, `conflicts`, `replaces`) and provider resolution: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery: `docs/transaction-rollback-spec.md`.
 
 ## Project Resources
 
+- Install and lifecycle behavior details: `docs/install-flow.md`
+- Manifest schema and signing policy details: `docs/manifest-spec.md`
 - Contributor onboarding and PR flow: `docs/contributor-playbook.md`
 - Release readiness flow and snapshot post-merge validation: `docs/release-checklist.md`
