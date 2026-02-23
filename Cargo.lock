@@ -152,6 +152,7 @@ dependencies = [
  "crosspack-resolver",
  "crosspack-security",
  "semver",
+ "serde_json",
 ]
 
 [[package]]
