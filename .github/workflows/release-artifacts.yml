@@ -7,16 +7,19 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag or RC label for artifact naming"
+        description: "Release tag or RC label for artifact naming (for example: v0.4.0 or v0.4.0-rc.1)"
         required: true
         type: string
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
 
 jobs:
   build:
-    name: ${{ matrix.target }}
+    name: build-${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -31,9 +34,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
-
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
 
     steps:
       - name: Checkout
@@ -73,3 +73,33 @@ jobs:
           path: dist/crosspack-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}
           if-no-files-found: error
           retention-days: 30
+
+  publish-release:
+    name: publish-release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: crosspack-${{ env.RELEASE_TAG }}-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum crosspack-${RELEASE_TAG}-* > SHA256SUMS.txt
+
+      - name: Create GitHub release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Crosspack ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: ${{ contains(env.RELEASE_TAG, '-rc') }}
+          files: |
+            release-assets/crosspack-${{ env.RELEASE_TAG }}-*
+            release-assets/SHA256SUMS.txt
