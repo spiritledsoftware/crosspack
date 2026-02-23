@@ -50,6 +50,36 @@ Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** pa
   - Unix: `curl` or `wget`, plus archive tools (`tar`, `unzip`) depending on artifact type.
   - Windows: PowerShell.
 
+## Install (prebuilt binaries)
+
+Use the install scripts for clean one-liners:
+
+### macOS + Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/spiritledsoftware/crosspack/main/scripts/install.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/spiritledsoftware/crosspack/main/scripts/install.ps1 | iex
+```
+
+By default, both scripts install the latest GitHub release.
+
+Optional version pinning:
+- macOS/Linux: set `CROSSPACK_VERSION` before running the one-liner.
+- Windows: download `scripts/install.ps1` and run it with `-Version <tag>`.
+
+After install, add the bin directory to your `PATH`:
+- macOS/Linux: `~/.crosspack/bin`
+- Windows: `%LOCALAPPDATA%\Crosspack\bin`
+
+Notes:
+- Install scripts verify artifact SHA-256 against release `SHA256SUMS.txt`.
+- Current Windows release artifact is `x86_64-pc-windows-msvc`.
+
 ## Quick Start
 
 ### 1) Build and verify CLI
