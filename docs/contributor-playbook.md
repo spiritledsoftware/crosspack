@@ -109,7 +109,7 @@ git checkout --theirs <path>  # prefer incoming version
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   - `cargo test --workspace`
-  - `scripts/validate-snapshot-flow.sh` (SPI-20 follow-through)
+  - `scripts/validate-snapshot-flow.sh` (automated in CI at `.github/workflows/ci.yml`, step `Snapshot-flow validation`)
 - Docs updated for any behavior or contributor-facing changes.
 - Reviewers have approved the PR.
 

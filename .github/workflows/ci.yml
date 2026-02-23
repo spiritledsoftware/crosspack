@@ -35,6 +35,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Snapshot-flow validation
+        if: matrix.os == 'ubuntu-latest'
+        run: scripts/validate-snapshot-flow.sh
+
       - name: Format check
         run: cargo fmt --all --check
 
