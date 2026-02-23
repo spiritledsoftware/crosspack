@@ -2834,10 +2834,11 @@ mod tests {
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        append_transaction_journal_entry, bin_path, read_active_transaction, read_install_receipts,
-        read_transaction_metadata, set_active_transaction, write_install_receipt,
-        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
-        TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+        append_transaction_journal_entry, bin_path, expose_binary, read_active_transaction,
+        read_install_receipts, read_transaction_metadata, set_active_transaction,
+        write_install_receipt, write_transaction_metadata, InstallReason, InstallReceipt,
+        PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
+        UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
