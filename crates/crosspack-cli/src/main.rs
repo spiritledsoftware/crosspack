@@ -6290,9 +6290,9 @@ old-cc = "<2.0.0"
 
         let err = resolve_transaction_snapshot_id(&layout, "install")
             .expect_err("must fail without ready snapshot");
-        assert!(err
-            .to_string()
-            .contains("no configured registry snapshots available; bootstrap trusted source `core`"));
+        assert!(err.to_string().contains(
+            "no configured registry snapshots available; bootstrap trusted source `core`"
+        ));
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
