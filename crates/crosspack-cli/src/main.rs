@@ -26,6 +26,7 @@ use crosspack_registry::{
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
 use semver::{Version, VersionReq};
+use serde_json::Value;
 
 #[derive(Parser, Debug)]
 #[command(name = "crosspack")]
@@ -196,6 +197,20 @@ fn main() -> Result<()> {
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
 
                 for package in &resolved {
+                    let snapshot_path =
+                        capture_package_state_snapshot(&layout, &tx.txid, &package.manifest.name)?;
+                    append_transaction_journal_entry(
+                        &layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!("backup_package_state:{}", package.manifest.name),
+                            state: "done".to_string(),
+                            path: Some(snapshot_path.display().to_string()),
+                        },
+                    )?;
+                    journal_seq += 1;
+
                     append_transaction_journal_entry(
                         &layout,
                         &tx.txid,
@@ -584,6 +599,20 @@ fn run_upgrade_command(
                         }
                     }
 
+                    let snapshot_path =
+                        capture_package_state_snapshot(layout, &tx.txid, &package.manifest.name)?;
+                    append_transaction_journal_entry(
+                        layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: format!("backup_package_state:{}", package.manifest.name),
+                            state: "done".to_string(),
+                            path: Some(snapshot_path.display().to_string()),
+                        },
+                    )?;
+                    journal_seq += 1;
+
                     append_transaction_journal_entry(
                         layout,
                         &tx.txid,
@@ -691,6 +720,23 @@ fn run_upgrade_command(
                                 continue;
                             }
                         }
+
+                        let snapshot_path = capture_package_state_snapshot(
+                            layout,
+                            &tx.txid,
+                            &package.manifest.name,
+                        )?;
+                        append_transaction_journal_entry(
+                            layout,
+                            &tx.txid,
+                            &TransactionJournalEntry {
+                                seq: journal_seq,
+                                step: format!("backup_package_state:{}", package.manifest.name),
+                                state: "done".to_string(),
+                                path: Some(snapshot_path.display().to_string()),
+                            },
+                        )?;
+                        journal_seq += 1;
 
                         append_transaction_journal_entry(
                             layout,
@@ -806,20 +852,14 @@ fn transaction_owner_process_alive(txid: &str) -> Result<bool> {
     }
 }
 
-fn transaction_journal_requires_replay(
+fn read_transaction_journal_records(
     layout: &PrefixLayout,
     txid: &str,
-    operation: &str,
-    status: &str,
-) -> Result<bool> {
+) -> Result<Vec<TransactionJournalRecord>> {
     let path = layout.transaction_journal_path(txid);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(
-                matches!(operation, "uninstall") && matches!(status, "failed" | "rolling_back")
-            );
-        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
             return Err(err).with_context(|| {
                 format!("failed reading transaction journal: {}", path.display())
@@ -827,17 +867,390 @@ fn transaction_journal_requires_replay(
         }
     };
 
-    for line in raw.lines() {
-        if line.contains("\"step\":\"install_package:")
-            || line.contains("\"step\":\"upgrade_package:")
-            || line.contains("\"step\":\"uninstall_target:")
-            || line.contains("\"step\":\"prune_dependency:")
-        {
-            return Ok(true);
+    let mut records = Vec::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value: Value = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "failed parsing transaction journal entry: {} line={}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        let Some(object) = value.as_object() else {
+            return Err(anyhow!(
+                "failed parsing transaction journal entry: {} line={} is not an object",
+                path.display(),
+                line_no + 1
+            ));
+        };
+
+        let seq = object
+            .get("seq")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("missing journal field 'seq' line={}", line_no + 1))?;
+        let step = object
+            .get("step")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing journal field 'step' line={}", line_no + 1))?
+            .to_string();
+        let state = object
+            .get("state")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing journal field 'state' line={}", line_no + 1))?
+            .to_string();
+        let path_value = object
+            .get("path")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+
+        records.push(TransactionJournalRecord {
+            seq,
+            step,
+            state,
+            path: path_value,
+        });
+    }
+
+    records.sort_by_key(|record| record.seq);
+    Ok(records)
+}
+
+fn rollback_package_from_step(step: &str) -> Option<&str> {
+    step.strip_prefix("install_package:")
+        .or_else(|| step.strip_prefix("upgrade_package:"))
+        .or_else(|| step.strip_prefix("uninstall_target:"))
+        .or_else(|| step.strip_prefix("prune_dependency:"))
+}
+
+fn backup_package_from_step(step: &str) -> Option<&str> {
+    step.strip_prefix("backup_package_state:")
+}
+
+fn snapshot_manifest_path(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("manifest.txt")
+}
+
+fn snapshot_package_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("package")
+}
+
+fn snapshot_receipt_path(snapshot_root: &Path, package_name: &str) -> PathBuf {
+    snapshot_root
+        .join("receipt")
+        .join(format!("{package_name}.receipt"))
+}
+
+fn snapshot_bin_path(snapshot_root: &Path, bin_name: &str) -> PathBuf {
+    snapshot_root.join("bins").join(bin_name)
+}
+
+fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifest> {
+    let path = snapshot_manifest_path(snapshot_root);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PackageSnapshotManifest {
+                package_exists: false,
+                receipt_exists: false,
+                bins: Vec::new(),
+            });
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed reading snapshot manifest: {}", path.display()));
+        }
+    };
+
+    let mut manifest = PackageSnapshotManifest {
+        package_exists: false,
+        receipt_exists: false,
+        bins: Vec::new(),
+    };
+
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(value) = line.strip_prefix("package_exists=") {
+            manifest.package_exists = value == "1";
+        } else if let Some(value) = line.strip_prefix("receipt_exists=") {
+            manifest.receipt_exists = value == "1";
+        } else if let Some(bin_name) = line.strip_prefix("bin=") {
+            manifest.bins.push(bin_name.to_string());
         }
     }
 
-    Ok(false)
+    Ok(manifest)
+}
+
+fn write_snapshot_manifest(snapshot_root: &Path, manifest: &PackageSnapshotManifest) -> Result<()> {
+    let path = snapshot_manifest_path(snapshot_root);
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "package_exists={}",
+        if manifest.package_exists { "1" } else { "0" }
+    ));
+    lines.push(format!(
+        "receipt_exists={}",
+        if manifest.receipt_exists { "1" } else { "0" }
+    ));
+    for bin in &manifest.bins {
+        lines.push(format!("bin={bin}"));
+    }
+    std::fs::write(&path, lines.join("\n"))
+        .with_context(|| format!("failed writing snapshot manifest: {}", path.display()))
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(src)
+        .with_context(|| format!("failed to stat source path: {}", src.display()))?;
+
+    if metadata.is_dir() {
+        std::fs::create_dir_all(dst)
+            .with_context(|| format!("failed to create directory: {}", dst.display()))?;
+        for entry in std::fs::read_dir(src)
+            .with_context(|| format!("failed to read directory: {}", src.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to iterate directory: {}", src.display()))?;
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            copy_tree(&child_src, &child_dst)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+    }
+
+    #[cfg(unix)]
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(src)
+            .with_context(|| format!("failed to read symlink: {}", src.display()))?;
+        std::os::unix::fs::symlink(&target, dst).with_context(|| {
+            format!(
+                "failed to copy symlink {} -> {}",
+                dst.display(),
+                target.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    std::fs::copy(src, dst)
+        .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+fn capture_package_state_snapshot(
+    layout: &PrefixLayout,
+    txid: &str,
+    package_name: &str,
+) -> Result<PathBuf> {
+    let snapshot_root = layout
+        .transaction_staging_path(txid)
+        .join("rollback")
+        .join(package_name);
+    if snapshot_root.exists() {
+        std::fs::remove_dir_all(&snapshot_root).with_context(|| {
+            format!(
+                "failed clearing existing rollback snapshot dir: {}",
+                snapshot_root.display()
+            )
+        })?;
+    }
+
+    std::fs::create_dir_all(snapshot_package_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot package dir: {}",
+            snapshot_package_root(&snapshot_root).display()
+        )
+    })?;
+    std::fs::create_dir_all(snapshot_root.join("receipt")).with_context(|| {
+        format!(
+            "failed creating rollback snapshot receipt dir: {}",
+            snapshot_root.join("receipt").display()
+        )
+    })?;
+    std::fs::create_dir_all(snapshot_root.join("bins")).with_context(|| {
+        format!(
+            "failed creating rollback snapshot bins dir: {}",
+            snapshot_root.join("bins").display()
+        )
+    })?;
+
+    let mut manifest = PackageSnapshotManifest {
+        package_exists: false,
+        receipt_exists: false,
+        bins: Vec::new(),
+    };
+
+    let package_root = layout.pkgs_dir().join(package_name);
+    if package_root.exists() {
+        manifest.package_exists = true;
+        copy_tree(&package_root, &snapshot_package_root(&snapshot_root))?;
+    }
+
+    let receipt_path = layout.receipt_path(package_name);
+    if receipt_path.exists() {
+        manifest.receipt_exists = true;
+        std::fs::copy(
+            &receipt_path,
+            snapshot_receipt_path(&snapshot_root, package_name),
+        )
+        .with_context(|| {
+            format!(
+                "failed copying receipt snapshot {}",
+                snapshot_receipt_path(&snapshot_root, package_name).display()
+            )
+        })?;
+
+        if let Some(receipt) = read_install_receipts(layout)?
+            .into_iter()
+            .find(|receipt| receipt.name == package_name)
+        {
+            manifest.bins = receipt.exposed_bins.clone();
+            for bin_name in &manifest.bins {
+                let source = bin_path(layout, bin_name);
+                if source.exists() {
+                    std::fs::copy(&source, snapshot_bin_path(&snapshot_root, bin_name))
+                        .with_context(|| {
+                            format!(
+                                "failed copying binary snapshot {}",
+                                snapshot_bin_path(&snapshot_root, bin_name).display()
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+
+    write_snapshot_manifest(&snapshot_root, &manifest)?;
+    Ok(snapshot_root)
+}
+
+fn restore_package_state_snapshot(
+    layout: &PrefixLayout,
+    package_name: &str,
+    snapshot_root: Option<&Path>,
+) -> Result<()> {
+    let existing_receipt = read_install_receipts(layout)?
+        .into_iter()
+        .find(|receipt| receipt.name == package_name);
+    let existing_bins = existing_receipt
+        .as_ref()
+        .map(|receipt| receipt.exposed_bins.clone())
+        .unwrap_or_default();
+    for bin_name in existing_bins {
+        remove_exposed_binary(layout, &bin_name)?;
+    }
+
+    let package_root = layout.pkgs_dir().join(package_name);
+    if package_root.exists() {
+        std::fs::remove_dir_all(&package_root).with_context(|| {
+            format!("failed to remove package path: {}", package_root.display())
+        })?;
+    }
+
+    remove_file_if_exists(&layout.receipt_path(package_name))?;
+
+    let Some(snapshot_root) = snapshot_root else {
+        return Ok(());
+    };
+
+    let manifest = read_snapshot_manifest(snapshot_root)?;
+    if manifest.package_exists && snapshot_package_root(snapshot_root).exists() {
+        copy_tree(&snapshot_package_root(snapshot_root), &package_root)?;
+    }
+
+    if manifest.receipt_exists {
+        let src = snapshot_receipt_path(snapshot_root, package_name);
+        if src.exists() {
+            if let Some(parent) = layout.receipt_path(package_name).parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::copy(&src, layout.receipt_path(package_name)).with_context(|| {
+                format!(
+                    "failed restoring receipt from {}",
+                    snapshot_receipt_path(snapshot_root, package_name).display()
+                )
+            })?;
+        }
+    }
+
+    for bin_name in manifest.bins {
+        let dst = bin_path(layout, &bin_name);
+        remove_file_if_exists(&dst)?;
+        let src = snapshot_bin_path(snapshot_root, &bin_name);
+        if src.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::copy(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring binary '{}' from {}",
+                    bin_name,
+                    src.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn replay_rollback_journal(layout: &PrefixLayout, txid: &str) -> Result<bool> {
+    let records = read_transaction_journal_records(layout, txid)?;
+    if records.is_empty() {
+        return Ok(false);
+    }
+
+    let mut backups = HashMap::new();
+    for record in &records {
+        if record.state != "done" {
+            continue;
+        }
+        if let Some(package_name) = backup_package_from_step(&record.step) {
+            if let Some(path) = &record.path {
+                backups.insert(package_name.to_string(), PathBuf::from(path));
+            }
+        }
+    }
+
+    let mut compensating_steps = records
+        .iter()
+        .filter(|record| record.state == "done")
+        .filter_map(|record| {
+            rollback_package_from_step(&record.step)
+                .map(|package_name| (record.seq, package_name.to_string()))
+        })
+        .collect::<Vec<_>>();
+    compensating_steps.sort_by(|left, right| right.0.cmp(&left.0));
+
+    if compensating_steps.is_empty() {
+        return Ok(false);
+    }
+
+    for (_, package_name) in &compensating_steps {
+        if !backups.contains_key(package_name) {
+            return Err(anyhow!(
+                "transaction journal missing rollback payload for package '{package_name}'"
+            ));
+        }
+    }
+
+    for (_, package_name) in compensating_steps {
+        let snapshot_root = backups.get(&package_name).map(PathBuf::as_path);
+        restore_package_state_snapshot(layout, &package_name, snapshot_root)?;
+    }
+
+    Ok(true)
 }
 
 fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String>> {
@@ -938,25 +1351,40 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         return Ok(());
     }
 
-    if transaction_journal_requires_replay(
-        layout,
-        &target_txid,
-        &metadata.operation,
-        &metadata.status,
-    )? {
+    set_transaction_status(layout, &target_txid, "rolling_back")?;
+    let replayed = match replay_rollback_journal(layout, &target_txid) {
+        Ok(replayed) => replayed,
+        Err(err) => {
+            let _ = set_transaction_status(layout, &target_txid, "failed");
+            return Err(err).with_context(|| {
+                format!("rollback failed {target_txid}: transaction journal replay required")
+            });
+        }
+    };
+
+    if !replayed
+        && matches!(
+            metadata.operation.as_str(),
+            "install" | "upgrade" | "uninstall"
+        )
+        && matches!(
+            metadata.status.as_str(),
+            "applying" | "rolling_back" | "failed"
+        )
+    {
+        let _ = set_transaction_status(layout, &target_txid, "failed");
         return Err(anyhow!(
             "rollback failed {target_txid}: transaction journal replay required"
         ));
     }
 
-    set_transaction_status(layout, &target_txid, "rolling_back")?;
     set_transaction_status(layout, &target_txid, "rolled_back")?;
 
     if active_txid.as_deref() == Some(target_txid.as_str()) {
         clear_active_transaction(layout)?;
     }
 
-    println!("rolled back transaction {target_txid}");
+    println!("rolled back {target_txid}");
     Ok(())
 }
 
@@ -999,7 +1427,27 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
 
     execute_with_transaction(layout, "uninstall", None, |tx| {
         let mut journal_seq = 1_u64;
+        let mut snapshot_paths = HashMap::new();
+        for receipt in read_install_receipts(layout)? {
+            let snapshot_path = capture_package_state_snapshot(layout, &tx.txid, &receipt.name)?;
+            snapshot_paths.insert(receipt.name, snapshot_path);
+        }
+
         let result = uninstall_package(layout, &name)?;
+
+        if let Some(snapshot_path) = snapshot_paths.get(&name) {
+            append_transaction_journal_entry(
+                layout,
+                &tx.txid,
+                &TransactionJournalEntry {
+                    seq: journal_seq,
+                    step: format!("backup_package_state:{}", name),
+                    state: "done".to_string(),
+                    path: Some(snapshot_path.display().to_string()),
+                },
+            )?;
+            journal_seq += 1;
+        }
 
         append_transaction_journal_entry(
             layout,
@@ -1014,6 +1462,20 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         journal_seq += 1;
 
         for dependency in &result.pruned_dependencies {
+            if let Some(snapshot_path) = snapshot_paths.get(dependency) {
+                append_transaction_journal_entry(
+                    layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: format!("backup_package_state:{dependency}"),
+                        state: "done".to_string(),
+                        path: Some(snapshot_path.display().to_string()),
+                    },
+                )?;
+                journal_seq += 1;
+            }
+
             append_transaction_journal_entry(
                 layout,
                 &tx.txid,
@@ -1355,6 +1817,21 @@ struct UpgradePlan {
     target: Option<String>,
     roots: Vec<RootInstallRequest>,
     root_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TransactionJournalRecord {
+    seq: u64,
+    step: String,
+    state: String,
+    path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PackageSnapshotManifest {
+    package_exists: bool,
+    receipt_exists: bool,
+    bins: Vec<String>,
 }
 
 fn begin_transaction(
@@ -2271,9 +2748,10 @@ mod tests {
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        bin_path, read_active_transaction, read_install_receipts, read_transaction_metadata,
-        set_active_transaction, write_install_receipt, write_transaction_metadata, InstallReason,
-        InstallReceipt, PrefixLayout, TransactionMetadata, UninstallResult, UninstallStatus,
+        append_transaction_journal_entry, bin_path, read_active_transaction, read_install_receipts,
+        read_transaction_metadata, set_active_transaction, write_install_receipt,
+        write_transaction_metadata, InstallReason, InstallReceipt, PrefixLayout,
+        TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -2477,6 +2955,43 @@ mod tests {
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
         set_active_transaction(&layout, "tx-needs-rollback").expect("must write active marker");
 
+        let snapshot_root = layout
+            .transaction_staging_path("tx-needs-rollback")
+            .join("rollback")
+            .join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-needs-rollback",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup journal step");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-needs-rollback",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "upgrade_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating journal step");
+
         run_rollback_command(&layout, None).expect("rollback command must succeed");
 
         let updated = read_transaction_metadata(&layout, "tx-needs-rollback")
@@ -2508,6 +3023,43 @@ mod tests {
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
         set_active_transaction(&layout, "tx-needs-repair").expect("must write active marker");
 
+        let snapshot_root = layout
+            .transaction_staging_path("tx-needs-repair")
+            .join("rollback")
+            .join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-needs-repair",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-needs-repair",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "install_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating step");
+
         run_repair_command(&layout).expect("repair command must succeed");
 
         let updated = read_transaction_metadata(&layout, "tx-needs-repair")
@@ -2538,6 +3090,43 @@ mod tests {
         };
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
         set_active_transaction(&layout, "tx-applying-repair").expect("must write active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path("tx-applying-repair")
+            .join("rollback")
+            .join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-applying-repair",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-applying-repair",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "install_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating step");
 
         run_repair_command(&layout).expect("repair must recover active applying tx");
 
@@ -2591,6 +3180,281 @@ mod tests {
         assert_eq!(updated.status, "failed");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_replays_compensating_steps_and_restores_filesystem_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-replay-filesystem";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_266,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let package_name = "demo";
+        let previous_pkg_file = layout
+            .pkgs_dir()
+            .join(package_name)
+            .join("1.0.0")
+            .join("old.txt");
+        std::fs::create_dir_all(previous_pkg_file.parent().expect("must resolve parent"))
+            .expect("must create old package path");
+        std::fs::write(&previous_pkg_file, "old-state").expect("must write old package marker");
+
+        let previous_receipt = InstallReceipt {
+            name: package_name.to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["demo".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_install_receipt(&layout, &previous_receipt).expect("must write previous receipt");
+        std::fs::write(bin_path(&layout, "demo"), "old-bin").expect("must write old binary");
+
+        let snapshot_root = layout
+            .transaction_staging_path(txid)
+            .join("rollback")
+            .join(package_name);
+        std::fs::create_dir_all(snapshot_root.join("package").join("1.0.0"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipts");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins");
+        std::fs::copy(
+            layout
+                .pkgs_dir()
+                .join(package_name)
+                .join("1.0.0")
+                .join("old.txt"),
+            snapshot_root.join("package").join("1.0.0").join("old.txt"),
+        )
+        .expect("must copy package fixture into snapshot");
+        std::fs::copy(
+            layout.receipt_path(package_name),
+            snapshot_root
+                .join("receipt")
+                .join(format!("{package_name}.receipt")),
+        )
+        .expect("must copy receipt fixture into snapshot");
+        std::fs::copy(
+            bin_path(&layout, "demo"),
+            snapshot_root.join("bins").join("demo"),
+        )
+        .expect("must copy bin fixture into snapshot");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=1\nreceipt_exists=1\nbin=demo\n",
+        )
+        .expect("must write snapshot manifest");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+
+        std::fs::remove_file(bin_path(&layout, "demo")).expect("must remove old binary");
+        std::fs::remove_file(layout.receipt_path(package_name)).expect("must remove old receipt");
+        std::fs::remove_dir_all(layout.pkgs_dir().join(package_name))
+            .expect("must remove old package state");
+        std::fs::create_dir_all(layout.pkgs_dir().join(package_name).join("2.0.0"))
+            .expect("must create new package state");
+        std::fs::write(
+            layout
+                .pkgs_dir()
+                .join(package_name)
+                .join("2.0.0")
+                .join("new.txt"),
+            "new-state",
+        )
+        .expect("must write new package marker");
+        let new_receipt = InstallReceipt {
+            name: package_name.to_string(),
+            version: "2.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["demo".to_string()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 2,
+        };
+        write_install_receipt(&layout, &new_receipt).expect("must write new receipt");
+        std::fs::write(bin_path(&layout, "demo"), "new-bin").expect("must write new binary");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("install_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append mutating step");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback command should replay journal and succeed");
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active marker")
+                .is_none(),
+            "rollback should clear active transaction marker"
+        );
+        assert!(
+            layout
+                .pkgs_dir()
+                .join(package_name)
+                .join("1.0.0")
+                .join("old.txt")
+                .exists(),
+            "rollback should restore previous package tree"
+        );
+        assert!(
+            !layout
+                .pkgs_dir()
+                .join(package_name)
+                .join("2.0.0")
+                .join("new.txt")
+                .exists(),
+            "rollback should remove interrupted package tree"
+        );
+        let restored_receipt = read_install_receipts(&layout).expect("must load receipts");
+        let restored = restored_receipt
+            .iter()
+            .find(|receipt| receipt.name == package_name)
+            .expect("previous receipt must be restored");
+        assert_eq!(restored.version, "1.0.0");
+        assert_eq!(
+            std::fs::read_to_string(bin_path(&layout, "demo")).expect("must read restored binary"),
+            "old-bin"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_repair_command_recovers_interrupted_statuses_when_rollback_possible() {
+        for status in ["planning", "applying", "rolling_back", "failed"] {
+            let layout = test_layout();
+            layout.ensure_base_dirs().expect("must create dirs");
+
+            let txid = format!("tx-repair-{}", status.replace('_', "-"));
+            let metadata = TransactionMetadata {
+                version: 1,
+                txid: txid.clone(),
+                operation: "install".to_string(),
+                status: status.to_string(),
+                started_at_unix: 1_771_001_267,
+                snapshot_id: None,
+            };
+            write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+            set_active_transaction(&layout, &txid).expect("must set active marker");
+
+            let package_name = format!("pkg-{status}");
+            let snapshot_root = layout
+                .transaction_staging_path(&txid)
+                .join("rollback")
+                .join(&package_name);
+            std::fs::create_dir_all(snapshot_root.join("package"))
+                .expect("must create snapshot package directory");
+            std::fs::create_dir_all(snapshot_root.join("receipt"))
+                .expect("must create snapshot receipt directory");
+            std::fs::create_dir_all(snapshot_root.join("bins"))
+                .expect("must create snapshot bins directory");
+            std::fs::write(snapshot_root.join("manifest.txt"), "")
+                .expect("must create placeholder snapshot manifest");
+
+            std::fs::create_dir_all(layout.pkgs_dir().join(&package_name).join("9.9.9"))
+                .expect("must create interrupted package dir");
+            std::fs::write(
+                layout
+                    .pkgs_dir()
+                    .join(&package_name)
+                    .join("9.9.9")
+                    .join("partial.txt"),
+                "interrupted",
+            )
+            .expect("must write interrupted package marker");
+
+            append_transaction_journal_entry(
+                &layout,
+                &txid,
+                &TransactionJournalEntry {
+                    seq: 1,
+                    step: format!("backup_package_state:{package_name}"),
+                    state: "done".to_string(),
+                    path: Some(snapshot_root.display().to_string()),
+                },
+            )
+            .expect("must append backup step");
+            append_transaction_journal_entry(
+                &layout,
+                &txid,
+                &TransactionJournalEntry {
+                    seq: 2,
+                    step: format!("install_package:{package_name}"),
+                    state: "done".to_string(),
+                    path: Some(package_name.clone()),
+                },
+            )
+            .expect("must append interrupted step");
+
+            run_repair_command(&layout)
+                .expect("repair should recover interrupted transaction by rollback replay");
+
+            let updated = read_transaction_metadata(&layout, &txid)
+                .expect("must read updated metadata")
+                .expect("metadata should exist");
+            assert_eq!(updated.status, "rolled_back", "status={status}");
+            assert!(
+                read_active_transaction(&layout)
+                    .expect("must read active transaction")
+                    .is_none(),
+                "status={status}: active marker should be cleared"
+            );
+            assert!(
+                !layout
+                    .pkgs_dir()
+                    .join(&package_name)
+                    .join("9.9.9")
+                    .join("partial.txt")
+                    .exists(),
+                "status={status}: interrupted package state should be rolled back"
+            );
+
+            let _ = std::fs::remove_dir_all(layout.prefix());
+        }
     }
 
     #[test]
@@ -2667,6 +3531,43 @@ mod tests {
         write_transaction_metadata(&layout, &older).expect("must write older metadata");
         write_transaction_metadata(&layout, &newer).expect("must write newer metadata");
 
+        let snapshot_root = layout
+            .transaction_staging_path("tx-new-failed")
+            .join("rollback")
+            .join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-new-failed",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup journal step");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-new-failed",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "upgrade_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating journal step");
+
         run_rollback_command(&layout, None)
             .expect("rollback without active marker should use latest non-final tx");
 
@@ -2699,6 +3600,43 @@ mod tests {
         };
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
         set_active_transaction(&layout, &txid).expect("must write active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(&txid)
+            .join("rollback")
+            .join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            &txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup journal step");
+        append_transaction_journal_entry(
+            &layout,
+            &txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "install_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating journal step");
 
         let err = run_rollback_command(&layout, Some(txid.clone()))
             .expect_err("rollback must reject active applying transactions");
@@ -2734,6 +3672,43 @@ mod tests {
         };
         write_transaction_metadata(&layout, &metadata).expect("must write metadata");
         set_active_transaction(&layout, &txid).expect("must write active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(&txid)
+            .join("rollback")
+            .join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            &txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup journal step");
+        append_transaction_journal_entry(
+            &layout,
+            &txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "install_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating journal step");
 
         run_rollback_command(&layout, Some(txid.clone()))
             .expect("rollback should recover stale active transaction");
