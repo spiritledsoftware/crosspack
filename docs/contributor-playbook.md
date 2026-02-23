@@ -116,12 +116,24 @@ git checkout --theirs <path>  # prefer incoming version
 ### Deploy
 - Merge after approvals, with merge commit policy required by the repo.
 - Confirm cross-platform CI jobs are queued (`ubuntu`, `macOS`, `windows`).
-- Confirm release artifacts are generated with the repo's expected target flags.
+- Run the release workflow at `.github/workflows/release-artifacts.yml` (`https://github.com/spiritledsoftware/crosspack/actions/workflows/release-artifacts.yml`):
+  1. For a final release: push a tag like `v0.2.0` to trigger it automatically.
+  2. For a release candidate: run **Release Artifacts** via manual dispatch and provide `release_tag` (example: `v0.2.0-rc.1`).
+  3. Confirm artifacts exist for all supported targets:
+     - `crosspack-<release_tag>-x86_64-unknown-linux-gnu.tar.gz`
+     - `crosspack-<release_tag>-x86_64-apple-darwin.tar.gz`
+     - `crosspack-<release_tag>-x86_64-pc-windows-msvc.zip`
+  4. Confirm each uploaded artifact name follows `crosspack-<release_tag>-<target>` and is retained for 30 days.
 
 ### Post-launch
 - Monitor CI dashboards for regression windows (especially snapshot checks).
 - Run `scripts/validate-snapshot-flow.sh` before promoting a release candidate.
 - Run `scripts/check-snapshot-mismatch-health.sh` to detect repeated `snapshot-id-mismatch` errors.
+- Promotion steps:
+  1. Validate RC artifacts from **Release Artifacts** job are complete and downloadable.
+  2. Create or move the final `v*` tag to the promoted commit.
+  3. Wait for the tag-triggered release workflow run to finish for all targets.
+  4. Record artifact run URL + checksums in release notes before public announcement.
 - Verify no unexpected snapshot mismatch failures in logs.
 - Capture and triage any failed jobs before public rollout.
 
