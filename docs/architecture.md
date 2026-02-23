@@ -61,6 +61,9 @@ Default user prefixes:
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
 - `list` reads install receipts from `<prefix>/state/installed/`.
+- `completions <bash|zsh|fish|powershell>` prints shell completion scripts for the canonical `crosspack` binary name.
+- `init-shell` remains a PATH-only helper command and does not configure completions.
+- Install scripts attempt best-effort shell setup by generating completion files under `<prefix>/share/completions/` and upserting one managed profile block; failures warn and do not abort install.
 
 ## GA Scope Statement
 

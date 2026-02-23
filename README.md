@@ -74,9 +74,22 @@ Optional version pinning:
 
 Both scripts also bootstrap the trusted default `core` registry source and run `crosspack update` automatically after install.
 
-After install, add the bin directory to your `PATH`:
-- macOS/Linux: `~/.crosspack/bin`
-- Windows: `%LOCALAPPDATA%\Crosspack\bin`
+By default, installers also attempt shell setup:
+- macOS/Linux: detect active shell (`bash`, `zsh`, or `fish`) from `$SHELL`, write completions under `<prefix>/share/completions/`, and upsert one managed block in:
+  - `~/.bashrc`
+  - `~/.zshrc`
+  - `~/.config/fish/config.fish`
+- Windows: write PowerShell completions under `<prefix>\share\completions\crosspack.ps1` and upsert one managed block in `$PROFILE.CurrentUserCurrentHost`.
+
+Opt-out controls:
+- macOS/Linux: set `CROSSPACK_NO_SHELL_SETUP=1`.
+- Windows: run installer with `-NoShellSetup`.
+
+If shell setup cannot run (unsupported shell or profile write issue), install still succeeds and prints manual commands.
+
+After install, verify the bin directory is in your `PATH`:
+- macOS/Linux default bin dir: `~/.crosspack/bin`
+- Windows default bin dir: `%LOCALAPPDATA%\Crosspack\bin`
 
 Notes:
 - Install scripts verify artifact SHA-256 against release `SHA256SUMS.txt`.
@@ -123,13 +136,21 @@ cargo run -p crosspack-cli -- upgrade
 cargo run -p crosspack-cli -- uninstall ripgrep
 ```
 
-### 5) Optional: print PATH setup command
+### 5) Optional: print shell completion script
+
+```bash
+cargo run -p crosspack-cli -- completions bash
+```
+
+Tip: `completions` targets the canonical `crosspack` binary name.
+
+### 6) Optional: print PATH setup command
 
 ```bash
 cargo run -p crosspack-cli -- init-shell
 ```
 
-Tip: `init-shell` prints the command you can add to your shell profile.
+Tip: `init-shell` output is unchanged and prints a PATH command only.
 
 ## Legacy `--registry-root` mode
 
@@ -158,6 +179,7 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 | `rollback [txid]` | Roll back eligible transaction state. |
 | `repair` | Recover stale or failed transaction markers. |
 | `doctor` | Show prefix paths and transaction health. |
+| `completions <bash\|zsh\|fish\|powershell>` | Print shell completion script for the canonical `crosspack` binary. |
 | `init-shell` | Print shell command to add Crosspack bin directory to `PATH`. |
 
 ## Security Model

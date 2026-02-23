@@ -10,10 +10,18 @@ CORE_URL="${CROSSPACK_CORE_URL:-https://github.com/spiritledsoftware/crosspack-r
 CORE_KIND="${CROSSPACK_CORE_KIND:-git}"
 CORE_PRIORITY="${CROSSPACK_CORE_PRIORITY:-100}"
 CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2}"
+SHELL_SETUP_OPT_OUT="${CROSSPACK_NO_SHELL_SETUP:-0}"
+
+SHELL_SETUP_BEGIN="# >>> crosspack shell setup >>>"
+SHELL_SETUP_END="# <<< crosspack shell setup <<<"
 
 err() {
   echo "error: $*" >&2
   exit 1
+}
+
+warn() {
+  echo "warning: $*" >&2
 }
 
 download() {
@@ -39,6 +47,147 @@ sha256_of() {
   else
     err "sha256sum, shasum, or openssl is required for checksum verification"
   fi
+}
+
+print_manual_shell_setup_hints() {
+  echo "Manual shell setup:"
+  echo "  ${BIN_DIR}/crosspack completions <bash|zsh|fish> > ${PREFIX}/share/completions/crosspack.<shell>"
+  echo "  add ${BIN_DIR} to PATH in your shell profile"
+}
+
+upsert_profile_block() {
+  profile_path="$1"
+  block_path="$2"
+  filtered_path="${tmp_dir}/profile-filtered-$$"
+
+  if ! awk -v begin="${SHELL_SETUP_BEGIN}" -v end="${SHELL_SETUP_END}" '
+    $0 == begin { in_block = 1; next }
+    $0 == end { in_block = 0; next }
+    in_block == 0 { print }
+  ' "${profile_path}" > "${filtered_path}"; then
+    rm -f "${filtered_path}"
+    return 1
+  fi
+
+  if [ -s "${filtered_path}" ]; then
+    if ! printf "\n" >> "${filtered_path}"; then
+      rm -f "${filtered_path}"
+      return 1
+    fi
+  fi
+
+  if ! cat "${block_path}" >> "${filtered_path}"; then
+    rm -f "${filtered_path}"
+    return 1
+  fi
+
+  if ! mv "${filtered_path}" "${profile_path}"; then
+    rm -f "${filtered_path}"
+    return 1
+  fi
+
+  return 0
+}
+
+configure_shell_setup() {
+  if [ "${SHELL_SETUP_OPT_OUT}" = "1" ]; then
+    echo "Skipping shell setup because CROSSPACK_NO_SHELL_SETUP=1"
+    return 0
+  fi
+
+  shell_name="${SHELL:-}"
+  shell_name="${shell_name##*/}"
+  profile_path=""
+  completion_extension=""
+  block_path="${tmp_dir}/shell-setup-block"
+  completion_dir="${PREFIX}/share/completions"
+  completion_path=""
+
+  case "${shell_name}" in
+    bash)
+      profile_path="${HOME}/.bashrc"
+      completion_extension="bash"
+      ;;
+    zsh)
+      profile_path="${HOME}/.zshrc"
+      completion_extension="zsh"
+      ;;
+    fish)
+      profile_path="${HOME}/.config/fish/config.fish"
+      completion_extension="fish"
+      ;;
+    *)
+      warn "automatic shell setup skipped: unsupported or unknown shell '${SHELL:-unknown}'"
+      print_manual_shell_setup_hints
+      return 0
+      ;;
+  esac
+
+  completion_path="${completion_dir}/crosspack.${completion_extension}"
+  if ! mkdir -p "${completion_dir}"; then
+    warn "failed creating completion directory at ${completion_dir}"
+    print_manual_shell_setup_hints
+    return 0
+  fi
+
+  if ! "${BIN_DIR}/crosspack" completions "${shell_name}" > "${completion_path}"; then
+    warn "failed generating ${shell_name} completion script at ${completion_path}"
+    print_manual_shell_setup_hints
+    return 0
+  fi
+
+  profile_dir="$(dirname "${profile_path}")"
+  if ! mkdir -p "${profile_dir}"; then
+    warn "failed creating profile directory at ${profile_dir}"
+    print_manual_shell_setup_hints
+    return 0
+  fi
+
+  if [ ! -f "${profile_path}" ]; then
+    if ! touch "${profile_path}"; then
+      warn "failed creating shell profile at ${profile_path}"
+      print_manual_shell_setup_hints
+      return 0
+    fi
+  fi
+
+  case "${shell_name}" in
+    bash|zsh)
+      cat > "${block_path}" <<EOF
+${SHELL_SETUP_BEGIN}
+if [ -d "${BIN_DIR}" ] && [ ":\$PATH:" != *":${BIN_DIR}:"* ]; then
+  export PATH="${BIN_DIR}:\$PATH"
+fi
+if [ -f "${completion_path}" ]; then
+  . "${completion_path}"
+fi
+${SHELL_SETUP_END}
+EOF
+      ;;
+    fish)
+      cat > "${block_path}" <<EOF
+${SHELL_SETUP_BEGIN}
+if test -d "${BIN_DIR}"
+    if not contains -- "${BIN_DIR}" \$PATH
+        set -gx PATH "${BIN_DIR}" \$PATH
+    end
+end
+if test -f "${completion_path}"
+    source "${completion_path}"
+end
+${SHELL_SETUP_END}
+EOF
+      ;;
+  esac
+
+  if ! upsert_profile_block "${profile_path}" "${block_path}"; then
+    warn "failed updating shell profile at ${profile_path}"
+    print_manual_shell_setup_hints
+    return 0
+  fi
+
+  echo "Configured ${shell_name} shell profile: ${profile_path}"
+  echo "Installed ${shell_name} completions: ${completion_path}"
 }
 
 os="$(uname -s)"
@@ -123,6 +272,8 @@ else
 fi
 
 "${BIN_DIR}/crosspack" update >/dev/null
+
+configure_shell_setup
 
 echo "Installed crosspack (${VERSION}) to ${BIN_DIR}"
 echo "Configured registry source '${CORE_NAME}' and refreshed snapshots."

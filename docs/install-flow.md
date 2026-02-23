@@ -86,6 +86,21 @@
 - `crosspack upgrade` fails if grouped solves would touch the same package name across different targets; with current package-name keyed state, use separate prefixes for cross-target installs.
 - If a package is already current (or only older/equal versions match constraints), upgrade reports it as up to date.
 
+## Shell Setup and Completions
+
+- `crosspack completions <bash|zsh|fish|powershell>` prints completion scripts to stdout.
+- Completion generation targets the canonical `crosspack` command name.
+- `crosspack init-shell` remains PATH-only output and does not emit completion setup.
+- Unix installer (`scripts/install.sh`) auto-detects shell from `$SHELL` (`bash`, `zsh`, or `fish`) and, by default:
+  - writes completion scripts to `<prefix>/share/completions/crosspack.<shell>`,
+  - creates or updates a single managed profile block in `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`,
+  - ensures PATH setup and completion sourcing are idempotent.
+- Windows installer (`scripts/install.ps1`) writes PowerShell completion script to `<prefix>\share\completions\crosspack.ps1` and updates `$PROFILE.CurrentUserCurrentHost` with one managed block for PATH + completion sourcing.
+- Installer shell setup is best-effort: unsupported shells or profile write failures print warnings and manual commands, but installation still succeeds.
+- Opt out of installer shell setup with:
+  - Unix: `CROSSPACK_NO_SHELL_SETUP=1`
+  - Windows: `-NoShellSetup`
+
 ## Forward-Looking Extensions
 
 The current flow is the v0.3 baseline. Planned extensions are specified in:

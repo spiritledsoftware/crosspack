@@ -8,7 +8,8 @@ use std::process::Command;
 use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use crosspack_core::{ArchiveType, Artifact, PackageManifest};
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
@@ -87,6 +88,9 @@ enum Commands {
         registry: Vec<String>,
     },
     Doctor,
+    Completions {
+        shell: CliCompletionShell,
+    },
     InitShell,
 }
 
@@ -116,11 +120,30 @@ enum CliRegistryKind {
     Filesystem,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum CliCompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
+
 impl From<CliRegistryKind> for RegistrySourceKind {
     fn from(value: CliRegistryKind) -> Self {
         match value {
             CliRegistryKind::Git => RegistrySourceKind::Git,
             CliRegistryKind::Filesystem => RegistrySourceKind::Filesystem,
+        }
+    }
+}
+
+impl From<CliCompletionShell> for Shell {
+    fn from(value: CliCompletionShell) -> Self {
+        match value {
+            CliCompletionShell::Bash => Shell::Bash,
+            CliCompletionShell::Zsh => Shell::Zsh,
+            CliCompletionShell::Fish => Shell::Fish,
+            CliCompletionShell::Powershell => Shell::PowerShell,
         }
     }
 }
@@ -359,6 +382,10 @@ fn main() -> Result<()> {
             println!("cache: {}", layout.cache_dir().display());
             println!("{}", doctor_transaction_health_line(&layout)?);
         }
+        Commands::Completions { shell } => {
+            let mut stdout = std::io::stdout();
+            write_completions_script(shell, &mut stdout)?;
+        }
         Commands::InitShell => {
             let prefix = default_user_prefix()?;
             let bin = PrefixLayout::new(prefix).bin_dir();
@@ -370,6 +397,13 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn write_completions_script<W: Write>(shell: CliCompletionShell, writer: &mut W) -> Result<()> {
+    let mut command = Cli::command();
+    let generator: Shell = shell.into();
+    clap_complete::generate(generator, &mut command, "crosspack", writer);
     Ok(())
 }
 
@@ -2888,8 +2922,8 @@ mod tests {
         resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
         run_uninstall_command, run_update_command, run_upgrade_command, select_manifest_with_pin,
         select_metadata_backend, set_transaction_status, update_failure_reason_code,
-        validate_binary_preflight, validate_provider_overrides_used, Cli, CliRegistryKind,
-        Commands, MetadataBackend, ResolvedInstall,
+        validate_binary_preflight, validate_provider_overrides_used, write_completions_script, Cli,
+        CliCompletionShell, CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -5667,6 +5701,84 @@ ripgrep-legacy = "*"
                 assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_completions_for_each_supported_shell() {
+        let cases = vec![
+            ("bash", CliCompletionShell::Bash),
+            ("zsh", CliCompletionShell::Zsh),
+            ("fish", CliCompletionShell::Fish),
+            ("powershell", CliCompletionShell::Powershell),
+        ];
+
+        for (shell, expected) in cases {
+            let cli =
+                Cli::try_parse_from(["crosspack", "completions", shell]).expect("command parses");
+            match cli.command {
+                Commands::Completions { shell } => {
+                    assert_eq!(shell, expected);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_rejects_completions_without_shell() {
+        let err = Cli::try_parse_from(["crosspack", "completions"])
+            .expect_err("missing shell argument must fail");
+        assert!(err.to_string().contains("<SHELL>"));
+    }
+
+    #[test]
+    fn cli_rejects_unsupported_completion_shell() {
+        let err = Cli::try_parse_from(["crosspack", "completions", "elvish"])
+            .expect_err("unsupported shell must fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("elvish"));
+        assert!(rendered.contains("possible values"));
+    }
+
+    #[test]
+    fn generate_completions_outputs_non_empty_script_for_each_shell() {
+        let shells = [
+            CliCompletionShell::Bash,
+            CliCompletionShell::Zsh,
+            CliCompletionShell::Fish,
+            CliCompletionShell::Powershell,
+        ];
+
+        for shell in shells {
+            let mut output = Vec::new();
+            write_completions_script(shell, &mut output)
+                .expect("completion script generation should succeed");
+            assert!(
+                !output.is_empty(),
+                "completion script should not be empty for {shell:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_completions_uses_crosspack_command_name() {
+        let shells = [
+            CliCompletionShell::Bash,
+            CliCompletionShell::Zsh,
+            CliCompletionShell::Fish,
+            CliCompletionShell::Powershell,
+        ];
+
+        for shell in shells {
+            let mut output = Vec::new();
+            write_completions_script(shell, &mut output)
+                .expect("completion script generation should succeed");
+            let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+            assert!(
+                rendered.contains("crosspack"),
+                "completion script should target canonical binary name for {shell:?}"
+            );
         }
     }
 
