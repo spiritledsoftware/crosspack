@@ -31,6 +31,12 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive_ext: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive_ext: tar.gz
           - os: macos-13
             target: x86_64-apple-darwin
             archive_ext: tar.gz
@@ -53,8 +59,26 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install musl toolchain helpers
+        if: runner.os == 'Linux' && contains(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build release binary
-        run: cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-musl)
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+                cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+              ;;
+            aarch64-unknown-linux-musl)
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+                cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+              ;;
+            *)
+              cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+              ;;
+          esac
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
