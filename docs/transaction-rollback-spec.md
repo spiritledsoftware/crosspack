@@ -2,6 +2,8 @@
 
 This document defines v0.5 transactional behavior for Crosspack installs, upgrades, and uninstalls. It adds crash recovery, rollback support, and reproducibility metadata so state transitions are safe and auditable.
 
+**Status:** roadmap draft (non-GA). This document is a design target and does not change shipped GA guarantees until implementation is merged and released.
+
 ## Scope
 
 This spec covers:

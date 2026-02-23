@@ -33,6 +33,16 @@ Interpretation:
 - `WARN`: validation passed but environment or speed hints were raised; review and address when practical.
 - `CRIT`: one or more snapshot consistency checks failed; release must not proceed until fixed.
 
+## Docs-Claim Verification Pass (SPI-23)
+
+Before release promotion, run a docs-claim pass to ensure launch-facing wording only promises shipped GA behavior:
+
+- Confirm README and architecture docs describe current v0.3 shipped scope.
+- Confirm v0.4/v0.5 specs are labeled as roadmap drafts (non-GA).
+- Confirm command examples/help text do not imply unimplemented guarantees.
+
+If any claim is ambiguous, fix docs before continuing release promotion.
+
 ## Snapshot Mismatch Health Check (SPI-21)
 
 Validate that release telemetry is not showing repeated `snapshot-id-mismatch` errors:

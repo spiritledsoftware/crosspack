@@ -62,11 +62,17 @@ Default user prefixes:
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
 - `list` reads install receipts from `<prefix>/state/installed/`.
 
+## GA Scope Statement
+
+This architecture document describes current shipped behavior unless explicitly marked otherwise.
+
+Roadmap specs (v0.4/v0.5) are design targets and non-GA until merged and validated in current command behavior/tests.
+
 ## Deferred Items
 
 - Multi-profile uninstall policies beyond root/dependency receipts.
 
-## Milestone Specs
+## Milestone Specs (Roadmap, non-GA)
 
 The next architecture milestones are specified in dedicated docs. These are design targets and are not fully implemented yet.
 

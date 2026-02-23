@@ -23,6 +23,16 @@ Crosspack exists to provide a native package manager with first-class Windows, m
 - Trust-pinned metadata: registry key fingerprint pinning plus fail-closed metadata verification.
 - Clear crate boundaries: CLI orchestration separated from focused domain crates.
 
+## GA scope (shipped in v0.3)
+
+The current GA scope is the behavior implemented in this repository today (v0.3 baseline):
+- source management with trusted fingerprint pinning (`registry add/list/remove`, `update`)
+- strict registry metadata signature verification (`registry.pub` + `<version>.toml.sig`)
+- deterministic metadata reads from verified local snapshots
+- install/upgrade/uninstall lifecycle with receipts, pins, and transaction recovery commands (`rollback`, `repair`, `doctor`)
+
+Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** part of current GA guarantees.
+
 ## Current capabilities
 
 - Search and inspect package metadata from verified local snapshots.
@@ -191,12 +201,14 @@ scripts/validate-snapshot-flow.sh
 - `docs/manifest-spec.md` - manifest schema.
 - `docs/source-management-spec.md` - v0.3 source-management design.
 - `docs/registry-bootstrap-runbook.md` - trusted default source bootstrap, rotation, and failure recovery.
-- `docs/dependency-policy-spec.md` - dependency policy and providers (v0.4 target).
-- `docs/transaction-rollback-spec.md` - transaction and recovery model (v0.5 target).
+- `docs/dependency-policy-spec.md` - dependency policy and providers roadmap spec (v0.4 draft, non-GA).
+- `docs/transaction-rollback-spec.md` - transaction and recovery roadmap spec (v0.5 draft, non-GA).
 
 ## Roadmap Notes
 
-Crosspack is developed in incremental milestones. The current implementation includes core source management, strict metadata verification, and transaction foundations. Roadmap specs in `docs/` document planned v0.4 and v0.5 behavior.
+Crosspack is developed in incremental milestones. The current implementation includes core source management, strict metadata verification, and transaction foundations.
+
+Roadmap specs in `docs/` (for example v0.4/v0.5 design docs) are planning documents only and must not be read as shipped GA commitments.
 
 ## Contributing
 
