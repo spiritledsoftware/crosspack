@@ -45,13 +45,20 @@ cargo build --workspace
 cargo run -p crosspack-cli -- --help
 ```
 
-### 2) Configure a registry source (default workflow)
+### 2) Bootstrap the trusted default source (`core`)
+
+Before first metadata use, verify the published fingerprint in both channels:
+
+- `docs/trust/core-registry-fingerprint.txt` in this repository.
+- Matching GitHub Release note entry for the same `updated_at` and `key_id`.
 
 ```bash
-cargo run -p crosspack-cli -- registry add core https://example.test/crosspack-index.git --kind git --priority 100 --fingerprint <64-hex>
+cargo run -p crosspack-cli -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint 65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2
 cargo run -p crosspack-cli -- update
 cargo run -p crosspack-cli -- registry list
 ```
+
+For operator and support procedures, see `docs/registry-bootstrap-runbook.md`.
 
 ### 3) Discover and install packages
 
@@ -117,6 +124,13 @@ Crosspack verifies both metadata and artifacts:
 - Artifacts are verified with SHA-256 before extraction.
 - Install state is tracked via receipts and transaction metadata under the prefix state directory.
 
+### Trusted default source and fingerprint channel
+
+- Official default source name: `core`.
+- Official source kind and URL: `git` at `https://github.com/spiritledsoftware/crosspack-registry.git`.
+- Official fingerprint distribution channel: `docs/trust/core-registry-fingerprint.txt` plus a matching GitHub Release note entry.
+- Bootstrap and rotation troubleshooting: `docs/registry-bootstrap-runbook.md`.
+
 Trust boundary note:
 - If the entire registry root content (including `registry.pub`) is compromised, authenticity cannot be guaranteed for that compromised root.
 
@@ -172,6 +186,7 @@ scripts/validate-snapshot-flow.sh
 - `docs/registry-spec.md` - source and snapshot model.
 - `docs/manifest-spec.md` - manifest schema.
 - `docs/source-management-spec.md` - v0.3 source-management design.
+- `docs/registry-bootstrap-runbook.md` - trusted default source bootstrap, rotation, and failure recovery.
 - `docs/dependency-policy-spec.md` - dependency policy and providers (v0.4 target).
 - `docs/transaction-rollback-spec.md` - transaction and recovery model (v0.5 target).
 
