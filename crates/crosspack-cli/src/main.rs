@@ -1140,7 +1140,10 @@ fn binary_entry_points_to_package_root(bin_entry: &Path, package_root: &Path) ->
             .with_context(|| format!("failed to inspect binary entry: {}", bin_entry.display()))?;
         if metadata.file_type().is_symlink() {
             let target = std::fs::read_link(bin_entry).with_context(|| {
-                format!("failed to read binary symlink target: {}", bin_entry.display())
+                format!(
+                    "failed to read binary symlink target: {}",
+                    bin_entry.display()
+                )
             })?;
             let resolved = if target.is_absolute() {
                 target
@@ -1185,19 +1188,30 @@ fn binary_entry_points_to_package_root(bin_entry: &Path, package_root: &Path) ->
     }
 }
 
-fn remove_binary_entries_for_package_root(layout: &PrefixLayout, package_root: &Path) -> Result<()> {
+fn remove_binary_entries_for_package_root(
+    layout: &PrefixLayout,
+    package_root: &Path,
+) -> Result<()> {
     let entries = match std::fs::read_dir(layout.bin_dir()) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to read bin directory: {}", layout.bin_dir().display()));
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to read bin directory: {}",
+                    layout.bin_dir().display()
+                )
+            });
         }
     };
 
     for entry in entries {
-        let entry =
-            entry.with_context(|| format!("failed to iterate bin directory: {}", layout.bin_dir().display()))?;
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to iterate bin directory: {}",
+                layout.bin_dir().display()
+            )
+        })?;
         let path = entry.path();
         if binary_entry_points_to_package_root(&path, package_root)? {
             remove_file_if_exists(&path)?;
@@ -3598,7 +3612,10 @@ mod tests {
         std::fs::write(install_root.join("demo"), "new-bin").expect("must write binary payload");
         expose_binary(&layout, &install_root, "demo", "demo")
             .expect("must expose binary without receipt");
-        assert!(bin_path(&layout, "demo").exists(), "binary should exist before rollback");
+        assert!(
+            bin_path(&layout, "demo").exists(),
+            "binary should exist before rollback"
+        );
 
         append_transaction_journal_entry(
             &layout,
