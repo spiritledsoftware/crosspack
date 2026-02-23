@@ -72,3 +72,8 @@ The next architecture milestones are specified in dedicated docs. These are desi
 
 - Dependency policy (`provides`, `conflicts`, `replaces`) and provider resolution: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery: `docs/transaction-rollback-spec.md`.
+
+## Project Resources
+
+- Contributor onboarding and PR flow: `docs/contributor-playbook.md`
+- Release readiness flow and snapshot post-merge validation: `docs/release-checklist.md`
