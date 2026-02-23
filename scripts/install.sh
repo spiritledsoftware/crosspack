@@ -5,6 +5,11 @@ REPO="${CROSSPACK_REPO:-spiritledsoftware/crosspack}"
 VERSION="${CROSSPACK_VERSION:-}"
 PREFIX="${CROSSPACK_PREFIX:-$HOME/.crosspack}"
 BIN_DIR="${CROSSPACK_BIN_DIR:-$PREFIX/bin}"
+CORE_NAME="${CROSSPACK_CORE_NAME:-core}"
+CORE_URL="${CROSSPACK_CORE_URL:-https://github.com/spiritledsoftware/crosspack-registry.git}"
+CORE_KIND="${CROSSPACK_CORE_KIND:-git}"
+CORE_PRIORITY="${CROSSPACK_CORE_PRIORITY:-100}"
+CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2}"
 
 err() {
   echo "error: $*" >&2
@@ -106,5 +111,19 @@ else
   cp "${BIN_DIR}/crosspack" "${BIN_DIR}/cpk"
 fi
 
+echo "==> Configuring default registry source (${CORE_NAME})"
+if "${BIN_DIR}/crosspack" registry add "${CORE_NAME}" "${CORE_URL}" --kind "${CORE_KIND}" --priority "${CORE_PRIORITY}" --fingerprint "${CORE_FINGERPRINT}" >/dev/null 2>&1; then
+  echo "Added registry source '${CORE_NAME}'"
+else
+  if "${BIN_DIR}/crosspack" registry list 2>/dev/null | grep -q "${CORE_NAME}"; then
+    echo "Registry source '${CORE_NAME}' already present"
+  else
+    err "failed to configure registry source '${CORE_NAME}'"
+  fi
+fi
+
+"${BIN_DIR}/crosspack" update >/dev/null
+
 echo "Installed crosspack (${VERSION}) to ${BIN_DIR}"
+echo "Configured registry source '${CORE_NAME}' and refreshed snapshots."
 echo "Add ${BIN_DIR} to PATH if needed."

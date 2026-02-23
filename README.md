@@ -72,6 +72,8 @@ Optional version pinning:
 - macOS/Linux: set `CROSSPACK_VERSION` before running the one-liner.
 - Windows: download `scripts/install.ps1` and run it with `-Version <tag>`.
 
+Both scripts also bootstrap the trusted default `core` registry source and run `crosspack update` automatically after install.
+
 After install, add the bin directory to your `PATH`:
 - macOS/Linux: `~/.crosspack/bin`
 - Windows: `%LOCALAPPDATA%\Crosspack\bin`
