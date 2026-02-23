@@ -8,6 +8,10 @@ Crosspack is designed to be deterministic, secure by default, and practical for 
 - SHA-256 artifact verification
 - transaction-aware install, upgrade, and uninstall lifecycle
 
+CLI binaries:
+- `crosspack` (canonical)
+- `cpk` (short alias)
+
 ## Why Crosspack
 
 Crosspack exists to provide a native package manager with first-class Windows, macOS, and Linux behavior, without wrapping another ecosystem's package manager.
