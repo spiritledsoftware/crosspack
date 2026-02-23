@@ -52,27 +52,31 @@ Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** pa
 
 ## Install (prebuilt binaries)
 
-Latest release in examples below: `v0.0.3`.
+Use the install scripts for clean one-liners:
 
-### macOS + Linux (one-liner)
+### macOS + Linux
 
 ```bash
-VERSION=v0.0.3; OS=$(uname -s); ARCH=$(uname -m); case "$ARCH" in x86_64|amd64) ARCH=x86_64 ;; arm64|aarch64) ARCH=aarch64 ;; *) echo "Unsupported arch: $ARCH"; exit 1 ;; esac; case "$OS" in Darwin) TARGET="${ARCH}-apple-darwin" ;; Linux) if ldd --version 2>&1 | grep -qi musl; then TARGET="${ARCH}-unknown-linux-musl"; else TARGET="${ARCH}-unknown-linux-gnu"; fi ;; *) echo "Unsupported OS: $OS"; exit 1 ;; esac; URL="https://github.com/spiritledsoftware/crosspack/releases/download/${VERSION}/crosspack-${VERSION}-${TARGET}.tar.gz"; TMP=$(mktemp -d); curl -fsSL "$URL" -o "$TMP/crosspack.tgz"; tar -xzf "$TMP/crosspack.tgz" -C "$TMP"; mkdir -p "$HOME/.crosspack/bin"; install -m 755 "$TMP/crosspack" "$HOME/.crosspack/bin/crosspack"; ln -sf "$HOME/.crosspack/bin/crosspack" "$HOME/.crosspack/bin/cpk"; rm -rf "$TMP"; echo "Installed crosspack to $HOME/.crosspack/bin"
+curl -fsSL https://raw.githubusercontent.com/spiritledsoftware/crosspack/main/scripts/install.sh | sh
 ```
 
-### Windows (PowerShell one-liner)
+### Windows (PowerShell)
 
 ```powershell
-$v='v0.0.3'; $u="https://github.com/spiritledsoftware/crosspack/releases/download/$v/crosspack-$v-x86_64-pc-windows-msvc.zip"; $d=Join-Path $env:TEMP 'crosspack-install'; Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path $d | Out-Null; Invoke-WebRequest -Uri $u -OutFile (Join-Path $d 'crosspack.zip'); Expand-Archive -Path (Join-Path $d 'crosspack.zip') -DestinationPath $d -Force; $bin=Join-Path $env:LOCALAPPDATA 'Crosspack\bin'; New-Item -ItemType Directory -Force -Path $bin | Out-Null; Copy-Item (Join-Path $d 'crosspack.exe') (Join-Path $bin 'crosspack.exe') -Force; Copy-Item (Join-Path $d 'crosspack.exe') (Join-Path $bin 'cpk.exe') -Force; Remove-Item $d -Recurse -Force; Write-Host "Installed Crosspack to $bin"
+irm https://raw.githubusercontent.com/spiritledsoftware/crosspack/main/scripts/install.ps1 | iex
 ```
+
+Optional version pinning:
+- macOS/Linux: `CROSSPACK_VERSION=v0.0.3` before running the one-liner.
+- Windows: download `scripts/install.ps1` and run it with `-Version v0.0.3`.
 
 After install, add the bin directory to your `PATH`:
 - macOS/Linux: `~/.crosspack/bin`
 - Windows: `%LOCALAPPDATA%\Crosspack\bin`
 
 Notes:
+- Install scripts verify artifact SHA-256 against release `SHA256SUMS.txt`.
 - Current Windows release artifact is `x86_64-pc-windows-msvc`.
-- If your shell does not have `curl`, use `wget` in the macOS/Linux flow.
 
 ## Quick Start
 
