@@ -34,6 +34,28 @@
 
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 
+## Transaction Phases and Recovery (current v0.3)
+
+Crosspack executes install/upgrade mutations under a transaction state machine with persisted status markers:
+
+1. `planning`: resolve graph, artifact selection, and preflight checks.
+2. `applying`: stage/extract/apply package and binary mutations.
+3. `rolling_back` (only on failure/interruption): reverse applied steps to restore a consistent prefix.
+4. `completed` or terminal failure marker after rollback attempt.
+
+Operator commands:
+- `rollback [txid]`: replay rollback for eligible interrupted/failed transactions.
+- `repair`: clear stale markers and reconcile recoverable interrupted state.
+- `doctor`: surface transaction health and prefix diagnostics.
+
+## Planned Dependency Policy Extensions (non-GA)
+
+The following install-flow extensions are planned in `docs/dependency-policy-spec.md` and are not GA behavior yet:
+
+- provider capability selection (`provides`) with deterministic tie-breaks,
+- conflict gating (`conflicts`) during resolution/apply preflight,
+- replacement semantics (`replaces`) with ownership-aware binary handoff.
+
 ## Receipt Fields
 
 - `name`
@@ -92,3 +114,7 @@ The current flow is the v0.3 baseline. Planned extensions are specified in:
 
 - Dependency policy and replacement/provider behavior: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery behavior: `docs/transaction-rollback-spec.md`.
+
+Related docs:
+- Runtime architecture: `docs/architecture.md`
+- Manifest field and signing semantics: `docs/manifest-spec.md`

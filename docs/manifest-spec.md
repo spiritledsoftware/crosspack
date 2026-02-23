@@ -34,6 +34,7 @@ Each package version is represented by a TOML manifest stored in the registry in
 - Sidecar signatures are stored as hex-encoded detached signature bytes.
 - Commands that rely on registry metadata fail closed on missing/invalid key or signature material.
 - `artifact.signature` is separate from registry metadata sidecar signatures and applies only to downloaded artifacts.
+- As of current GA behavior, registry metadata sidecar signatures are required and enforced; `artifact.signature` remains optional metadata and is not a prerequisite for install success.
 
 ## Planned Policy Extensions
 
@@ -42,9 +43,16 @@ The following schema and policy additions are planned but not part of the v0.2 b
 - v0.3 source management is an index/snapshot workflow change and does not add or modify manifest fields.
 
 - v0.4 dependency policy fields (`provides`, `conflicts`, `replaces`): `docs/dependency-policy-spec.md`.
-- v0.5 optional artifact signature enforcement policy details: `docs/transaction-rollback-spec.md`.
+- Optional artifact signature enforcement policy details are planned for a future manifest/security spec update (non-GA; no enforcement in current release).
 
 Until these milestones land, manifests should use the current v0.2 field set documented above.
+
+## Related Docs
+
+- Current install/runtime behavior: `docs/install-flow.md`
+- Current architecture/module boundaries: `docs/architecture.md`
+- Roadmap dependency policy (non-GA): `docs/dependency-policy-spec.md`
+- Roadmap transaction policy (non-GA): `docs/transaction-rollback-spec.md`
 
 ### Artifact Binary Fields
 

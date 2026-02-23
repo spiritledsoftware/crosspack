@@ -111,6 +111,11 @@ git checkout --theirs <path>  # prefer incoming version
   - `cargo test --workspace`
   - `scripts/validate-snapshot-flow.sh` (automated in CI at `.github/workflows/ci.yml`, step `Snapshot-flow validation`)
 - Docs updated for any behavior or contributor-facing changes.
+- For install/resolver/transaction changes, reconcile:
+  - `docs/architecture.md`
+  - `docs/install-flow.md`
+  - `docs/manifest-spec.md`
+  and mark non-shipped spec sections explicitly as planned.
 - Reviewers have approved the PR.
 
 ### Deploy

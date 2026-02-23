@@ -40,6 +40,10 @@ Before release promotion, run a docs-claim pass to ensure launch-facing wording 
 - Confirm README and architecture docs describe current v0.3 shipped scope.
 - Confirm v0.4/v0.5 specs are labeled as roadmap drafts (non-GA).
 - Confirm command examples/help text do not imply unimplemented guarantees.
+- Reconcile this docs set before promotion:
+  - `docs/architecture.md`
+  - `docs/install-flow.md`
+  - `docs/manifest-spec.md`
 
 If any claim is ambiguous, fix docs before continuing release promotion.
 
