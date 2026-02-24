@@ -95,6 +95,12 @@ enum Commands {
         #[arg(long = "registry")]
         registry: Vec<String>,
     },
+    SelfUpdate {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        force_redownload: bool,
+    },
     Doctor,
     Version,
     Completions {
@@ -438,6 +444,19 @@ fn main() -> Result<()> {
             let source_state_root = registry_state_root(&layout);
             let store = RegistrySourceStore::new(&source_state_root);
             run_update_command(&store, &registry)?;
+        }
+        Commands::SelfUpdate {
+            dry_run,
+            force_redownload,
+        } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_self_update_command(
+                &layout,
+                cli.registry_root.as_deref(),
+                dry_run,
+                force_redownload,
+            )?;
         }
         Commands::Doctor => {
             let prefix = default_user_prefix()?;
@@ -2154,6 +2173,62 @@ fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Resul
     ensure_update_succeeded(report.failed)
 }
 
+fn run_self_update_command(
+    layout: &PrefixLayout,
+    registry_root: Option<&Path>,
+    dry_run: bool,
+    force_redownload: bool,
+) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    ensure_no_active_transaction_for(layout, "self-update")?;
+
+    if registry_root.is_none() {
+        let source_state_root = registry_state_root(layout);
+        let store = RegistrySourceStore::new(&source_state_root);
+        run_update_command(&store, &[])?;
+    }
+
+    let args = build_self_update_install_args(registry_root, dry_run, force_redownload);
+    run_current_exe_command(&args, "self-update install")
+}
+
+fn build_self_update_install_args(
+    registry_root: Option<&Path>,
+    dry_run: bool,
+    force_redownload: bool,
+) -> Vec<OsString> {
+    let mut args = Vec::new();
+    if let Some(root) = registry_root {
+        args.push(OsString::from("--registry-root"));
+        args.push(root.as_os_str().to_os_string());
+    }
+
+    args.push(OsString::from("install"));
+    args.push(OsString::from("crosspack"));
+
+    if dry_run {
+        args.push(OsString::from("--dry-run"));
+    }
+    if force_redownload {
+        args.push(OsString::from("--force-redownload"));
+    }
+
+    args
+}
+
+fn run_current_exe_command(args: &[OsString], context: &str) -> Result<()> {
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let status = Command::new(&current_exe)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to launch {} via {}", context, current_exe.display()))?;
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow!("{} failed with status {}", context, status))
+}
+
 fn format_registry_kind(kind: RegistrySourceKind) -> &'static str {
     match kind {
         RegistrySourceKind::Git => "git",
@@ -3726,18 +3801,19 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 mod tests {
     use super::{
         apply_provider_override, apply_replacement_handoff, begin_transaction,
-        build_transaction_preview, build_update_report, build_upgrade_plans, build_upgrade_roots,
-        collect_replacement_receipts, current_unix_timestamp, determine_install_reason,
-        doctor_transaction_health_line, enforce_disjoint_multi_target_upgrade,
-        enforce_no_downgrades, ensure_no_active_transaction, ensure_no_active_transaction_for,
-        ensure_update_succeeded, ensure_upgrade_command_ready, execute_with_transaction,
-        format_info_lines, format_registry_add_lines, format_registry_list_lines,
-        format_registry_list_snapshot_state, format_registry_remove_lines, format_search_results,
-        format_uninstall_messages, format_update_summary_line, normalize_command_token,
-        parse_pin_spec, parse_provider_overrides, registry_state_root,
-        render_transaction_preview_lines, resolve_init_shell, resolve_transaction_snapshot_id,
-        run_repair_command, run_rollback_command, run_search_command, run_uninstall_command,
-        run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
+        build_self_update_install_args, build_transaction_preview, build_update_report,
+        build_upgrade_plans, build_upgrade_roots, collect_replacement_receipts,
+        current_unix_timestamp, determine_install_reason, doctor_transaction_health_line,
+        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
+        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
+        execute_with_transaction, format_info_lines, format_registry_add_lines,
+        format_registry_list_lines, format_registry_list_snapshot_state,
+        format_registry_remove_lines, format_search_results, format_uninstall_messages,
+        format_update_summary_line, normalize_command_token, parse_pin_spec,
+        parse_provider_overrides, registry_state_root, render_transaction_preview_lines,
+        resolve_init_shell, resolve_transaction_snapshot_id, run_repair_command,
+        run_rollback_command, run_search_command, run_uninstall_command, run_update_command,
+        run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
         set_transaction_status, update_failure_reason_code, validate_binary_preflight,
         validate_completion_preflight, validate_install_preflight_for_resolved,
         validate_provider_overrides_used, write_completions_script, Cli, CliCompletionShell,
@@ -6774,9 +6850,62 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn cli_parses_self_update_with_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "self-update",
+            "--dry-run",
+            "--force-redownload",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::SelfUpdate {
+                dry_run,
+                force_redownload,
+            } => {
+                assert!(dry_run);
+                assert!(force_redownload);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn cli_parses_version_subcommand() {
         let cli = Cli::try_parse_from(["crosspack", "version"]).expect("command must parse");
         assert!(matches!(cli.command, Commands::Version));
+    }
+
+    #[test]
+    fn build_self_update_install_args_includes_registry_root_and_flags() {
+        let registry_root = PathBuf::from("/tmp/registry");
+        let args = build_self_update_install_args(Some(registry_root.as_path()), true, true);
+        let rendered = args
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "--registry-root",
+                "/tmp/registry",
+                "install",
+                "crosspack",
+                "--dry-run",
+                "--force-redownload",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_self_update_install_args_omits_optional_values() {
+        let args = build_self_update_install_args(None, false, false);
+        let rendered = args
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, vec!["install", "crosspack"]);
     }
 
     #[test]

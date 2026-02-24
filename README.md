@@ -183,6 +183,7 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 | `registry list` | List configured sources and snapshot state. |
 | `registry remove <name> [--purge-cache]` | Remove a source and optionally purge cached snapshots. |
 | `update [--registry <name>]...` | Refresh all or selected source snapshots. |
+| `self-update [--dry-run] [--force-redownload]` | Refresh configured source snapshots, then install the latest `crosspack` package. |
 | `rollback [txid]` | Roll back eligible transaction state. |
 | `repair` | Recover stale or failed transaction markers. |
 | `doctor` | Show prefix paths and transaction health. |

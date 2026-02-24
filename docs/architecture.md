@@ -47,6 +47,7 @@ Default user prefixes:
 - `registry list` prints configured sources sorted by `(priority, name)` and includes snapshot state (`none`, `ready:<id>`, `error:<reason>`).
 - `registry remove <name> [--purge-cache]` removes a source and optionally deletes its cached snapshot.
 - `update [--registry <name>]...` refreshes all or selected sources and prints per-source status plus `update summary: updated=<n> up-to-date=<n> failed=<n>`.
+- `self-update [--dry-run] [--force-redownload]` refreshes configured source snapshots and then installs the latest `crosspack` package for the current host target.
 - Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root, which acts as the local trust anchor for that registry snapshot or mirror.
 - Every version manifest requires a detached hex signature sidecar at `<version>.toml.sig`.
 - Metadata-dependent commands fail closed on missing or invalid registry key/signature material.
