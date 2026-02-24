@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/spiritledsoftware/crosspack/compare/v0.2.0...v0.2.1) (2026-02-24)
+
+
+### Bug Fixes
+
+* **ci:** unblock release builds after version bumps ([#34](https://github.com/spiritledsoftware/crosspack/issues/34)) ([fb79b3c](https://github.com/spiritledsoftware/crosspack/commit/fb79b3c794b627ff29e045cc93cdba4facf7a963))
+
 ## [0.2.0](https://github.com/spiritledsoftware/crosspack/compare/v0.1.0...v0.2.0) (2026-02-24)
 
 
