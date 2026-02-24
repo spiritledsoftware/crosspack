@@ -21,13 +21,12 @@ use crosspack_installer::{
     read_gui_native_state, read_install_receipts, read_transaction_metadata,
     register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
     remove_exposed_gui_asset, remove_file_if_exists, remove_native_gui_registration_best_effort,
-    remove_package_native_gui_registrations_best_effort, set_active_transaction,
-    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
-    uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
-    write_gui_exposure_state, write_gui_native_state, write_install_receipt, write_pin,
-    write_transaction_metadata, GuiExposureAsset, GuiNativeRegistrationRecord, InstallReason,
-    InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
-    UninstallStatus,
+    set_active_transaction, uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots,
+    uninstall_package, uninstall_package_with_dependency_overrides_and_ignored_roots,
+    update_transaction_status, write_gui_exposure_state, write_gui_native_state,
+    write_install_receipt, write_pin, write_transaction_metadata, GuiExposureAsset,
+    GuiNativeRegistrationRecord, InstallReason, InstallReceipt, PrefixLayout,
+    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -2280,21 +2279,6 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         }
 
         let result = uninstall_package(layout, &name)?;
-        let mut native_gui_warnings = Vec::new();
-        if !matches!(
-            result.status,
-            UninstallStatus::BlockedByDependents | UninstallStatus::NotInstalled
-        ) {
-            native_gui_warnings.extend(remove_package_native_gui_registrations_best_effort(
-                layout,
-                &result.name,
-            )?);
-            for dependency in &result.pruned_dependencies {
-                native_gui_warnings.extend(remove_package_native_gui_registrations_best_effort(
-                    layout, dependency,
-                )?);
-            }
-        }
 
         if let Some(snapshot_path) = snapshot_paths.get(&name) {
             append_transaction_journal_entry(
@@ -2368,12 +2352,6 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         };
         for line in format_uninstall_messages(&result) {
             println!("{}", render_status_line(output_style, status, &line));
-        }
-        for warning in native_gui_warnings {
-            println!(
-                "{}",
-                render_status_line(output_style, "warn", &format!("warning: {warning}"))
-            );
         }
 
         Ok(())
@@ -3734,8 +3712,27 @@ fn collect_declared_gui_assets(
     let declared_apps = collect_declared_gui_apps(artifact)?;
     let mut assets = Vec::new();
     let mut seen_keys = HashSet::new();
+    let mut seen_paths = HashMap::new();
     for app in &declared_apps {
         let projected = projected_gui_assets(package_name, app)?;
+        let projected_paths = projected
+            .iter()
+            .map(|asset| asset.rel_path.clone())
+            .collect::<HashSet<_>>();
+        for rel_path in projected_paths {
+            if let Some(existing_app_id) =
+                seen_paths.insert(rel_path.clone(), app.app_id.trim().to_ascii_lowercase())
+            {
+                return Err(anyhow!(
+                    "duplicate gui storage path declaration '{}' for package '{}' target '{}'; app '{}' collides with app '{}'",
+                    rel_path,
+                    package_name,
+                    artifact.target,
+                    app.app_id,
+                    existing_app_id
+                ));
+            }
+        }
         for asset in projected {
             if !seen_keys.insert(asset.key.clone()) {
                 return Err(anyhow!(
@@ -6579,6 +6576,76 @@ path = "rg"
             .expect("self-owned gui file should be allowed");
 
         let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn collect_declared_gui_assets_rejects_colliding_projected_paths() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.demo/App"
+display_name = "Demo Slash"
+exec = "demo"
+
+[[artifacts.gui_apps]]
+app_id = "dev.demo?App"
+display_name = "Demo Question"
+exec = "demo"
+"#,
+        )
+        .expect("manifest should parse");
+        let artifact = manifest
+            .artifacts
+            .first()
+            .expect("manifest should include one artifact");
+
+        let err = collect_declared_gui_assets(&manifest.name, artifact)
+            .expect_err("colliding projected gui paths must be rejected");
+        assert!(
+            err.to_string()
+                .contains("duplicate gui storage path declaration"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn collect_declared_gui_assets_allows_shared_handler_path_within_single_app() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.demo.App"
+display_name = "Demo"
+exec = "demo"
+
+[[artifacts.gui_apps.protocols]]
+scheme = "demo"
+"#,
+        )
+        .expect("manifest should parse");
+        let artifact = manifest
+            .artifacts
+            .first()
+            .expect("manifest should include one artifact");
+
+        let assets = collect_declared_gui_assets(&manifest.name, artifact)
+            .expect("single app should allow shared handler paths");
+        assert!(!assets.is_empty());
     }
 
     #[test]
