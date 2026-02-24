@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/spiritledsoftware/crosspack/compare/v0.4.1...v0.5.0) (2026-02-24)
+
+
+### Features
+
+* **cli:** add automatic rich lifecycle output ([#44](https://github.com/spiritledsoftware/crosspack/issues/44)) ([4a8ed42](https://github.com/spiritledsoftware/crosspack/commit/4a8ed42494d691106393195aa6acc30f3fc1b39b))
+
 ## [0.4.1](https://github.com/spiritledsoftware/crosspack/compare/v0.4.0...v0.4.1) (2026-02-24)
 
 
