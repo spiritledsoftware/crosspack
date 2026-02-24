@@ -584,15 +584,29 @@ fn write_completions_script<W: Write>(
     let generator: Shell = shell.into();
     let mut generated = Vec::new();
     clap_complete::generate(generator, &mut command, "crosspack", &mut generated);
+
+    if shell == CliCompletionShell::Zsh {
+        writer
+            .write_all(package_completion_loader_snippet(layout, shell).as_bytes())
+            .with_context(|| "failed writing package completion loader block")?;
+        writer
+            .write_all(b"\n")
+            .with_context(|| "failed writing completion script delimiter")?;
+    }
+
     writer
         .write_all(&generated)
         .with_context(|| "failed writing generated completion script")?;
-    writer
-        .write_all(b"\n")
-        .with_context(|| "failed writing completion script delimiter")?;
-    writer
-        .write_all(package_completion_loader_snippet(layout, shell).as_bytes())
-        .with_context(|| "failed writing package completion loader block")?;
+
+    if shell != CliCompletionShell::Zsh {
+        writer
+            .write_all(b"\n")
+            .with_context(|| "failed writing completion script delimiter")?;
+        writer
+            .write_all(package_completion_loader_snippet(layout, shell).as_bytes())
+            .with_context(|| "failed writing package completion loader block")?;
+    }
+
     Ok(())
 }
 
@@ -7389,6 +7403,29 @@ ripgrep-legacy = "*"
         assert!(
             !rendered.contains("while IFS= read -r"),
             "zsh loader should not use bash-style source loop"
+        );
+    }
+
+    #[test]
+    fn zsh_completion_script_initializes_compinit_before_crosspack_registration() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut output = Vec::new();
+        write_completions_script(CliCompletionShell::Zsh, &layout, &mut output)
+            .expect("completion script generation should succeed");
+        let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+
+        let compinit_index = rendered
+            .find("compinit -i")
+            .expect("zsh script should initialize compinit");
+        let compdef_index = rendered
+            .find("compdef _crosspack crosspack")
+            .expect("zsh script should register crosspack completion function");
+
+        assert!(
+            compinit_index < compdef_index,
+            "zsh script must initialize completion system before compdef registration"
         );
     }
 
