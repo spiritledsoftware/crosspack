@@ -60,6 +60,7 @@ Default user prefixes:
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
+- `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
 - Transaction recovery commands are shipped and operational:
@@ -68,6 +69,9 @@ Default user prefixes:
   - `doctor` reports prefix paths and transaction health status.
 - Successful multi-package install/upgrade receipts in one transaction share a single `snapshot_id` to preserve metadata provenance.
 - `list` reads install receipts from `<prefix>/state/installed/`.
+- `completions <bash|zsh|fish|powershell>` prints shell completion scripts for the canonical `crosspack` binary name and includes a loader block for package-declared completions.
+- `init-shell [--shell <bash|zsh|fish|powershell>]` prints shell setup snippets for PATH + completion loading; without `--shell`, shell is auto-detected (with deterministic fallback).
+- Install scripts attempt best-effort shell setup by generating completion files under `<prefix>/share/completions/` and upserting one managed profile block; failures warn and do not abort install.
 
 ## GA Scope Statement
 

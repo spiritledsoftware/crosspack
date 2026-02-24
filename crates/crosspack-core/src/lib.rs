@@ -58,6 +58,32 @@ pub struct ArtifactBinary {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactCompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
+
+impl ArtifactCompletionShell {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+            Self::Fish => "fish",
+            Self::Powershell => "powershell",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactCompletion {
+    pub shell: ArtifactCompletionShell,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Artifact {
     pub target: String,
@@ -70,6 +96,8 @@ pub struct Artifact {
     pub artifact_root: Option<String>,
     #[serde(default)]
     pub binaries: Vec<ArtifactBinary>,
+    #[serde(default)]
+    pub completions: Vec<ArtifactCompletion>,
 }
 
 impl Artifact {
@@ -129,7 +157,7 @@ impl PackageManifest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveType, PackageManifest};
+    use super::{ArchiveType, ArtifactCompletionShell, PackageManifest};
     use semver::VersionReq;
 
     #[test]
@@ -157,6 +185,10 @@ sha256 = "abc123"
 [[artifacts.binaries]]
 name = "rg"
 path = "ripgrep"
+
+[[artifacts.completions]]
+shell = "bash"
+path = "completions/rg.bash"
 "#;
 
         let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
@@ -176,6 +208,81 @@ path = "ripgrep"
         assert_eq!(parsed.artifacts[0].binaries.len(), 1);
         assert_eq!(parsed.artifacts[0].binaries[0].name, "rg");
         assert_eq!(parsed.artifacts[0].binaries[0].path, "ripgrep");
+        assert_eq!(parsed.artifacts[0].completions.len(), 1);
+        assert_eq!(
+            parsed.artifacts[0].completions[0].shell,
+            ArtifactCompletionShell::Bash
+        );
+        assert_eq!(
+            parsed.artifacts[0].completions[0].path,
+            "completions/rg.bash"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_with_multiple_artifact_completions() {
+        let content = r#"
+name = "zoxide"
+version = "0.9.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/zoxide-0.9.0.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.completions]]
+shell = "bash"
+path = "completions/zoxide.bash"
+
+[[artifacts.completions]]
+shell = "zsh"
+path = "completions/_zoxide"
+
+[[artifacts.completions]]
+shell = "fish"
+path = "completions/zoxide.fish"
+
+[[artifacts.completions]]
+shell = "powershell"
+path = "completions/_zoxide.ps1"
+"#;
+
+        let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+        let completions = &parsed.artifacts[0].completions;
+        assert_eq!(completions.len(), 4);
+        assert_eq!(completions[0].shell, ArtifactCompletionShell::Bash);
+        assert_eq!(completions[1].shell, ArtifactCompletionShell::Zsh);
+        assert_eq!(completions[2].shell, ArtifactCompletionShell::Fish);
+        assert_eq!(completions[3].shell, ArtifactCompletionShell::Powershell);
+    }
+
+    #[test]
+    fn parse_manifest_rejects_invalid_completion_shell_token() {
+        let content = r#"
+name = "zoxide"
+version = "0.9.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/zoxide-0.9.0.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.completions]]
+shell = "elvish"
+path = "completions/zoxide.elvish"
+"#;
+
+        let err =
+            PackageManifest::from_toml_str(content).expect_err("invalid shell token must fail");
+        let chain = err
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            chain.contains("unknown variant") && chain.contains("elvish"),
+            "unexpected error chain: {chain}"
+        );
     }
 
     #[test]

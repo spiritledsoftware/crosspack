@@ -8,13 +8,15 @@ use std::process::Command;
 use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
-use crosspack_core::{ArchiveType, Artifact, PackageManifest};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+use crosspack_core::{ArchiveType, Artifact, ArtifactCompletionShell, PackageManifest};
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
-    default_user_prefix, expose_binary, install_from_artifact, read_active_transaction,
+    default_user_prefix, expose_binary, expose_completion, exposed_completion_path,
+    install_from_artifact, projected_exposed_completion_path, read_active_transaction,
     read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
-    remove_file_if_exists, set_active_transaction,
+    remove_exposed_completion, remove_file_if_exists, set_active_transaction,
     uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
     uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
     write_install_receipt, write_pin, write_transaction_metadata, InstallReason, InstallReceipt,
@@ -89,7 +91,13 @@ enum Commands {
         registry: Vec<String>,
     },
     Doctor,
-    InitShell,
+    Completions {
+        shell: CliCompletionShell,
+    },
+    InitShell {
+        #[arg(long)]
+        shell: Option<CliCompletionShell>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -118,11 +126,50 @@ enum CliRegistryKind {
     Filesystem,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum CliCompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
+
 impl From<CliRegistryKind> for RegistrySourceKind {
     fn from(value: CliRegistryKind) -> Self {
         match value {
             CliRegistryKind::Git => RegistrySourceKind::Git,
             CliRegistryKind::Filesystem => RegistrySourceKind::Filesystem,
+        }
+    }
+}
+
+impl From<CliCompletionShell> for Shell {
+    fn from(value: CliCompletionShell) -> Self {
+        match value {
+            CliCompletionShell::Bash => Shell::Bash,
+            CliCompletionShell::Zsh => Shell::Zsh,
+            CliCompletionShell::Fish => Shell::Fish,
+            CliCompletionShell::Powershell => Shell::PowerShell,
+        }
+    }
+}
+
+impl CliCompletionShell {
+    fn completion_filename(self) -> &'static str {
+        match self {
+            Self::Bash => "crosspack.bash",
+            Self::Zsh => "crosspack.zsh",
+            Self::Fish => "crosspack.fish",
+            Self::Powershell => "crosspack.ps1",
+        }
+    }
+
+    fn package_completion_shell(self) -> ArtifactCompletionShell {
+        match self {
+            Self::Bash => ArtifactCompletionShell::Bash,
+            Self::Zsh => ArtifactCompletionShell::Zsh,
+            Self::Fish => ArtifactCompletionShell::Fish,
+            Self::Powershell => ArtifactCompletionShell::Powershell,
         }
     }
 }
@@ -255,6 +302,9 @@ fn main() -> Result<()> {
 
                 Ok(())
             })?;
+            if let Err(err) = sync_completion_assets_best_effort(&layout, "install") {
+                eprintln!("{err}");
+            }
         }
         Commands::Upgrade { spec, provider } => {
             let provider_overrides = parse_provider_overrides(&provider)?;
@@ -362,18 +412,188 @@ fn main() -> Result<()> {
             println!("cache: {}", layout.cache_dir().display());
             println!("{}", doctor_transaction_health_line(&layout)?);
         }
-        Commands::InitShell => {
+        Commands::Completions { shell } => {
             let prefix = default_user_prefix()?;
-            let bin = PrefixLayout::new(prefix).bin_dir();
-            if cfg!(windows) {
-                println!("setx PATH \"%PATH%;{}\"", bin.display());
-            } else {
-                println!("export PATH=\"{}:$PATH\"", bin.display());
-            }
+            let layout = PrefixLayout::new(prefix);
+            let mut stdout = std::io::stdout();
+            write_completions_script(shell, &layout, &mut stdout)?;
+        }
+        Commands::InitShell { shell } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            let resolved_shell =
+                resolve_init_shell(shell, std::env::var("SHELL").ok().as_deref(), cfg!(windows));
+            print_init_shell_snippet(&layout, resolved_shell);
         }
     }
 
     Ok(())
+}
+
+fn write_completions_script<W: Write>(
+    shell: CliCompletionShell,
+    layout: &PrefixLayout,
+    writer: &mut W,
+) -> Result<()> {
+    let mut command = Cli::command();
+    let generator: Shell = shell.into();
+    let mut generated = Vec::new();
+    clap_complete::generate(generator, &mut command, "crosspack", &mut generated);
+    writer
+        .write_all(&generated)
+        .with_context(|| "failed writing generated completion script")?;
+    writer
+        .write_all(b"\n")
+        .with_context(|| "failed writing completion script delimiter")?;
+    writer
+        .write_all(package_completion_loader_snippet(layout, shell).as_bytes())
+        .with_context(|| "failed writing package completion loader block")?;
+    Ok(())
+}
+
+fn crosspack_completion_script_path(layout: &PrefixLayout, shell: CliCompletionShell) -> PathBuf {
+    layout.completions_dir().join(shell.completion_filename())
+}
+
+fn package_completion_loader_snippet(layout: &PrefixLayout, shell: CliCompletionShell) -> String {
+    let package_completion_dir =
+        layout.package_completions_shell_dir(shell.package_completion_shell());
+    match shell {
+        CliCompletionShell::Bash | CliCompletionShell::Zsh => {
+            let escaped_dir =
+                escape_single_quote_shell(&package_completion_dir.display().to_string());
+            format!(
+                "# crosspack package completions\nif [ -d '{escaped_dir}' ]; then\n  find '{escaped_dir}' -mindepth 1 -maxdepth 1 -type f -print 2>/dev/null \\\n    | LC_ALL=C sort \\\n    | while IFS= read -r _crosspack_pkg_completion_path; do\n        . \"${{_crosspack_pkg_completion_path}}\"\n      done\nfi\n"
+            )
+        }
+        CliCompletionShell::Fish => {
+            let escaped_dir =
+                escape_single_quote_shell(&package_completion_dir.display().to_string());
+            format!(
+                "# crosspack package completions\nif test -d '{escaped_dir}'\n    for _crosspack_pkg_completion_path in (find '{escaped_dir}' -mindepth 1 -maxdepth 1 -type f -print 2>/dev/null | sort)\n        source \"$_crosspack_pkg_completion_path\"\n    end\nend\nset -e _crosspack_pkg_completion_path\n"
+            )
+        }
+        CliCompletionShell::Powershell => {
+            let escaped_dir = escape_ps_single_quote(&package_completion_dir.display().to_string());
+            format!(
+                "# crosspack package completions\n$crosspackPackageCompletionDir = '{escaped_dir}'\nif (Test-Path $crosspackPackageCompletionDir) {{\n  Get-ChildItem -Path $crosspackPackageCompletionDir -File | Sort-Object Name | ForEach-Object {{\n    . $_.FullName\n  }}\n}}\nRemove-Variable crosspackPackageCompletionDir -ErrorAction SilentlyContinue\n"
+            )
+        }
+    }
+}
+
+fn refresh_crosspack_completion_assets(layout: &PrefixLayout) -> Result<()> {
+    fs::create_dir_all(layout.completions_dir()).with_context(|| {
+        format!(
+            "failed to create completion directory: {}",
+            layout.completions_dir().display()
+        )
+    })?;
+
+    for shell in [
+        CliCompletionShell::Bash,
+        CliCompletionShell::Zsh,
+        CliCompletionShell::Fish,
+        CliCompletionShell::Powershell,
+    ] {
+        let mut output = Vec::new();
+        write_completions_script(shell, layout, &mut output)?;
+        let path = crosspack_completion_script_path(layout, shell);
+        fs::write(&path, &output)
+            .with_context(|| format!("failed writing completion asset: {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn sync_completion_assets_best_effort(layout: &PrefixLayout, operation: &str) -> Result<()> {
+    if let Err(err) = refresh_crosspack_completion_assets(layout) {
+        return Err(anyhow!(
+            "warning: completion sync skipped (operation={operation} reason={})",
+            err
+        ));
+    }
+    Ok(())
+}
+
+fn escape_single_quote_shell(value: &str) -> String {
+    value.replace('\'', "'\"'\"'")
+}
+
+fn detect_shell_from_env(shell_env: Option<&str>) -> Option<CliCompletionShell> {
+    let shell_value = shell_env?;
+    let shell_token = Path::new(shell_value)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(shell_value)
+        .to_ascii_lowercase();
+    match shell_token.as_str() {
+        "bash" => Some(CliCompletionShell::Bash),
+        "zsh" => Some(CliCompletionShell::Zsh),
+        "fish" => Some(CliCompletionShell::Fish),
+        "powershell" | "pwsh" => Some(CliCompletionShell::Powershell),
+        _ => None,
+    }
+}
+
+fn resolve_init_shell(
+    requested_shell: Option<CliCompletionShell>,
+    shell_env: Option<&str>,
+    is_windows: bool,
+) -> CliCompletionShell {
+    if let Some(shell) = requested_shell {
+        return shell;
+    }
+    if let Some(shell) = detect_shell_from_env(shell_env) {
+        return shell;
+    }
+    if is_windows {
+        CliCompletionShell::Powershell
+    } else {
+        CliCompletionShell::Bash
+    }
+}
+
+fn print_init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) {
+    let bin = layout.bin_dir();
+    let completion_path = crosspack_completion_script_path(layout, shell);
+    match shell {
+        CliCompletionShell::Bash | CliCompletionShell::Zsh => {
+            let escaped_completion =
+                escape_single_quote_shell(&completion_path.display().to_string());
+            println!("export PATH=\"{}:$PATH\"", bin.display());
+            println!("if [ -f '{escaped_completion}' ]; then");
+            println!("  . '{escaped_completion}'");
+            println!("fi");
+        }
+        CliCompletionShell::Fish => {
+            let escaped_bin = escape_single_quote_shell(&bin.display().to_string());
+            let escaped_completion =
+                escape_single_quote_shell(&completion_path.display().to_string());
+            println!("if test -d '{escaped_bin}'");
+            println!("    if not contains -- '{escaped_bin}' $PATH");
+            println!("        set -gx PATH '{escaped_bin}' $PATH");
+            println!("    end");
+            println!("end");
+            println!("if test -f '{escaped_completion}'");
+            println!("    source '{escaped_completion}'");
+            println!("end");
+        }
+        CliCompletionShell::Powershell => {
+            let escaped_bin = escape_ps_single_quote(&bin.display().to_string());
+            let escaped_completion = escape_ps_single_quote(&completion_path.display().to_string());
+            println!("if (Test-Path '{escaped_bin}') {{");
+            println!(
+                "  if (-not ($env:PATH -split ';' | Where-Object {{ $_ -eq '{escaped_bin}' }})) {{"
+            );
+            println!("    $env:PATH = '{escaped_bin};' + $env:PATH");
+            println!("  }}");
+            println!("}}");
+            println!("if (Test-Path '{escaped_completion}') {{");
+            println!("  . '{escaped_completion}'");
+            println!("}}");
+        }
+    }
 }
 
 fn registry_state_root(layout: &PrefixLayout) -> PathBuf {
@@ -972,6 +1192,10 @@ fn run_upgrade_command(
 
         Ok(())
     })?;
+
+    if let Err(err) = sync_completion_assets_best_effort(layout, "upgrade") {
+        eprintln!("{err}");
+    }
 
     Ok(())
 }
@@ -1651,6 +1875,10 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         clear_active_transaction(layout)?;
     }
 
+    if let Err(err) = sync_completion_assets_best_effort(layout, "rollback") {
+        eprintln!("{err}");
+    }
+
     println!("rolled back {target_txid}");
     Ok(())
 }
@@ -1773,6 +2001,10 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
 
         Ok(())
     })?;
+
+    if let Err(err) = sync_completion_assets_best_effort(layout, "uninstall") {
+        eprintln!("{err}");
+    }
 
     Ok(())
 }
@@ -2071,6 +2303,7 @@ struct InstallOutcome {
     install_root: PathBuf,
     receipt_path: PathBuf,
     exposed_bins: Vec<String>,
+    exposed_completions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2406,12 +2639,29 @@ fn install_resolved(
         .collect::<HashSet<_>>();
 
     let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
+    let declared_completions = collect_declared_completions(&resolved.artifact)?;
+    let projected_completion_paths = declared_completions
+        .iter()
+        .map(|completion| {
+            projected_exposed_completion_path(
+                &resolved.manifest.name,
+                completion.shell,
+                &completion.path,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
     validate_binary_preflight(
         layout,
         &resolved.manifest.name,
         &exposed_bins,
         &receipts,
         &replacement_targets,
+    )?;
+    validate_completion_preflight(
+        layout,
+        &resolved.manifest.name,
+        &projected_completion_paths,
+        &receipts,
     )?;
 
     let cache_path = layout.artifact_cache_path(
@@ -2455,6 +2705,18 @@ fn install_resolved(
         expose_binary(layout, &install_root, &binary.name, &binary.path)?;
     }
 
+    let mut exposed_completions = Vec::with_capacity(declared_completions.len());
+    for completion in &declared_completions {
+        let storage_path = expose_completion(
+            layout,
+            &install_root,
+            &resolved.manifest.name,
+            completion.shell,
+            &completion.path,
+        )?;
+        exposed_completions.push(storage_path);
+    }
+
     if let Some(previous_receipt) = receipts
         .iter()
         .find(|receipt| receipt.name == resolved.manifest.name)
@@ -2465,6 +2727,13 @@ fn install_resolved(
             .filter(|old| !exposed_bins.contains(old))
         {
             remove_exposed_binary(layout, stale_bin)?;
+        }
+        for stale_completion in previous_receipt
+            .exposed_completions
+            .iter()
+            .filter(|old| !exposed_completions.contains(old))
+        {
+            remove_exposed_completion(layout, stale_completion)?;
         }
     }
 
@@ -2477,6 +2746,7 @@ fn install_resolved(
         artifact_sha256: Some(resolved.artifact.sha256.clone()),
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
+        exposed_completions: exposed_completions.clone(),
         snapshot_id: snapshot_id.map(ToOwned::to_owned),
         install_reason: determine_install_reason(
             &resolved.manifest.name,
@@ -2500,6 +2770,7 @@ fn install_resolved(
         install_root,
         receipt_path,
         exposed_bins,
+        exposed_completions,
     })
 }
 
@@ -2518,6 +2789,12 @@ fn print_install_outcome(outcome: &InstallOutcome) {
     println!("install_root: {}", outcome.install_root.display());
     if !outcome.exposed_bins.is_empty() {
         println!("exposed_bins: {}", outcome.exposed_bins.join(", "));
+    }
+    if !outcome.exposed_completions.is_empty() {
+        println!(
+            "exposed_completions: {}",
+            outcome.exposed_completions.join(", ")
+        );
     }
     println!("receipt: {}", outcome.receipt_path.display());
 }
@@ -2539,6 +2816,33 @@ fn collect_declared_binaries(artifact: &Artifact) -> Result<Vec<String>> {
     Ok(names)
 }
 
+#[derive(Debug, Clone)]
+struct DeclaredCompletion {
+    shell: ArtifactCompletionShell,
+    path: String,
+}
+
+fn collect_declared_completions(artifact: &Artifact) -> Result<Vec<DeclaredCompletion>> {
+    let mut declared = Vec::with_capacity(artifact.completions.len());
+    let mut seen = HashSet::new();
+    for completion in &artifact.completions {
+        let key = (completion.shell, completion.path.clone());
+        if !seen.insert(key) {
+            return Err(anyhow!(
+                "duplicate completion declaration for shell '{}' and path '{}' in target '{}'",
+                completion.shell.as_str(),
+                completion.path,
+                artifact.target
+            ));
+        }
+        declared.push(DeclaredCompletion {
+            shell: completion.shell,
+            path: completion.path.clone(),
+        });
+    }
+    Ok(declared)
+}
+
 fn validate_binary_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         return Err(anyhow!("binary name must not be empty"));
@@ -2548,6 +2852,55 @@ fn validate_binary_name(name: &str) -> Result<()> {
             "binary name must not contain path separators: {name}"
         ));
     }
+    Ok(())
+}
+
+fn validate_completion_preflight(
+    layout: &PrefixLayout,
+    package_name: &str,
+    desired_completion_paths: &[String],
+    receipts: &[InstallReceipt],
+) -> Result<()> {
+    let owned_by_self: HashSet<&str> = receipts
+        .iter()
+        .find(|receipt| receipt.name == package_name)
+        .map(|receipt| {
+            receipt
+                .exposed_completions
+                .iter()
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for desired in desired_completion_paths {
+        for receipt in receipts {
+            if receipt.name == package_name {
+                continue;
+            }
+            if receipt
+                .exposed_completions
+                .iter()
+                .any(|owned| owned == desired)
+            {
+                return Err(anyhow!(
+                    "completion '{}' is already owned by package '{}'",
+                    desired,
+                    receipt.name
+                ));
+            }
+        }
+
+        let path = exposed_completion_path(layout, desired)?;
+        if path.exists() && !owned_by_self.contains(desired.as_str()) {
+            return Err(anyhow!(
+                "completion '{}' at {} already exists and is not managed by crosspack",
+                desired,
+                path.display()
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -3006,21 +3359,22 @@ mod tests {
         format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_search_results, format_uninstall_messages,
         format_update_summary_line, normalize_command_token, parse_pin_spec,
-        parse_provider_overrides, registry_state_root, resolve_transaction_snapshot_id,
-        run_repair_command, run_rollback_command, run_search_command, run_uninstall_command,
-        run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight,
-        validate_provider_overrides_used, Cli, CliRegistryKind, Commands, MetadataBackend,
-        ResolvedInstall,
+        parse_provider_overrides, registry_state_root, resolve_init_shell,
+        resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
+        run_search_command, run_uninstall_command, run_update_command, run_upgrade_command,
+        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
+        update_failure_reason_code, validate_binary_preflight, validate_completion_preflight,
+        validate_provider_overrides_used, write_completions_script, Cli, CliCompletionShell,
+        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
-        append_transaction_journal_entry, bin_path, expose_binary, read_active_transaction,
-        read_install_receipts, read_transaction_metadata, set_active_transaction,
-        write_install_receipt, write_transaction_metadata, InstallReason, InstallReceipt,
-        PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
-        UninstallStatus,
+        append_transaction_journal_entry, bin_path, expose_binary, exposed_completion_path,
+        read_active_transaction, read_install_receipts, read_transaction_metadata,
+        set_active_transaction, write_install_receipt, write_transaction_metadata, InstallReason,
+        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
+        UninstallResult, UninstallStatus,
     };
     use crosspack_registry::{
         RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -3489,6 +3843,7 @@ mod tests {
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["demo".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -3569,6 +3924,7 @@ mod tests {
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["demo".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -4948,6 +5304,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5007,6 +5364,7 @@ sha256 = "def"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5022,6 +5380,103 @@ sha256 = "def"
             &replacement_targets,
         )
         .expect("replacement-owned binary should be allowed");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_completion_preflight_rejects_other_package_owner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let desired = "packages/bash/zoxide--completions--zoxide.bash".to_string();
+        let receipts = vec![InstallReceipt {
+            name: "zoxide".to_string(),
+            version: "0.9.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["zoxide".to_string()],
+            exposed_completions: vec![desired.clone()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        let err = validate_completion_preflight(
+            &layout,
+            "ripgrep",
+            std::slice::from_ref(&desired),
+            &receipts,
+        )
+        .expect_err("must reject completion ownership conflict");
+        assert!(err
+            .to_string()
+            .contains("is already owned by package 'zoxide'"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_completion_preflight_rejects_unmanaged_existing_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let desired = "packages/bash/ripgrep--completions--rg.bash".to_string();
+        let path =
+            exposed_completion_path(&layout, &desired).expect("must resolve completion path");
+        fs::create_dir_all(path.parent().expect("must have parent"))
+            .expect("must create completion parent");
+        fs::write(&path, b"complete -F _rg rg\n").expect("must write completion file");
+
+        let err =
+            validate_completion_preflight(&layout, "ripgrep", std::slice::from_ref(&desired), &[])
+                .expect_err("must reject unmanaged completion file");
+        assert!(err
+            .to_string()
+            .contains("already exists and is not managed by crosspack"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_completion_preflight_allows_self_owned_existing_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let desired = "packages/bash/ripgrep--completions--rg.bash".to_string();
+        let path =
+            exposed_completion_path(&layout, &desired).expect("must resolve completion path");
+        fs::create_dir_all(path.parent().expect("must have parent"))
+            .expect("must create completion parent");
+        fs::write(&path, b"complete -F _rg rg\n").expect("must write completion file");
+
+        let receipts = vec![InstallReceipt {
+            name: "ripgrep".to_string(),
+            version: "14.1.0".to_string(),
+            dependencies: Vec::new(),
+            target: None,
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: vec!["rg".to_string()],
+            exposed_completions: vec![desired.clone()],
+            snapshot_id: None,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+
+        validate_completion_preflight(
+            &layout,
+            "ripgrep",
+            std::slice::from_ref(&desired),
+            &receipts,
+        )
+        .expect("self-owned completion file should be allowed");
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
@@ -5049,6 +5504,7 @@ ripgrep-legacy = "<2.0.0"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: vec!["rg".to_string()],
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -5063,6 +5519,7 @@ ripgrep-legacy = "<2.0.0"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: vec!["other".to_string()],
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
@@ -5098,6 +5555,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5125,6 +5583,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["app".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5139,6 +5598,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5176,6 +5636,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["app".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5190,6 +5651,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["legacy-a".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5204,6 +5666,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["legacy-b".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5248,6 +5711,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["legacy-a".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5262,6 +5726,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["legacy-b".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5300,6 +5765,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["app".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5314,6 +5780,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5353,6 +5820,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5383,6 +5851,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5405,6 +5874,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5437,6 +5907,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5458,6 +5929,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5479,6 +5951,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5493,6 +5966,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5514,6 +5988,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: vec!["rg".to_string()],
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
@@ -5536,6 +6011,7 @@ ripgrep-legacy = "*"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -5550,6 +6026,7 @@ ripgrep-legacy = "*"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
@@ -5573,6 +6050,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5595,6 +6073,7 @@ ripgrep-legacy = "*"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -5609,6 +6088,7 @@ ripgrep-legacy = "*"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -5636,6 +6116,7 @@ ripgrep-legacy = "*"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -5650,6 +6131,7 @@ ripgrep-legacy = "*"
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
@@ -5675,6 +6157,7 @@ ripgrep-legacy = "*"
             artifact_sha256: None,
             cache_path: None,
             exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
             snapshot_id: None,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
@@ -5792,6 +6275,123 @@ ripgrep-legacy = "*"
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_completions_for_each_supported_shell() {
+        let cases = vec![
+            ("bash", CliCompletionShell::Bash),
+            ("zsh", CliCompletionShell::Zsh),
+            ("fish", CliCompletionShell::Fish),
+            ("powershell", CliCompletionShell::Powershell),
+        ];
+
+        for (shell, expected) in cases {
+            let cli =
+                Cli::try_parse_from(["crosspack", "completions", shell]).expect("command parses");
+            match cli.command {
+                Commands::Completions { shell } => {
+                    assert_eq!(shell, expected);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_rejects_completions_without_shell() {
+        let err = Cli::try_parse_from(["crosspack", "completions"])
+            .expect_err("missing shell argument must fail");
+        assert!(err.to_string().contains("<SHELL>"));
+    }
+
+    #[test]
+    fn cli_rejects_unsupported_completion_shell() {
+        let err = Cli::try_parse_from(["crosspack", "completions", "elvish"])
+            .expect_err("unsupported shell must fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("elvish"));
+        assert!(rendered.contains("possible values"));
+    }
+
+    #[test]
+    fn cli_parses_init_shell_with_optional_shell_override() {
+        let cli = Cli::try_parse_from(["crosspack", "init-shell", "--shell", "zsh"])
+            .expect("command must parse");
+        match cli.command {
+            Commands::InitShell { shell } => {
+                assert_eq!(shell, Some(CliCompletionShell::Zsh));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_init_shell_prefers_requested_shell_over_env_detection() {
+        let resolved = resolve_init_shell(Some(CliCompletionShell::Fish), Some("/bin/zsh"), false);
+        assert_eq!(resolved, CliCompletionShell::Fish);
+    }
+
+    #[test]
+    fn resolve_init_shell_uses_env_detection_when_request_missing() {
+        let resolved = resolve_init_shell(None, Some("/usr/bin/pwsh"), false);
+        assert_eq!(resolved, CliCompletionShell::Powershell);
+    }
+
+    #[test]
+    fn resolve_init_shell_falls_back_deterministically_by_platform() {
+        let unix_fallback = resolve_init_shell(None, Some("/usr/bin/unknown-shell"), false);
+        assert_eq!(unix_fallback, CliCompletionShell::Bash);
+
+        let windows_fallback = resolve_init_shell(None, None, true);
+        assert_eq!(windows_fallback, CliCompletionShell::Powershell);
+    }
+
+    #[test]
+    fn generate_completions_outputs_non_empty_script_for_each_shell() {
+        let shells = [
+            CliCompletionShell::Bash,
+            CliCompletionShell::Zsh,
+            CliCompletionShell::Fish,
+            CliCompletionShell::Powershell,
+        ];
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        for shell in shells {
+            let mut output = Vec::new();
+            write_completions_script(shell, &layout, &mut output)
+                .expect("completion script generation should succeed");
+            assert!(
+                !output.is_empty(),
+                "completion script should not be empty for {shell:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn generate_completions_uses_crosspack_command_name() {
+        let shells = [
+            CliCompletionShell::Bash,
+            CliCompletionShell::Zsh,
+            CliCompletionShell::Fish,
+            CliCompletionShell::Powershell,
+        ];
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        for shell in shells {
+            let mut output = Vec::new();
+            write_completions_script(shell, &layout, &mut output)
+                .expect("completion script generation should succeed");
+            let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+            assert!(
+                rendered.contains("crosspack"),
+                "completion script should target canonical binary name for {shell:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
