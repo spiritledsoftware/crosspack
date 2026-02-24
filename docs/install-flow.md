@@ -23,14 +23,17 @@
 9. Apply `strip_components` during staging copy.
 10. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
 11. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
-12. Expose declared binaries:
+12. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
+13. Expose declared binaries:
     - Unix: symlink `<prefix>/bin/<name>` to installed package path.
     - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
-13. Remove stale previously-owned binaries no longer declared for that package.
-14. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+14. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
+15. Remove stale previously-owned binaries and completion files no longer declared for that package.
+16. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
      - set `install_reason=root` for requested roots,
      - set `install_reason=dependency` for transitive-only packages,
      - preserve existing `install_reason=root` when upgrading already-rooted packages.
+17. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 
@@ -43,6 +46,7 @@
 - `artifact_sha256` (optional)
 - `cache_path` (optional)
 - `exposed_bin` (repeated, optional)
+- `exposed_completion` (repeated, optional)
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
@@ -56,7 +60,9 @@
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
+- Completion collision: install fails if a projected package completion file is already owned by another package or exists unmanaged in Crosspack completion storage.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
+- Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
 
 ## Uninstall Flow
 
@@ -67,7 +73,7 @@
 3. If target package is still reachable from any remaining root, block uninstall and report sorted blocking roots.
 4. Otherwise remove the requested package and prune orphaned dependency closure no longer reachable from any remaining root.
 5. For all removed packages:
-   - remove package directories and exposed binaries,
+   - remove package directories, exposed binaries, and exposed package completion files,
    - remove receipt files,
    - collect cache paths from receipts.
 6. Remove cache files that are no longer referenced by any remaining receipt.
@@ -89,8 +95,8 @@
 ## Shell Setup and Completions
 
 - `crosspack completions <bash|zsh|fish|powershell>` prints completion scripts to stdout.
-- Completion generation targets the canonical `crosspack` command name.
-- `crosspack init-shell` remains PATH-only output and does not emit completion setup.
+- Completion generation targets the canonical `crosspack` command name and appends package completion loader logic for `<prefix>/share/completions/packages/<shell>/`.
+- `crosspack init-shell [--shell <bash|zsh|fish|powershell>]` prints PATH + completion setup snippet; when `--shell` is omitted it auto-detects from `$SHELL` (Unix) and falls back to `bash` on Unix / `powershell` on Windows.
 - Unix installer (`scripts/install.sh`) auto-detects shell from `$SHELL` (`bash`, `zsh`, or `fish`) and, by default:
   - writes completion scripts to `<prefix>/share/completions/crosspack.<shell>`,
   - creates or updates a single managed profile block in `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`,

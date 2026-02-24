@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use crosspack_core::ArchiveType;
+use crosspack_core::{ArchiveType, ArtifactCompletionShell};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixLayout {
@@ -24,6 +24,7 @@ pub struct InstallReceipt {
     pub artifact_sha256: Option<String>,
     pub cache_path: Option<String>,
     pub exposed_bins: Vec<String>,
+    pub exposed_completions: Vec<String>,
     pub snapshot_id: Option<String>,
     pub install_reason: InstallReason,
     pub install_status: String,
@@ -115,6 +116,22 @@ impl PrefixLayout {
         self.prefix.join("cache")
     }
 
+    pub fn share_dir(&self) -> PathBuf {
+        self.prefix.join("share")
+    }
+
+    pub fn completions_dir(&self) -> PathBuf {
+        self.share_dir().join("completions")
+    }
+
+    pub fn package_completions_dir(&self) -> PathBuf {
+        self.completions_dir().join("packages")
+    }
+
+    pub fn package_completions_shell_dir(&self, shell: ArtifactCompletionShell) -> PathBuf {
+        self.package_completions_dir().join(shell.as_str())
+    }
+
     pub fn artifacts_cache_dir(&self) -> PathBuf {
         self.cache_dir().join("artifacts")
     }
@@ -187,6 +204,9 @@ impl PrefixLayout {
             self.bin_dir(),
             self.state_dir(),
             self.cache_dir(),
+            self.share_dir(),
+            self.completions_dir(),
+            self.package_completions_dir(),
             self.artifacts_cache_dir(),
             self.tmp_state_dir(),
             self.installed_state_dir(),
@@ -446,6 +466,9 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     }
     for exposed_bin in &receipt.exposed_bins {
         payload.push_str(&format!("exposed_bin={}\n", exposed_bin));
+    }
+    for exposed_completion in &receipt.exposed_completions {
+        payload.push_str(&format!("exposed_completion={}\n", exposed_completion));
     }
     if let Some(snapshot_id) = &receipt.snapshot_id {
         payload.push_str(&format!("snapshot_id={}\n", snapshot_id));
@@ -794,6 +817,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut artifact_sha256 = None;
     let mut cache_path = None;
     let mut exposed_bins = Vec::new();
+    let mut exposed_completions = Vec::new();
     let mut snapshot_id = None;
     let mut install_reason = None;
     let mut install_status = None;
@@ -812,6 +836,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
             "artifact_sha256" => artifact_sha256 = Some(v.to_string()),
             "cache_path" => cache_path = Some(v.to_string()),
             "exposed_bin" => exposed_bins.push(v.to_string()),
+            "exposed_completion" => exposed_completions.push(v.to_string()),
             "snapshot_id" => snapshot_id = Some(v.to_string()),
             "install_reason" => install_reason = Some(InstallReason::parse(v)?),
             "install_status" => install_status = Some(v.to_string()),
@@ -831,6 +856,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         artifact_sha256,
         cache_path,
         exposed_bins,
+        exposed_completions,
         snapshot_id,
         install_reason: install_reason.unwrap_or(InstallReason::Root),
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
@@ -851,6 +877,9 @@ fn remove_receipt_artifacts(
 
     for exposed_bin in &receipt.exposed_bins {
         remove_exposed_binary(layout, exposed_bin)?;
+    }
+    for exposed_completion in &receipt.exposed_completions {
+        remove_exposed_completion(layout, exposed_completion)?;
     }
 
     let receipt_path = layout.receipt_path(&receipt.name);
@@ -985,6 +1014,208 @@ pub fn remove_exposed_binary(layout: &PrefixLayout, binary_name: &str) -> Result
     fs::remove_file(&destination)
         .with_context(|| format!("failed to remove exposed binary: {}", destination.display()))?;
     Ok(())
+}
+
+pub fn projected_exposed_completion_path(
+    package_name: &str,
+    shell: ArtifactCompletionShell,
+    completion_rel_path: &str,
+) -> Result<String> {
+    let relative = validated_relative_completion_source_path(completion_rel_path)?;
+    let normalized_package = normalize_completion_token(package_name);
+    let normalized_path = normalize_completion_source_path(relative);
+    Ok(format!(
+        "packages/{}/{}--{}",
+        shell.as_str(),
+        normalized_package,
+        normalized_path
+    ))
+}
+
+pub fn exposed_completion_path(
+    layout: &PrefixLayout,
+    completion_storage_rel_path: &str,
+) -> Result<PathBuf> {
+    let relative = validated_relative_completion_storage_path(completion_storage_rel_path)?;
+    Ok(layout.completions_dir().join(relative))
+}
+
+pub fn expose_completion(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    package_name: &str,
+    shell: ArtifactCompletionShell,
+    completion_rel_path: &str,
+) -> Result<String> {
+    let source_rel = validated_relative_completion_source_path(completion_rel_path)?;
+    let source_path = install_root.join(source_rel);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "declared completion path '{}' was not found in install root: {}",
+            completion_rel_path,
+            source_path.display()
+        ));
+    }
+
+    let metadata = fs::metadata(&source_path).with_context(|| {
+        format!(
+            "failed to inspect completion path: {}",
+            source_path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(anyhow!(
+            "declared completion path '{}' must be a file: {}",
+            completion_rel_path,
+            source_path.display()
+        ));
+    }
+
+    let storage_rel_path =
+        projected_exposed_completion_path(package_name, shell, completion_rel_path)?;
+    let destination = exposed_completion_path(layout, &storage_rel_path)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create completion dir: {}", parent.display()))?;
+    }
+    if destination.exists() {
+        fs::remove_file(&destination).with_context(|| {
+            format!(
+                "failed to replace existing completion file: {}",
+                destination.display()
+            )
+        })?;
+    }
+
+    fs::copy(&source_path, &destination).with_context(|| {
+        format!(
+            "failed to expose completion file {} -> {}",
+            source_path.display(),
+            destination.display()
+        )
+    })?;
+    Ok(storage_rel_path)
+}
+
+pub fn remove_exposed_completion(
+    layout: &PrefixLayout,
+    completion_storage_rel_path: &str,
+) -> Result<()> {
+    let destination = exposed_completion_path(layout, completion_storage_rel_path)?;
+    if !destination.exists() {
+        return Ok(());
+    }
+
+    fs::remove_file(&destination).with_context(|| {
+        format!(
+            "failed to remove exposed completion file: {}",
+            destination.display()
+        )
+    })?;
+
+    prune_empty_completion_dirs(layout, destination.parent())?;
+    Ok(())
+}
+
+fn prune_empty_completion_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
+    let mut current = start.map(PathBuf::from);
+    let completions_root = layout.completions_dir();
+    while let Some(dir) = current {
+        if !dir.starts_with(&completions_root) || dir == completions_root {
+            break;
+        }
+
+        let mut entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                current = dir.parent().map(PathBuf::from);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed reading completion dir: {}", dir.display()));
+            }
+        };
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&dir)
+            .with_context(|| format!("failed pruning completion dir: {}", dir.display()))?;
+        current = dir.parent().map(PathBuf::from);
+    }
+    Ok(())
+}
+
+fn normalize_completion_token(value: &str) -> String {
+    let mut normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if normalized.is_empty() {
+        normalized.push('_');
+    }
+    normalized
+}
+
+fn normalize_completion_source_path(path: &Path) -> String {
+    let mut parts = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(normalize_completion_token(&value.to_string_lossy())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        parts.push("_".to_string());
+    }
+    parts.join("--")
+}
+
+fn validated_relative_completion_source_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!("completion path must be relative: {}", path));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("completion path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("completion path must not include '..': {}", path));
+    }
+    Ok(relative)
+}
+
+fn validated_relative_completion_storage_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!(
+            "completion storage path must be relative: {}",
+            path
+        ));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("completion storage path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!(
+            "completion storage path must not include '..': {}",
+            path
+        ));
+    }
+    Ok(relative)
 }
 
 fn validated_relative_binary_path(path: &str) -> Result<&Path> {
@@ -1408,13 +1639,16 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
-        parse_receipt, read_active_transaction, read_all_pins, read_pin, read_transaction_metadata,
-        remove_exposed_binary, remove_pin, set_active_transaction, strip_rel_components,
-        uninstall_package, uninstall_package_with_dependency_overrides, update_transaction_status,
+        expose_completion, exposed_completion_path, parse_receipt,
+        projected_exposed_completion_path, read_active_transaction, read_all_pins, read_pin,
+        read_transaction_metadata, remove_exposed_binary, remove_exposed_completion, remove_pin,
+        set_active_transaction, strip_rel_components, uninstall_package,
+        uninstall_package_with_dependency_overrides, update_transaction_status,
         write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
         InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
         UninstallStatus,
     };
+    use crosspack_core::ArtifactCompletionShell;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1430,17 +1664,22 @@ mod tests {
         assert_eq!(receipt.install_status, "installed");
         assert!(receipt.target.is_none());
         assert!(receipt.snapshot_id.is_none());
+        assert!(receipt.exposed_completions.is_empty());
         assert_eq!(receipt.install_reason, InstallReason::Root);
     }
 
     #[test]
     fn parse_new_receipt_shape() {
-        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\nsnapshot_id=git:5f1b3d8a1f2a4d0e\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
+        let raw = "name=fd\nversion=10.2.0\ndependency=zlib@2.1.0\ndependency=pcre2@10.44.0\ntarget=x86_64-unknown-linux-gnu\nartifact_url=https://example.test/fd.tgz\nartifact_sha256=abc\ncache_path=/tmp/fd.tgz\nexposed_bin=fd\nexposed_bin=fdfind\nexposed_completion=packages/bash/fd--completions--fd.bash\nsnapshot_id=git:5f1b3d8a1f2a4d0e\ninstall_reason=dependency\ninstall_status=installed\ninstalled_at_unix=123\n";
         let receipt = parse_receipt(raw).expect("must parse");
         assert_eq!(receipt.dependencies, vec!["zlib@2.1.0", "pcre2@10.44.0"]);
         assert_eq!(receipt.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(receipt.artifact_sha256.as_deref(), Some("abc"));
         assert_eq!(receipt.exposed_bins, vec!["fd", "fdfind"]);
+        assert_eq!(
+            receipt.exposed_completions,
+            vec!["packages/bash/fd--completions--fd.bash"]
+        );
         assert_eq!(receipt.snapshot_id.as_deref(), Some("git:5f1b3d8a1f2a4d0e"));
         assert_eq!(receipt.install_reason, InstallReason::Dependency);
     }
@@ -1694,6 +1933,65 @@ mod tests {
     }
 
     #[test]
+    fn expose_and_remove_completion_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("zoxide", "1.0.0");
+        fs::create_dir_all(package_dir.join("completions")).expect("must create completion dir");
+        fs::write(
+            package_dir.join("completions").join("zoxide.bash"),
+            b"# bash completion\n",
+        )
+        .expect("must write completion file");
+
+        let exposed = expose_completion(
+            &layout,
+            &package_dir,
+            "zoxide",
+            ArtifactCompletionShell::Bash,
+            "completions/zoxide.bash",
+        )
+        .expect("must expose completion");
+        assert_eq!(
+            exposed,
+            projected_exposed_completion_path(
+                "zoxide",
+                ArtifactCompletionShell::Bash,
+                "completions/zoxide.bash",
+            )
+            .expect("must project completion path")
+        );
+        let exposed_path = exposed_completion_path(&layout, &exposed)
+            .expect("must resolve exposed completion storage path");
+        assert!(exposed_path.exists());
+
+        remove_exposed_completion(&layout, &exposed).expect("must remove completion");
+        assert!(!exposed_path.exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn expose_completion_rejects_invalid_relative_path() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("zoxide", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+
+        let err = expose_completion(
+            &layout,
+            &package_dir,
+            "zoxide",
+            ArtifactCompletionShell::Zsh,
+            "../outside/_zoxide",
+        )
+        .expect_err("path traversal should be rejected");
+        assert!(err.to_string().contains("must not include '..'"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn strip_components_behavior() {
         let p = Path::new("top/inner/bin/tool");
         assert_eq!(
@@ -1711,6 +2009,16 @@ mod tests {
         let package_dir = layout.package_dir("demo", "1.0.0");
         fs::create_dir_all(&package_dir).expect("must create package dir");
         fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+        let completion_rel_path = "packages/bash/demo--completions--demo.bash".to_string();
+        let completion_path = exposed_completion_path(&layout, &completion_rel_path)
+            .expect("must resolve completion storage path");
+        fs::create_dir_all(
+            completion_path
+                .parent()
+                .expect("completion path must have parent"),
+        )
+        .expect("must create completion parent dir");
+        fs::write(&completion_path, b"# demo completion\n").expect("must create completion file");
 
         write_install_receipt(
             &layout,
@@ -1723,6 +2031,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: vec![completion_rel_path],
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -1736,6 +2045,7 @@ mod tests {
         assert_eq!(result.version.as_deref(), Some("1.0.0"));
         assert!(!layout.receipt_path("demo").exists());
         assert!(!package_dir.exists());
+        assert!(!completion_path.exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
@@ -1768,6 +2078,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path: None,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
@@ -2131,6 +2442,7 @@ mod tests {
                 artifact_sha256: None,
                 cache_path,
                 exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
                 snapshot_id: None,
                 install_reason,
                 install_status: "installed".to_string(),

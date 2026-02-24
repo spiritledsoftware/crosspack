@@ -38,6 +38,7 @@ Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** pa
 - Search and inspect package metadata from verified local snapshots.
 - Configure multiple registry sources with deterministic precedence.
 - Install packages with transitive dependency resolution and target selection.
+- Install package-declared shell completion files (bash/zsh/fish/powershell) into Crosspack-managed completion directories.
 - Enforce per-package version pins.
 - Upgrade single packages or all installed roots.
 - Uninstall with dependency-aware blocking and orphan pruning.
@@ -86,6 +87,9 @@ Opt-out controls:
 - Windows: run installer with `-NoShellSetup`.
 
 If shell setup cannot run (unsupported shell or profile write issue), install still succeeds and prints manual commands.
+
+Package completion file note:
+- Package-declared completion files are populated on install/upgrade/reinstall of that package. Existing installed packages may need `crosspack upgrade <name>` (or reinstall) to populate new completion assets.
 
 After install, verify the bin directory is in your `PATH`:
 - macOS/Linux default bin dir: `~/.crosspack/bin`
@@ -143,14 +147,15 @@ cargo run -p crosspack-cli -- completions bash
 ```
 
 Tip: `completions` targets the canonical `crosspack` binary name.
+Tip: generated Crosspack scripts include loader logic for package-declared completion files under `<prefix>/share/completions/packages/<shell>/`.
 
-### 6) Optional: print PATH setup command
+### 6) Optional: print shell setup snippet (PATH + completion loader)
 
 ```bash
-cargo run -p crosspack-cli -- init-shell
+cargo run -p crosspack-cli -- init-shell --shell zsh
 ```
 
-Tip: `init-shell` output is unchanged and prints a PATH command only.
+Tip: `init-shell` auto-detects shell when `--shell` is omitted; fallback is `bash` on Unix and `powershell` on Windows.
 
 ## Legacy `--registry-root` mode
 
@@ -179,8 +184,8 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 | `rollback [txid]` | Roll back eligible transaction state. |
 | `repair` | Recover stale or failed transaction markers. |
 | `doctor` | Show prefix paths and transaction health. |
-| `completions <bash\|zsh\|fish\|powershell>` | Print shell completion script for the canonical `crosspack` binary. |
-| `init-shell` | Print shell command to add Crosspack bin directory to `PATH`. |
+| `completions <bash\|zsh\|fish\|powershell>` | Print shell completion script for the canonical `crosspack` binary, including package completion loader block. |
+| `init-shell [--shell <bash\|zsh\|fish\|powershell>]` | Print shell setup snippet that adds Crosspack bin directory to `PATH` and sources Crosspack/package completion scripts. |
 
 ## Security Model
 

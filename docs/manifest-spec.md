@@ -25,6 +25,7 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
+- `completions` (optional): list of shell completion files exposed for this artifact.
 
 ## Registry Metadata Signing
 
@@ -51,6 +52,11 @@ Until these milestones land, manifests should use the current v0.2 field set doc
 - `name`: exposed command name placed into `<prefix>/bin/`.
 - `path`: relative path inside extracted package content.
 
+### Artifact Completion Fields
+
+- `shell`: one of `bash`, `zsh`, `fish`, `powershell`.
+- `path`: relative path inside extracted package content.
+
 ## Example
 
 ```toml
@@ -71,6 +77,14 @@ strip_components = 1
 [[artifacts.binaries]]
 name = "rg"
 path = "rg"
+
+[[artifacts.completions]]
+shell = "bash"
+path = "completions/rg.bash"
+
+[[artifacts.completions]]
+shell = "zsh"
+path = "completions/_rg"
 
 [[artifacts]]
 target = "x86_64-pc-windows-msvc"
