@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/spiritledsoftware/crosspack/compare/v0.2.1...v0.3.0) (2026-02-24)
+
+
+### Features
+
+* **release:** sync stable releases into registry index ([#36](https://github.com/spiritledsoftware/crosspack/issues/36)) ([cc9a164](https://github.com/spiritledsoftware/crosspack/commit/cc9a1647dc100fa703dba3141e37e338e125ef0f))
+
 ## [0.2.1](https://github.com/spiritledsoftware/crosspack/compare/v0.2.0...v0.2.1) (2026-02-24)
 
 
