@@ -186,8 +186,9 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 | `rollback [txid]` | Roll back eligible transaction state. |
 | `repair` | Recover stale or failed transaction markers. |
 | `doctor` | Show prefix paths and transaction health. |
+| `version` / `--version` | Print the Crosspack CLI version. |
 | `completions <bash\|zsh\|fish\|powershell>` | Print shell completion script for the canonical `crosspack` binary, including package completion loader block. |
-| `init-shell [--shell <bash\|zsh\|fish\|powershell>]` | Print shell setup snippet that adds Crosspack bin directory to `PATH` and sources Crosspack/package completion scripts. |
+| `init-shell [--shell <bash\|zsh\|fish\|powershell>]` | Print shell setup snippet that adds Crosspack bin directory to `PATH` and loads Crosspack/package completion scripts. |
 
 ## Security Model
 
