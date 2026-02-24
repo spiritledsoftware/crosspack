@@ -157,8 +157,7 @@ impl PackageManifest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveType, ArtifactCompletionShell, PackageManifest};
-    use semver::VersionReq;
+    use super::*;
 
     #[test]
     fn parse_manifest() {

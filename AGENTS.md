@@ -1,86 +1,72 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-02-12T21:23:56Z
-**Commit:** a63c8a4
-**Branch:** main
+**Generated:** 2026-02-24
+**Commit:** 9bbb5cb
+**Branch:** feat/cli-output-ux
 
 ## OVERVIEW
-Crosspack is a Rust workspace for a cross-platform package manager with a single CLI binary and focused supporting crates for core models, registry IO, resolution, installation lifecycle, and security verification.
+Crosspack is a Rust workspace for a native cross-platform package manager. The CLI crate orchestrates install/upgrade/source-management flows over focused library crates for core models, registry trust, resolver logic, installer state, and security primitives.
 
 ## STRUCTURE
 ```text
-crosspack/
+./
 ├── crates/
-│   ├── crosspack-cli/        # command wiring + user-facing output
-│   ├── crosspack-core/       # manifest/domain model types
-│   ├── crosspack-installer/  # install/uninstall/receipt/pin lifecycle
-│   ├── crosspack-registry/   # index traversal + manifest validation
-│   ├── crosspack-resolver/   # dependency and version selection
-│   └── crosspack-security/   # checksum/signature verification
-├── docs/                     # architecture and flow specs
-└── .github/workflows/ci.yml  # quality gates source of truth
+│   ├── crosspack-cli/        # single runtime entrypoint; all command routing
+│   ├── crosspack-installer/  # transaction/state lifecycle + prefix layout
+│   ├── crosspack-registry/   # source records, snapshots, signature checks
+│   ├── crosspack-resolver/   # dependency graph solve and ordering
+│   ├── crosspack-core/       # shared manifest/domain types
+│   └── crosspack-security/   # checksum + Ed25519 verification helpers
+├── docs/                     # GA behavior specs + non-GA roadmap specs
+├── scripts/                  # install/bootstrap and snapshot health automation
+└── .github/workflows/        # CI, release, prerelease, registry sync pipelines
 ```
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Add or change CLI command | `crates/crosspack-cli/src/main.rs` | All command routing is centralized here. |
-| Update manifest schema | `crates/crosspack-core/src/lib.rs` | Shared data model for all crates. |
-| Change install/uninstall behavior | `crates/crosspack-installer/src/lib.rs` | Receipts, pin state, filesystem lifecycle. |
-| Adjust registry search/info logic | `crates/crosspack-registry/src/lib.rs` | Signature-checked manifest loading. |
-| Change dependency resolution rules | `crates/crosspack-resolver/src/lib.rs` | Backtracking + compatibility selection. |
-| Change checksum/signature checks | `crates/crosspack-security/src/lib.rs` | Keep behavior deterministic and explicit. |
-| Update workflow docs/specs | `docs/` | Keep command semantics in sync with code. |
+| Add/change CLI command behavior | `crates/crosspack-cli/src/main.rs` | Central integration hotspot across all crates |
+| Manifest schema or metadata fields | `crates/crosspack-core/src/lib.rs` | Keep docs in sync when fields change |
+| Registry trust/snapshot logic | `crates/crosspack-registry/src/lib.rs` | Fingerprint and signature rules fail closed |
+| Install/upgrade/uninstall state changes | `crates/crosspack-installer/src/lib.rs` | Receipts, pins, transaction markers, rollback hooks |
+| Resolver policy changes | `crates/crosspack-resolver/src/lib.rs` | Constraint solve and deterministic ordering |
+| Hash/signature verification | `crates/crosspack-security/src/lib.rs` | Shared by registry and CLI install paths |
+| CI/release behavior | `.github/workflows/*.yml` | Docs-only changes are path-ignored in CI |
 
 ## CODE MAP
-| Symbol | Type | Location | Refs | Role |
-|-------|------|----------|------|------|
-| `main` | fn | `crates/crosspack-cli/src/main.rs` | high | Central command dispatcher. |
-| `RegistryIndex` | struct | `crates/crosspack-registry/src/lib.rs` | high | Registry root reader + query entrypoint. |
-| `resolve_dependency_graph` | fn | `crates/crosspack-resolver/src/lib.rs` | high | Dependency graph solver. |
-| `PrefixLayout` | struct | `crates/crosspack-installer/src/lib.rs` | high | Filesystem layout contract. |
-| `install_from_artifact` | fn | `crates/crosspack-installer/src/lib.rs` | high | Artifact extraction + install path. |
-| `verify_sha256_file` | fn | `crates/crosspack-security/src/lib.rs` | medium | Digest verification utility. |
+| Symbol Cluster | Type | Location | Refs | Role |
+|----------------|------|----------|------|------|
+| `Commands` and command handlers | enums/fns | `crates/crosspack-cli/src/main.rs` | high | User-facing command dispatch + output contract |
+| install transaction + receipt types | structs/fns | `crates/crosspack-installer/src/lib.rs` | high | Prefix layout, lifecycle state, rollback metadata |
+| source records + snapshot update | structs/fns | `crates/crosspack-registry/src/lib.rs` | high | Source management and trust-anchored metadata reads |
+| dependency solver core | fns | `crates/crosspack-resolver/src/lib.rs` | medium | Deterministic dependency planning |
 
 ## CONVENTIONS
-- One binary entrypoint: `crosspack-cli` owns all command wiring; other crates stay library-only.
-- CI order is fixed and strict: fmt check, clippy (warnings denied), workspace tests.
-- Commit messages must follow Conventional Commits: `type(scope): subject` (https://www.conventionalcommits.org/en/v1.0.0/).
-- Imports grouped as `std` then external crates then workspace crates.
-- Use `Path`/`PathBuf` for filesystem work; avoid string path concatenation.
-- Keep user-facing messages deterministic; libraries should stay quiet.
+- Workspace crates inherit version/edition/license and most dependencies from root `Cargo.toml`; avoid per-crate drift.
+- `crosspack` and `cpk` binaries both map to the same `crates/crosspack-cli/src/main.rs` entrypoint.
+- Output mode is contract-sensitive: interactive terminals get rich status; non-interactive output remains deterministic plain text.
+- Specs marked v0.4/v0.5 are roadmap design docs unless behavior is explicitly shipped in current code/tests.
 
 ## ANTI-PATTERNS (THIS PROJECT)
-- Claiming completion without running CI-equivalent checks (or explicitly stating why not run).
-- Using `unwrap()` in production paths.
-- Adding noisy output in non-CLI crates.
-- Introducing path logic via raw string concatenation.
-- Skipping test updates for behavior changes.
+- Do not claim roadmap specs as GA behavior in CLI/docs.
+- Do not bypass registry fingerprint/signature verification in metadata-dependent paths.
+- Do not alter deterministic machine-oriented output lines (`transaction_*`, `risk_flags`, `change_*`, update summary format) without coordinated contract update.
+- Do not change installer transaction/receipt fields without syncing `docs/install-flow.md` and related specs.
 
 ## UNIQUE STYLES
-- Test names describe behavior in snake_case, often long and explicit.
-- Small crates with focused responsibility; heavy logic isolated per domain crate.
-- CLI lifecycle output uses stable states: installed / upgraded / uninstalled / not installed / up-to-date.
+- Security/trust wording is explicit and fail-closed; docs intentionally include operational guardrails.
+- Release flow is split: Release Please (version/changelog), then artifact workflows on tags, then registry sync on stable publish.
+- Snapshot health is treated as a first-class release gate (`scripts/validate-snapshot-flow.sh`, `scripts/check-snapshot-mismatch-health.sh`).
 
 ## COMMANDS
 ```bash
-# quality gates (mirror CI)
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-
-# local development
-cargo build --workspace
-cargo run -p crosspack-cli -- --help
-cargo run -p crosspack-cli -- search ripgrep
-cargo run -p crosspack-cli -- info ripgrep
-
-# focused test runs
-cargo test -p crosspack-cli parse_pin_spec_requires_constraint -- --exact
-cargo test -p crosspack-installer uninstall_removes_package_dir_and_receipt
+rustup run stable cargo fmt --all --check
+rustup run stable cargo clippy --workspace --all-targets --all-features -- -D warnings
+rustup run stable cargo build --workspace --locked
+rustup run stable cargo test --workspace
+scripts/validate-snapshot-flow.sh
 ```
 
 ## NOTES
-- CI executes on Linux/macOS/Windows; preserve cross-platform process/path behavior.
-- If command semantics change, update `docs/architecture.md`, `docs/install-flow.md`, and related specs under `docs/`.
-- For deep crate-specific guidance, read child knowledge files under `crates/`.
+- There were no existing repo-local `AGENTS.md` files at generation time.
+- Build artifacts under `target/` dominate raw file counts; prefer `git ls-files` for source-aware structure analysis.

@@ -42,6 +42,12 @@
 - ordered `change_*` entries (`change_add`, `change_remove`, `change_replace`, `change_transition`).
 - no transaction metadata, receipts, package files, or binaries are mutated.
 
+For non-dry-run lifecycle output, Crosspack auto-selects output mode:
+- interactive terminal: rich status badges for human readability,
+- non-interactive/piped output: plain deterministic lines.
+
+Machine-oriented dry-run preview lines remain unchanged regardless of output mode.
+
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 `crosspack upgrade --dry-run` emits the same preview format and performs planning without mutation.
 

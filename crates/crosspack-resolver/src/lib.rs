@@ -341,15 +341,7 @@ fn topo_order(selected: &BTreeMap<String, PackageManifest>) -> Result<Vec<String
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use crosspack_core::PackageManifest;
-    use semver::VersionReq;
-
-    use crate::{
-        resolve_dependency_graph, resolve_dependency_graph_with_installed,
-        select_highest_compatible, RootRequirement,
-    };
+    use super::*;
 
     #[test]
     fn selects_latest_matching_version() {

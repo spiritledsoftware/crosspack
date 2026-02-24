@@ -1637,21 +1637,7 @@ pub fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append_transaction_journal_entry, bin_path, clear_active_transaction, expose_binary,
-        expose_completion, exposed_completion_path, parse_receipt,
-        projected_exposed_completion_path, read_active_transaction, read_all_pins, read_pin,
-        read_transaction_metadata, remove_exposed_binary, remove_exposed_completion, remove_pin,
-        set_active_transaction, strip_rel_components, uninstall_package,
-        uninstall_package_with_dependency_overrides, update_transaction_status,
-        write_install_receipt, write_pin, write_transaction_metadata, InstallReason,
-        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
-        UninstallStatus,
-    };
-    use crosspack_core::ArtifactCompletionShell;
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::{Path, PathBuf};
+    use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
