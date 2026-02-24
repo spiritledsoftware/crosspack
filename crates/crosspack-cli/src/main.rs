@@ -4082,50 +4082,11 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_provider_override, apply_replacement_handoff, begin_transaction,
-        build_self_update_install_args, build_transaction_preview, build_update_report,
-        build_upgrade_plans, build_upgrade_roots, collect_replacement_receipts,
-        current_unix_timestamp, determine_install_reason, doctor_transaction_health_line,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
-        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
-        execute_with_transaction, format_info_lines, format_install_outcome_lines,
-        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_search_results, format_uninstall_messages,
-        format_update_output_lines, format_update_summary_line, normalize_command_token,
-        parse_pin_spec, parse_provider_overrides, registry_state_root, render_status_line,
-        render_transaction_preview_lines, resolve_init_shell, resolve_output_style,
-        resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
-        run_search_command, run_uninstall_command, run_update_command, run_upgrade_command,
-        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
-        update_failure_reason_code, validate_binary_preflight,
-        validate_binary_preflight_with_current_exe, validate_completion_preflight,
-        validate_install_preflight_for_resolved, validate_provider_overrides_used,
-        write_completions_script, Cli, CliCompletionShell, CliRegistryKind, Commands,
-        MetadataBackend, OutputStyle, PlannedPackageChange, PlannedRemoval, ResolvedInstall,
-        TransactionPreviewMode,
-    };
-    use clap::{error::ErrorKind, Parser};
-    use crosspack_core::{ArchiveType, PackageManifest};
-    use crosspack_installer::{
-        append_transaction_journal_entry, bin_path, expose_binary, exposed_completion_path,
-        read_active_transaction, read_install_receipts, read_transaction_metadata,
-        set_active_transaction, write_install_receipt, write_transaction_metadata, InstallReason,
-        InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata,
-        UninstallResult, UninstallStatus,
-    };
-    use crosspack_registry::{
-        RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
-        RegistrySourceWithSnapshotState, RegistrySourceWithSnapshotStatus, SourceUpdateResult,
-        SourceUpdateStatus,
-    };
-    use semver::VersionReq;
-    use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
+    use super::*;
+    use clap::error::ErrorKind;
+    use crosspack_registry::RegistrySourceWithSnapshotStatus;
     use ed25519_dalek::{Signer, SigningKey};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn begin_transaction_writes_planning_metadata_and_active_marker() {
