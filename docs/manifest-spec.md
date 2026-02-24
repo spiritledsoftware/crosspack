@@ -21,12 +21,29 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
 - `signature` (optional in v0.1): artifact-level detached signature reference.
-- `archive` (optional): archive type override (`zip`, `tar.gz`, `tar.zst`). If omitted, inferred from URL suffix.
+- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
 - `completions` (optional): list of shell completion files exposed for this artifact.
 - `gui_apps` (optional): list of GUI application integrations exposed for this artifact.
+
+### Artifact Kind Policy
+
+- Artifact ingestion is deterministic and fail-closed.
+- Crosspack does not run vendor installer UI/execution fallback flows.
+- `msi` artifacts are staged only on Windows hosts.
+- `dmg` artifacts are staged only on macOS hosts.
+- `appimage` artifacts are staged as direct payload files and require `strip_components = 0` with no `artifact_root` override.
+
+### Native GUI Registration Policy
+
+- GUI metadata may be projected into native user-scope registration locations by platform.
+- Native registration is best-effort and warning-driven (install success does not require adapter success).
+- Known current limits:
+  - Linux refresh depends on `update-desktop-database` availability.
+  - Windows protocol/file-association registration is scoped to HKCU only.
+  - macOS registration links into `~/Applications` and best-effort refreshes LaunchServices.
 
 ## Registry Metadata Signing
 
