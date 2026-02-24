@@ -3445,7 +3445,9 @@ mod tests {
             icon: None,
             categories: vec!["Utility".to_string()],
             file_associations: Vec::new(),
-            protocols: Vec::new(),
+            protocols: vec![crosspack_core::ArtifactGuiProtocol {
+                scheme: "demo".to_string(),
+            }],
         };
 
         let (_records, warnings) = register_native_gui_app_best_effort_with_executor(
