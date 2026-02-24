@@ -161,6 +161,10 @@ fi
 git config user.name "crosspack-bot"
 git config user.email "crosspack-bot@users.noreply.github.com"
 
+if [ -n "${GH_TOKEN:-}" ]; then
+  git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REGISTRY_REPOSITORY}.git"
+fi
+
 git add "index/crosspack/${VERSION}.toml" "index/crosspack/${VERSION}.toml.sig"
 git commit -m "chore(registry): add crosspack@${VERSION}"
 git push origin HEAD:main
