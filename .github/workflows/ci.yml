@@ -46,7 +46,7 @@ jobs:
 
       - name: Actionlint
         if: matrix.os == 'ubuntu-latest'
-        uses: rhysd/actionlint@v1
+        uses: reviewdog/action-actionlint@v1
 
       - name: Snapshot-flow validation
         if: matrix.os == 'ubuntu-latest'
