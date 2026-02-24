@@ -161,6 +161,8 @@ dependencies = [
  "crosspack-registry",
  "crosspack-resolver",
  "crosspack-security",
+ "ed25519-dalek",
+ "hex",
  "semver",
  "serde_json",
 ]

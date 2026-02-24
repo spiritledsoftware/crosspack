@@ -23,3 +23,7 @@ crosspack-resolver = { path = "../crosspack-resolver" }
 crosspack-security = { path = "../crosspack-security" }
 semver.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
