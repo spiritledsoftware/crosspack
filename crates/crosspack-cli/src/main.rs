@@ -34,6 +34,7 @@ use serde_json::Value;
 
 #[derive(Parser, Debug)]
 #[command(name = "crosspack")]
+#[command(version)]
 #[command(about = "Native cross-platform package manager", long_about = None)]
 struct Cli {
     #[arg(long)]
@@ -95,6 +96,7 @@ enum Commands {
         registry: Vec<String>,
     },
     Doctor,
+    Version,
     Completions {
         shell: CliCompletionShell,
     },
@@ -444,6 +446,9 @@ fn main() -> Result<()> {
             println!("bin: {}", layout.bin_dir().display());
             println!("cache: {}", layout.cache_dir().display());
             println!("{}", doctor_transaction_health_line(&layout)?);
+        }
+        Commands::Version => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
         }
         Commands::Completions { shell } => {
             let prefix = default_user_prefix()?;
@@ -3739,7 +3744,7 @@ mod tests {
         CliRegistryKind, Commands, MetadataBackend, PlannedPackageChange, PlannedRemoval,
         ResolvedInstall, TransactionPreviewMode,
     };
-    use clap::Parser;
+    use clap::{error::ErrorKind, Parser};
     use crosspack_core::{ArchiveType, PackageManifest};
     use crosspack_installer::{
         append_transaction_journal_entry, bin_path, expose_binary, exposed_completion_path,
@@ -6766,6 +6771,19 @@ ripgrep-legacy = "*"
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_version_subcommand() {
+        let cli = Cli::try_parse_from(["crosspack", "version"]).expect("command must parse");
+        assert!(matches!(cli.command, Commands::Version));
+    }
+
+    #[test]
+    fn cli_supports_global_version_flag() {
+        let err = Cli::try_parse_from(["crosspack", "--version"])
+            .expect_err("version flag should exit with version output");
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     }
 
     #[test]
