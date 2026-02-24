@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/spiritledsoftware/crosspack/compare/v0.3.0...v0.3.1) (2026-02-24)
+
+
+### Bug Fixes
+
+* **release:** wait for release checksums before registry sync ([#38](https://github.com/spiritledsoftware/crosspack/issues/38)) ([dcedeb6](https://github.com/spiritledsoftware/crosspack/commit/dcedeb6772cfb8aeacf1f96da5037baffe25db5e))
+
 ## [0.3.0](https://github.com/spiritledsoftware/crosspack/compare/v0.2.1...v0.3.0) (2026-02-24)
 
 
