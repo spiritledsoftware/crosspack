@@ -35,7 +35,37 @@
      - preserve existing `install_reason=root` when upgrading already-rooted packages.
 17. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
+`crosspack install --dry-run` executes the same planning and emits deterministic, script-friendly preview lines:
+- `transaction_preview operation=... mode=dry-run`
+- `transaction_summary adds=... removals=... replacements=... transitions=...`
+- `risk_flags=...`
+- ordered `change_*` entries (`change_add`, `change_remove`, `change_replace`, `change_transition`).
+- no transaction metadata, receipts, package files, or binaries are mutated.
+
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
+`crosspack upgrade --dry-run` emits the same preview format and performs planning without mutation.
+
+## Transaction Phases and Recovery (current v0.3)
+
+Crosspack executes install/upgrade mutations under a transaction state machine with persisted status markers:
+
+1. `planning`: resolve graph, artifact selection, and preflight checks.
+2. `applying`: stage/extract/apply package and binary mutations.
+3. `rolling_back` (only on failure/interruption): reverse applied steps to restore a consistent prefix.
+4. `completed` or terminal failure marker after rollback attempt.
+
+Operator commands:
+- `rollback [txid]`: replay rollback for eligible interrupted/failed transactions.
+- `repair`: clear stale markers and reconcile recoverable interrupted state.
+- `doctor`: surface transaction health and prefix diagnostics.
+
+## Planned Dependency Policy Extensions (non-GA)
+
+The following install-flow extensions are planned in `docs/dependency-policy-spec.md` and are not GA behavior yet:
+
+- provider capability selection (`provides`) with deterministic tie-breaks,
+- conflict gating (`conflicts`) during resolution/apply preflight,
+- replacement semantics (`replaces`) with ownership-aware binary handoff.
 
 ## Transaction Phases and Recovery (current v0.3)
 

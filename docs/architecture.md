@@ -55,9 +55,11 @@ Default user prefixes:
 - `install` exposes declared binaries into `<prefix>/bin/` (symlinks on Unix, `.cmd` shims on Windows) and hard-fails on collisions.
 - `install` supports:
   - `--target <triple>` to override host target selection.
+  - `--dry-run` to print deterministic transaction preview lines (`transaction_summary`, `risk_flags`, ordered `change_*`) without mutation.
   - `--force-redownload` to bypass artifact cache.
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
+- `upgrade --dry-run` performs full planning and emits the same deterministic transaction preview format without mutating install state.
 - Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.

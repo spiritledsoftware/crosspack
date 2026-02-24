@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -62,12 +62,16 @@ enum Commands {
         #[arg(long)]
         target: Option<String>,
         #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
         force_redownload: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
     },
     Upgrade {
         spec: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
     },
@@ -204,6 +208,7 @@ fn main() -> Result<()> {
         Commands::Install {
             spec,
             target,
+            dry_run,
             force_redownload,
             provider,
         } => {
@@ -220,6 +225,29 @@ fn main() -> Result<()> {
                 Some(_) => None,
                 None => Some(resolve_transaction_snapshot_id(&layout, "install")?),
             };
+            if dry_run {
+                let roots = vec![RootInstallRequest { name, requirement }];
+                let resolved = resolve_install_graph(
+                    &layout,
+                    &backend,
+                    &roots,
+                    target.as_deref(),
+                    &provider_overrides,
+                )?;
+                let receipts = read_install_receipts(&layout)?;
+                for package in &resolved {
+                    validate_install_preflight_for_resolved(&layout, package, &receipts)?;
+                }
+                let planned_changes = build_planned_package_changes(&resolved, &receipts)?;
+                let preview = build_transaction_preview("install", &planned_changes);
+                for line in
+                    render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun)
+                {
+                    println!("{line}");
+                }
+                return Ok(());
+            }
+
             execute_with_transaction(&layout, "install", snapshot_id.as_deref(), |tx| {
                 let mut journal_seq = 1_u64;
                 let roots = vec![RootInstallRequest { name, requirement }];
@@ -306,7 +334,11 @@ fn main() -> Result<()> {
                 eprintln!("{err}");
             }
         }
-        Commands::Upgrade { spec, provider } => {
+        Commands::Upgrade {
+            spec,
+            dry_run,
+            provider,
+        } => {
             let provider_overrides = parse_provider_overrides(&provider)?;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -314,6 +346,7 @@ fn main() -> Result<()> {
                 &layout,
                 cli.registry_root.as_deref(),
                 spec,
+                dry_run,
                 &provider_overrides,
             )?;
         }
@@ -932,6 +965,7 @@ fn run_upgrade_command(
     layout: &PrefixLayout,
     registry_root: Option<&Path>,
     spec: Option<String>,
+    dry_run: bool,
     provider_overrides: &BTreeMap<String, String>,
 ) -> Result<()> {
     ensure_upgrade_command_ready(layout)?;
@@ -947,6 +981,92 @@ fn run_upgrade_command(
         Some(_) => None,
         None => Some(resolve_transaction_snapshot_id(layout, "upgrade")?),
     };
+
+    if dry_run {
+        let mut planned_changes = Vec::new();
+
+        match spec.as_deref() {
+            Some(single) => {
+                let (name, requirement) = parse_spec(single)?;
+                let installed = receipts.iter().find(|receipt| receipt.name == name);
+                let Some(installed_receipt) = installed else {
+                    println!("{name} is not installed");
+                    return Ok(());
+                };
+
+                let roots = vec![RootInstallRequest {
+                    name: installed_receipt.name.clone(),
+                    requirement,
+                }];
+                let resolved = resolve_install_graph(
+                    layout,
+                    &backend,
+                    &roots,
+                    installed_receipt.target.as_deref(),
+                    provider_overrides,
+                )?;
+                enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+                for package in &resolved {
+                    validate_install_preflight_for_resolved(layout, package, &receipts)?;
+                }
+                planned_changes.extend(build_planned_package_changes(&resolved, &receipts)?);
+            }
+            None => {
+                let plans = build_upgrade_plans(&receipts);
+                if plans.is_empty() {
+                    println!("{NO_ROOT_PACKAGES_TO_UPGRADE}");
+                    return Ok(());
+                }
+
+                let mut grouped_resolved = Vec::new();
+                let mut resolved_dependency_tokens = HashSet::new();
+                for plan in &plans {
+                    let (resolved, plan_tokens) = resolve_install_graph_with_tokens(
+                        layout,
+                        &backend,
+                        &plan.roots,
+                        plan.target.as_deref(),
+                        provider_overrides,
+                        false,
+                    )?;
+                    enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+                    resolved_dependency_tokens.extend(plan_tokens);
+                    grouped_resolved.push(resolved);
+                }
+
+                validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
+
+                let overlap_check = grouped_resolved
+                    .iter()
+                    .zip(plans.iter())
+                    .map(|(resolved, plan)| {
+                        (
+                            plan.target.as_deref(),
+                            resolved
+                                .iter()
+                                .map(|package| package.manifest.name.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                enforce_disjoint_multi_target_upgrade(&overlap_check)?;
+
+                for resolved in &grouped_resolved {
+                    for package in resolved {
+                        validate_install_preflight_for_resolved(layout, package, &receipts)?;
+                    }
+                    planned_changes.extend(build_planned_package_changes(resolved, &receipts)?);
+                }
+            }
+        }
+
+        let preview = build_transaction_preview("upgrade", &planned_changes);
+        for line in render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
     execute_with_transaction(layout, "upgrade", snapshot_id.as_deref(), |tx| {
         let mut journal_seq = 1_u64;
 
@@ -2306,6 +2426,66 @@ struct InstallOutcome {
     exposed_completions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PlannedRemoval {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PlannedReplacement {
+    from_name: String,
+    from_version: String,
+    to_name: String,
+    to_version: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PlannedTransition {
+    name: String,
+    from_version: String,
+    to_version: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PlannedAdd {
+    name: String,
+    version: String,
+    target: String,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedPackageChange {
+    name: String,
+    target: String,
+    new_version: String,
+    old_version: Option<String>,
+    replacement_removals: Vec<PlannedRemoval>,
+}
+
+#[derive(Debug, Clone)]
+struct TransactionPreview {
+    operation: String,
+    adds: Vec<PlannedAdd>,
+    removals: Vec<PlannedRemoval>,
+    replacements: Vec<PlannedReplacement>,
+    transitions: Vec<PlannedTransition>,
+    risk_flags: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TransactionPreviewMode {
+    DryRun,
+}
+
+impl TransactionPreviewMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DryRun => "dry-run",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RootInstallRequest {
     name: String,
@@ -2622,17 +2802,179 @@ fn resolve_install_graph_with_tokens(
     Ok((resolved, resolved_dependency_tokens))
 }
 
-fn install_resolved(
+fn build_planned_package_changes(
+    resolved: &[ResolvedInstall],
+    receipts: &[InstallReceipt],
+) -> Result<Vec<PlannedPackageChange>> {
+    let mut planned = Vec::with_capacity(resolved.len());
+    for package in resolved {
+        let replacement_receipts = collect_replacement_receipts(&package.manifest, receipts)?;
+        let replacement_removals = replacement_receipts
+            .into_iter()
+            .map(|receipt| PlannedRemoval {
+                name: receipt.name,
+                version: receipt.version,
+            })
+            .collect::<Vec<_>>();
+        let old_version = receipts
+            .iter()
+            .find(|receipt| receipt.name == package.manifest.name)
+            .map(|receipt| receipt.version.clone());
+        planned.push(PlannedPackageChange {
+            name: package.manifest.name.clone(),
+            target: package.resolved_target.clone(),
+            new_version: package.manifest.version.to_string(),
+            old_version,
+            replacement_removals,
+        });
+    }
+
+    planned.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(planned)
+}
+
+fn build_transaction_preview(
+    operation: &str,
+    planned: &[PlannedPackageChange],
+) -> TransactionPreview {
+    let mut adds = Vec::new();
+    let mut removals = BTreeSet::new();
+    let mut replacements = BTreeSet::new();
+    let mut transitions = Vec::new();
+
+    for package in planned {
+        if package.old_version.is_none() {
+            adds.push(PlannedAdd {
+                name: package.name.clone(),
+                version: package.new_version.clone(),
+                target: package.target.clone(),
+            });
+        }
+
+        if let Some(old_version) = package.old_version.as_ref() {
+            if old_version != &package.new_version {
+                transitions.push(PlannedTransition {
+                    name: package.name.clone(),
+                    from_version: old_version.clone(),
+                    to_version: package.new_version.clone(),
+                });
+            }
+        }
+
+        for removal in &package.replacement_removals {
+            removals.insert(removal.clone());
+            replacements.insert(PlannedReplacement {
+                from_name: removal.name.clone(),
+                from_version: removal.version.clone(),
+                to_name: package.name.clone(),
+                to_version: package.new_version.clone(),
+            });
+        }
+    }
+
+    adds.sort();
+    transitions.sort();
+    let removals = removals.into_iter().collect::<Vec<_>>();
+    let replacements = replacements.into_iter().collect::<Vec<_>>();
+
+    let mut risk_flags = BTreeSet::new();
+    if !adds.is_empty() {
+        risk_flags.insert("adds".to_string());
+    }
+    if !removals.is_empty() {
+        risk_flags.insert("removals".to_string());
+    }
+    if !replacements.is_empty() {
+        risk_flags.insert("replacements".to_string());
+    }
+    if !transitions.is_empty() {
+        risk_flags.insert("version-transitions".to_string());
+    }
+    let mut mutating_packages = BTreeSet::new();
+    for package in planned {
+        let has_add = package.old_version.is_none();
+        let has_transition = package
+            .old_version
+            .as_ref()
+            .is_some_and(|old| old != &package.new_version);
+        let has_replacement = !package.replacement_removals.is_empty();
+        if has_add || has_transition || has_replacement {
+            mutating_packages.insert(package.name.clone());
+        }
+    }
+    if mutating_packages.len() > 1 {
+        risk_flags.insert("multi-package-transaction".to_string());
+    }
+    if risk_flags.is_empty() {
+        risk_flags.insert("none".to_string());
+    }
+
+    TransactionPreview {
+        operation: operation.to_string(),
+        adds,
+        removals,
+        replacements,
+        transitions,
+        risk_flags: risk_flags.into_iter().collect(),
+    }
+}
+
+fn render_transaction_preview_lines(
+    preview: &TransactionPreview,
+    mode: TransactionPreviewMode,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "transaction_preview operation={} mode={}",
+        preview.operation,
+        mode.as_str()
+    ));
+    lines.push(format!(
+        "transaction_summary adds={} removals={} replacements={} transitions={}",
+        preview.adds.len(),
+        preview.removals.len(),
+        preview.replacements.len(),
+        preview.transitions.len()
+    ));
+    lines.push(format!("risk_flags={}", preview.risk_flags.join(",")));
+
+    for add in &preview.adds {
+        lines.push(format!(
+            "change_add name={} version={} target={}",
+            add.name, add.version, add.target
+        ));
+    }
+    for removal in &preview.removals {
+        lines.push(format!(
+            "change_remove name={} version={} reason=replacement",
+            removal.name, removal.version
+        ));
+    }
+    for replacement in &preview.replacements {
+        lines.push(format!(
+            "change_replace from={}@{} to={}@{}",
+            replacement.from_name,
+            replacement.from_version,
+            replacement.to_name,
+            replacement.to_version
+        ));
+    }
+    for transition in &preview.transitions {
+        lines.push(format!(
+            "change_transition name={} from={} to={}",
+            transition.name, transition.from_version, transition.to_version
+        ));
+    }
+
+    lines
+}
+
+fn validate_install_preflight_for_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
-    dependency_receipts: &[String],
-    root_names: &[String],
-    planned_dependency_overrides: &HashMap<String, Vec<String>>,
-    snapshot_id: Option<&str>,
-    force_redownload: bool,
-) -> Result<InstallOutcome> {
-    let receipts = read_install_receipts(layout)?;
-    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, &receipts)?;
+    receipts: &[InstallReceipt],
+) -> Result<()> {
+    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, receipts)?;
     let replacement_targets = replacement_receipts
         .iter()
         .map(|receipt| receipt.name.as_str())
@@ -2650,19 +2992,40 @@ fn install_resolved(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+
     validate_binary_preflight(
         layout,
         &resolved.manifest.name,
         &exposed_bins,
-        &receipts,
+        receipts,
         &replacement_targets,
     )?;
     validate_completion_preflight(
         layout,
         &resolved.manifest.name,
         &projected_completion_paths,
-        &receipts,
+        receipts,
     )?;
+
+    Ok(())
+}
+
+fn install_resolved(
+    layout: &PrefixLayout,
+    resolved: &ResolvedInstall,
+    dependency_receipts: &[String],
+    root_names: &[String],
+    planned_dependency_overrides: &HashMap<String, Vec<String>>,
+    snapshot_id: Option<&str>,
+    force_redownload: bool,
+) -> Result<InstallOutcome> {
+    let receipts = read_install_receipts(layout)?;
+    validate_install_preflight_for_resolved(layout, resolved, &receipts)?;
+
+    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, &receipts)?;
+
+    let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
+    let declared_completions = collect_declared_completions(&resolved.artifact)?;
 
     let cache_path = layout.artifact_cache_path(
         &resolved.manifest.name,
@@ -3350,22 +3713,24 @@ fn escape_ps_single_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_provider_override, apply_replacement_handoff, begin_transaction, build_update_report,
-        build_upgrade_plans, build_upgrade_roots, collect_replacement_receipts,
-        current_unix_timestamp, determine_install_reason, doctor_transaction_health_line,
-        enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
-        ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
-        execute_with_transaction, format_info_lines, format_registry_add_lines,
-        format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_search_results, format_uninstall_messages,
-        format_update_summary_line, normalize_command_token, parse_pin_spec,
-        parse_provider_overrides, registry_state_root, resolve_init_shell,
-        resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
-        run_search_command, run_uninstall_command, run_update_command, run_upgrade_command,
-        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
-        update_failure_reason_code, validate_binary_preflight, validate_completion_preflight,
+        apply_provider_override, apply_replacement_handoff, begin_transaction,
+        build_transaction_preview, build_update_report, build_upgrade_plans, build_upgrade_roots,
+        collect_replacement_receipts, current_unix_timestamp, determine_install_reason,
+        doctor_transaction_health_line, enforce_disjoint_multi_target_upgrade,
+        enforce_no_downgrades, ensure_no_active_transaction, ensure_no_active_transaction_for,
+        ensure_update_succeeded, ensure_upgrade_command_ready, execute_with_transaction,
+        format_info_lines, format_registry_add_lines, format_registry_list_lines,
+        format_registry_list_snapshot_state, format_registry_remove_lines, format_search_results,
+        format_uninstall_messages, format_update_summary_line, normalize_command_token,
+        parse_pin_spec, parse_provider_overrides, registry_state_root,
+        render_transaction_preview_lines, resolve_init_shell, resolve_transaction_snapshot_id,
+        run_repair_command, run_rollback_command, run_search_command, run_uninstall_command,
+        run_update_command, run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
+        set_transaction_status, update_failure_reason_code, validate_binary_preflight,
+        validate_completion_preflight, validate_install_preflight_for_resolved,
         validate_provider_overrides_used, write_completions_script, Cli, CliCompletionShell,
-        CliRegistryKind, Commands, MetadataBackend, ResolvedInstall,
+        CliRegistryKind, Commands, MetadataBackend, PlannedPackageChange, PlannedRemoval,
+        ResolvedInstall, TransactionPreviewMode,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -3523,7 +3888,7 @@ mod tests {
         set_active_transaction(&layout, "tx-blocked-upgrade-dispatch")
             .expect("must write active marker");
 
-        let err = run_upgrade_command(&layout, None, None, &BTreeMap::new())
+        let err = run_upgrade_command(&layout, None, None, false, &BTreeMap::new())
             .expect_err("active transaction should block upgrade command");
         assert!(
             err.to_string().contains(
@@ -5291,6 +5656,44 @@ sha256 = "def"
     }
 
     #[test]
+    fn validate_install_preflight_for_resolved_rejects_unmanaged_bin_in_dry_run() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let existing = bin_path(&layout, "rg");
+        fs::write(&existing, b"#!/bin/sh\n").expect("must write existing file");
+
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "ripgrep"
+version = "15.1.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/ripgrep-15.1.0.tar.gz"
+sha256 = "abc"
+[[artifacts.binaries]]
+name = "rg"
+path = "rg"
+"#,
+        )
+        .expect("manifest should parse");
+        let resolved = ResolvedInstall {
+            artifact: manifest.artifacts[0].clone(),
+            manifest,
+            resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+            archive_type: ArchiveType::TarGz,
+        };
+
+        let err = validate_install_preflight_for_resolved(&layout, &resolved, &[])
+            .expect_err("dry-run preflight should reject unmanaged binary conflicts");
+        assert!(err
+            .to_string()
+            .contains("already exists and is not managed by crosspack"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn validate_binary_preflight_rejects_other_package_owner() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -6249,8 +6652,24 @@ ripgrep-legacy = "*"
         .expect("command must parse");
 
         match cli.command {
-            Commands::Install { provider, .. } => {
+            Commands::Install {
+                dry_run, provider, ..
+            } => {
+                assert!(!dry_run);
                 assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_install_with_dry_run_flag() {
+        let cli = Cli::try_parse_from(["crosspack", "install", "ripgrep", "--dry-run"])
+            .expect("command must parse");
+
+        match cli.command {
+            Commands::Install { dry_run, .. } => {
+                assert!(dry_run);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6270,8 +6689,24 @@ ripgrep-legacy = "*"
         .expect("command must parse");
 
         match cli.command {
-            Commands::Upgrade { provider, .. } => {
+            Commands::Upgrade {
+                dry_run, provider, ..
+            } => {
+                assert!(!dry_run);
                 assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_with_dry_run_flag() {
+        let cli = Cli::try_parse_from(["crosspack", "upgrade", "ripgrep", "--dry-run"])
+            .expect("command must parse");
+
+        match cli.command {
+            Commands::Upgrade { dry_run, .. } => {
+                assert!(dry_run);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6324,6 +6759,108 @@ ripgrep-legacy = "*"
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn render_transaction_preview_lines_is_deterministic_and_script_friendly() {
+        let preview = build_transaction_preview(
+            "upgrade",
+            &[
+                PlannedPackageChange {
+                    name: "tool".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "2.0.0".to_string(),
+                    old_version: Some("1.0.0".to_string()),
+                    replacement_removals: vec![PlannedRemoval {
+                        name: "old-tool".to_string(),
+                        version: "0.9.0".to_string(),
+                    }],
+                },
+                PlannedPackageChange {
+                    name: "dep".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "1.1.0".to_string(),
+                    old_version: None,
+                    replacement_removals: Vec::new(),
+                },
+            ],
+        );
+
+        let lines = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        assert_eq!(
+            lines[0],
+            "transaction_preview operation=upgrade mode=dry-run"
+        );
+        assert_eq!(
+            lines[1],
+            "transaction_summary adds=1 removals=1 replacements=1 transitions=1"
+        );
+        assert_eq!(
+            lines[2],
+            "risk_flags=adds,multi-package-transaction,removals,replacements,version-transitions"
+        );
+        assert_eq!(
+            lines[3],
+            "change_add name=dep version=1.1.0 target=x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            lines[4],
+            "change_remove name=old-tool version=0.9.0 reason=replacement"
+        );
+        assert_eq!(lines[5], "change_replace from=old-tool@0.9.0 to=tool@2.0.0");
+        assert_eq!(lines[6], "change_transition name=tool from=1.0.0 to=2.0.0");
+    }
+
+    #[test]
+    fn transaction_preview_dry_run_output_is_stable_for_same_plan() {
+        let preview = build_transaction_preview(
+            "install",
+            &[PlannedPackageChange {
+                name: "tool".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                new_version: "1.2.3".to_string(),
+                old_version: Some("1.2.2".to_string()),
+                replacement_removals: Vec::new(),
+            }],
+        );
+        let first = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        let second = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first[0],
+            "transaction_preview operation=install mode=dry-run"
+        );
+    }
+
+    #[test]
+    fn transaction_preview_omits_multi_package_flag_when_no_mutations() {
+        let preview = build_transaction_preview(
+            "upgrade",
+            &[
+                PlannedPackageChange {
+                    name: "a".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "1.0.0".to_string(),
+                    old_version: Some("1.0.0".to_string()),
+                    replacement_removals: Vec::new(),
+                },
+                PlannedPackageChange {
+                    name: "b".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "2.0.0".to_string(),
+                    old_version: Some("2.0.0".to_string()),
+                    replacement_removals: Vec::new(),
+                },
+            ],
+        );
+
+        let lines = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        assert_eq!(
+            lines[1],
+            "transaction_summary adds=0 removals=0 replacements=0 transitions=0"
+        );
+        assert_eq!(lines[2], "risk_flags=none");
     }
 
     #[test]

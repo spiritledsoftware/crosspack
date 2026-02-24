@@ -129,6 +129,7 @@ For operator and support procedures, see `docs/registry-bootstrap-runbook.md`.
 cargo run -p crosspack-cli -- search ripgrep
 cargo run -p crosspack-cli -- info ripgrep
 cargo run -p crosspack-cli -- install ripgrep
+cargo run -p crosspack-cli -- install ripgrep --dry-run
 cargo run -p crosspack-cli -- list
 ```
 
@@ -137,6 +138,7 @@ cargo run -p crosspack-cli -- list
 ```bash
 cargo run -p crosspack-cli -- pin ripgrep@^14
 cargo run -p crosspack-cli -- upgrade
+cargo run -p crosspack-cli -- upgrade --dry-run
 cargo run -p crosspack-cli -- uninstall ripgrep
 ```
 
@@ -172,8 +174,8 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 |---|---|
 | `search <query>` | Search package names. |
 | `info <name>` | Show versions and policy metadata for a package. |
-| `install <name[@constraint]> [--target <triple>] [--force-redownload] [--provider <capability=package>]` | Resolve and install a package graph. |
-| `upgrade [name[@constraint]] [--provider <capability=package>]` | Upgrade one package or all installed root packages. |
+| `install <name[@constraint]> [--target <triple>] [--dry-run] [--force-redownload] [--provider <capability=package>]` | Resolve and install a package graph. `--dry-run` prints a deterministic transaction preview without mutating state. |
+| `upgrade [name[@constraint]] [--dry-run] [--provider <capability=package>]` | Upgrade one package or all installed root packages. `--dry-run` prints a deterministic transaction preview without mutating state. |
 | `pin <name@constraint>` | Pin a package version constraint. |
 | `uninstall <name>` | Remove a package when not required by remaining roots and prune orphan dependencies. |
 | `list` | List installed packages. |
