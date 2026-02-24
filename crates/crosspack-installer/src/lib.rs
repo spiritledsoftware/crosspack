@@ -1459,55 +1459,60 @@ pub fn remove_exposed_gui_asset(layout: &PrefixLayout, asset: &GuiExposureAsset)
     Ok(())
 }
 
+#[cfg(windows)]
 fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        return format!("@echo off\r\n\"{}\" %*\r\n", source_path.display());
-    }
+    format!(
+        "@echo off\r\nREM {}\r\n\"{}\" %*\r\n",
+        sanitize_gui_metadata_value(&app.display_name),
+        source_path.display()
+    )
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        let mut mime_entries = app
-            .file_associations
+#[cfg(target_os = "linux")]
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    let mut mime_entries = app
+        .file_associations
+        .iter()
+        .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    mime_entries.extend(app.protocols.iter().map(|protocol| {
+        format!(
+            "x-scheme-handler/{}",
+            sanitize_desktop_list_token(&protocol.scheme)
+        )
+    }));
+
+    let mut desktop = String::new();
+    desktop.push_str("[Desktop Entry]\n");
+    desktop.push_str("Type=Application\n");
+    desktop.push_str(&format!(
+        "Name={}\n",
+        sanitize_gui_metadata_value(&app.display_name)
+    ));
+    desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
+    if let Some(icon) = &app.icon {
+        desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
+    }
+    if !app.categories.is_empty() {
+        let categories = app
+            .categories
             .iter()
-            .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
-            .filter(|entry| !entry.is_empty())
+            .map(|category| sanitize_desktop_list_token(category))
+            .filter(|category| !category.is_empty())
             .collect::<Vec<_>>();
-        mime_entries.extend(app.protocols.iter().map(|protocol| {
-            format!(
-                "x-scheme-handler/{}",
-                sanitize_desktop_list_token(&protocol.scheme)
-            )
-        }));
-
-        let mut desktop = String::new();
-        desktop.push_str("[Desktop Entry]\n");
-        desktop.push_str("Type=Application\n");
-        desktop.push_str(&format!(
-            "Name={}\n",
-            sanitize_gui_metadata_value(&app.display_name)
-        ));
-        desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
-        if let Some(icon) = &app.icon {
-            desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
+        if !categories.is_empty() {
+            desktop.push_str(&format!("Categories={};\n", categories.join(";")));
         }
-        if !app.categories.is_empty() {
-            let categories = app
-                .categories
-                .iter()
-                .map(|category| sanitize_desktop_list_token(category))
-                .filter(|category| !category.is_empty())
-                .collect::<Vec<_>>();
-            if !categories.is_empty() {
-                desktop.push_str(&format!("Categories={};\n", categories.join(";")));
-            }
-        }
-        if !mime_entries.is_empty() {
-            desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
-        }
-        return desktop;
     }
+    if !mime_entries.is_empty() {
+        desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
+    }
+    desktop
+}
 
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
     #[cfg(target_os = "macos")]
     {
         if source_path
