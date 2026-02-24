@@ -1164,6 +1164,16 @@ impl ConfiguredRegistryIndex {
     }
 
     pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
+        if let Some((_, manifests)) = self.package_versions_with_source(package)? {
+            return Ok(manifests);
+        }
+        Ok(Vec::new())
+    }
+
+    pub fn package_versions_with_source(
+        &self,
+        package: &str,
+    ) -> Result<Option<(String, Vec<PackageManifest>)>> {
         for source in &self.sources {
             let manifests = source.index.package_versions(package).with_context(|| {
                 format!(
@@ -1172,10 +1182,10 @@ impl ConfiguredRegistryIndex {
                 )
             })?;
             if !manifests.is_empty() {
-                return Ok(manifests);
+                return Ok(Some((source.name.clone(), manifests)));
             }
         }
-        Ok(Vec::new())
+        Ok(None)
     }
 }
 

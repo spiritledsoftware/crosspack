@@ -46,6 +46,8 @@ const NO_ROOT_PACKAGES_TO_UPGRADE: &str = "No root packages installed";
 const METADATA_CONFIG_GUIDANCE: &str =
     "no configured registry snapshots available; bootstrap trusted source `core` with `crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <64-hex>` then run `crosspack update` (see https://github.com/spiritledsoftware/crosspack/blob/main/docs/registry-bootstrap-runbook.md and https://github.com/spiritledsoftware/crosspack/blob/main/docs/trust/core-registry-fingerprint.txt)";
 const SNAPSHOT_ID_MISMATCH_ERROR_CODE: &str = "snapshot-id-mismatch";
+const SEARCH_METADATA_GUIDANCE: &str =
+    "search metadata unavailable; run `crosspack update` to refresh local snapshots and `crosspack registry list` to inspect source status";
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -180,8 +182,9 @@ fn main() -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
-            for name in backend.search_names(&query)? {
-                println!("{name}");
+            let results = run_search_command(&backend, &query)?;
+            for line in format_search_results(&results, &query) {
+                println!("{line}");
             }
         }
         Commands::Info { name } => {
@@ -617,6 +620,124 @@ impl MetadataBackend {
             Self::Configured(index) => index.package_versions(name),
         }
     }
+
+    fn package_versions_with_source(
+        &self,
+        name: &str,
+    ) -> Result<Option<(String, Vec<PackageManifest>)>> {
+        match self {
+            Self::Legacy(index) => {
+                let manifests = index.package_versions(name)?;
+                if manifests.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some((index.root().display().to_string(), manifests)))
+                }
+            }
+            Self::Configured(index) => index.package_versions_with_source(name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SearchMatchKind {
+    Exact,
+    Prefix,
+    Keyword,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchResult {
+    name: String,
+    description: Option<String>,
+    latest_version: String,
+    source: String,
+    match_kind: SearchMatchKind,
+}
+
+fn run_search_command(backend: &MetadataBackend, query: &str) -> Result<Vec<SearchResult>> {
+    let query = query.trim();
+    let names = backend
+        .search_names(query)
+        .with_context(|| SEARCH_METADATA_GUIDANCE)?;
+
+    let mut results = Vec::new();
+    for name in names {
+        let Some(match_kind) = classify_search_match(&name, query) else {
+            continue;
+        };
+        let sourced = backend
+            .package_versions_with_source(&name)
+            .with_context(|| SEARCH_METADATA_GUIDANCE)?;
+        let Some((source, manifests)) = sourced else {
+            continue;
+        };
+        let Some(latest) = manifests.first() else {
+            continue;
+        };
+        results.push(SearchResult {
+            name,
+            description: best_available_short_description(latest),
+            latest_version: latest.version.to_string(),
+            source,
+            match_kind,
+        });
+    }
+
+    results.sort_by(|left, right| {
+        left.match_kind
+            .cmp(&right.match_kind)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    Ok(results)
+}
+
+fn classify_search_match(name: &str, query: &str) -> Option<SearchMatchKind> {
+    if name == query {
+        return Some(SearchMatchKind::Exact);
+    }
+    if name.starts_with(query) {
+        return Some(SearchMatchKind::Prefix);
+    }
+    if name.contains(query) {
+        return Some(SearchMatchKind::Keyword);
+    }
+    None
+}
+
+fn best_available_short_description(manifest: &PackageManifest) -> Option<String> {
+    if !manifest.provides.is_empty() {
+        return Some(format!("provides: {}", manifest.provides.join(", ")));
+    }
+    if let Some(license) = &manifest.license {
+        return Some(format!("license: {license}"));
+    }
+    if let Some(homepage) = &manifest.homepage {
+        return Some(format!("homepage: {homepage}"));
+    }
+    None
+}
+
+fn format_search_results(results: &[SearchResult], query: &str) -> Vec<String> {
+    if results.is_empty() {
+        return vec![format!(
+            "No packages found matching '{query}'. Try a broader keyword or run `crosspack update` to refresh local snapshots."
+        )];
+    }
+
+    let mut lines = Vec::with_capacity(results.len() + 1);
+    lines.push("name\tdescription\tlatest\tsource".to_string());
+    for result in results {
+        lines.push(format!(
+            "{}\t{}\t{}\t{}",
+            result.name,
+            result.description.as_deref().unwrap_or("-"),
+            result.latest_version,
+            result.source
+        ));
+    }
+    lines
 }
 
 fn select_metadata_backend(
@@ -3236,10 +3357,11 @@ mod tests {
         ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
         execute_with_transaction, format_info_lines, format_registry_add_lines,
         format_registry_list_lines, format_registry_list_snapshot_state,
-        format_registry_remove_lines, format_uninstall_messages, format_update_summary_line,
-        normalize_command_token, parse_pin_spec, parse_provider_overrides, registry_state_root,
-        resolve_init_shell, resolve_transaction_snapshot_id, run_repair_command,
-        run_rollback_command, run_uninstall_command, run_update_command, run_upgrade_command,
+        format_registry_remove_lines, format_search_results, format_uninstall_messages,
+        format_update_summary_line, normalize_command_token, parse_pin_spec,
+        parse_provider_overrides, registry_state_root, resolve_init_shell,
+        resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
+        run_search_command, run_uninstall_command, run_update_command, run_upgrade_command,
         select_manifest_with_pin, select_metadata_backend, set_transaction_status,
         update_failure_reason_code, validate_binary_preflight, validate_completion_preflight,
         validate_provider_overrides_used, write_completions_script, Cli, CliCompletionShell,
@@ -3264,6 +3386,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
     fn begin_transaction_writes_planning_metadata_and_active_marker() {
@@ -6988,6 +7112,83 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn run_search_command_formats_exact_prefix_and_keyword_matches_deterministically() {
+        let layout = test_layout();
+        configure_ready_source(&layout, "official");
+        write_signed_test_manifest(
+            &layout,
+            "official",
+            "rip",
+            "1.0.1",
+            Some("MIT"),
+            Some("https://rip.example.test"),
+            &[],
+        );
+        write_signed_test_manifest(
+            &layout,
+            "official",
+            "ripgrep",
+            "14.1.0",
+            None,
+            None,
+            &["rg"],
+        );
+        write_signed_test_manifest(&layout, "official", "roundrip", "0.9.0", None, None, &[]);
+
+        let backend = select_metadata_backend(None, &layout).expect("configured backend must load");
+        let results = run_search_command(&backend, "rip").expect("search must succeed");
+        let lines = format_search_results(&results, "rip");
+
+        assert_eq!(
+            lines,
+            vec![
+                "name\tdescription\tlatest\tsource".to_string(),
+                "rip\tlicense: MIT\t1.0.1\tofficial".to_string(),
+                "ripgrep\tprovides: rg\t14.1.0\tofficial".to_string(),
+                "roundrip\t-\t0.9.0\tofficial".to_string(),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn format_search_results_reports_empty_match_with_actionable_guidance() {
+        let lines = format_search_results(&[], "rip");
+
+        assert_eq!(
+            lines,
+            vec![
+                "No packages found matching 'rip'. Try a broader keyword or run `crosspack update` to refresh local snapshots."
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_search_command_returns_actionable_guidance_when_source_metadata_is_unavailable() {
+        let layout = test_layout();
+        configure_ready_source(&layout, "official");
+        std::fs::create_dir_all(
+            registry_state_root(&layout)
+                .join("cache")
+                .join("official")
+                .join("index")
+                .join("ripgrep"),
+        )
+        .expect("must create package directory");
+
+        let backend = select_metadata_backend(None, &layout).expect("configured backend must load");
+        let err = run_search_command(&backend, "rip").expect_err("missing registry key must fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("search metadata unavailable"));
+        assert!(rendered.contains("crosspack update"));
+        assert!(rendered.contains("crosspack registry list"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn metadata_commands_fail_with_guidance_when_no_sources_or_snapshots() {
         let layout = test_layout();
 
@@ -7111,5 +7312,96 @@ sha256 = "abc"
                 .expect("must write registry key");
         }
         path
+    }
+
+    fn configure_ready_source(layout: &PrefixLayout, source_name: &str) {
+        let state_root = registry_state_root(layout);
+        std::fs::create_dir_all(state_root.join("cache").join(source_name))
+            .expect("must create source cache root");
+        std::fs::write(
+            state_root.join("sources.toml"),
+            format!(
+                "version = 1\n\n[[sources]]\nname = \"{source_name}\"\nkind = \"filesystem\"\nlocation = \"/tmp/{source_name}\"\nfingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nenabled = true\npriority = 1\n"
+            ),
+        )
+        .expect("must write source state");
+        std::fs::write(
+            state_root.join("cache").join(source_name).join("snapshot.json"),
+            format!(
+                "{{\n  \"version\": 1,\n  \"source\": \"{source_name}\",\n  \"snapshot_id\": \"fs:test\",\n  \"updated_at_unix\": 1,\n  \"manifest_count\": 0,\n  \"status\": \"ready\"\n}}"
+            ),
+        )
+        .expect("must write snapshot state");
+    }
+
+    fn write_signed_test_manifest(
+        layout: &PrefixLayout,
+        source_name: &str,
+        package_name: &str,
+        version: &str,
+        license: Option<&str>,
+        homepage: Option<&str>,
+        provides: &[&str],
+    ) {
+        let cache_root = registry_state_root(layout).join("cache").join(source_name);
+        let package_dir = cache_root.join("index").join(package_name);
+        std::fs::create_dir_all(&package_dir).expect("must create package directory");
+
+        let signing_key = test_signing_key();
+        std::fs::write(
+            cache_root.join("registry.pub"),
+            public_key_hex(&signing_key),
+        )
+        .expect("must write registry key");
+
+        let manifest = manifest_toml(package_name, version, license, homepage, provides);
+        let manifest_path = package_dir.join(format!("{version}.toml"));
+        std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
+
+        let signature = signing_key.sign(manifest.as_bytes());
+        std::fs::write(
+            manifest_path.with_extension("toml.sig"),
+            hex::encode(signature.to_bytes()),
+        )
+        .expect("must write signature");
+    }
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7_u8; 32])
+    }
+
+    fn public_key_hex(key: &SigningKey) -> String {
+        hex::encode(key.verifying_key().to_bytes())
+    }
+
+    fn manifest_toml(
+        package_name: &str,
+        version: &str,
+        license: Option<&str>,
+        homepage: Option<&str>,
+        provides: &[&str],
+    ) -> String {
+        let mut manifest = format!("name = \"{package_name}\"\nversion = \"{version}\"\n");
+        if let Some(license) = license {
+            manifest.push_str(&format!("license = \"{license}\"\n"));
+        }
+        if let Some(homepage) = homepage {
+            manifest.push_str(&format!("homepage = \"{homepage}\"\n"));
+        }
+        if !provides.is_empty() {
+            let joined = provides
+                .iter()
+                .map(|item| format!("\"{item}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            manifest.push_str(&format!("provides = [{joined}]\n"));
+        }
+        manifest.push_str(concat!(
+            "[[artifacts]]\n",
+            "target = \"x86_64-unknown-linux-gnu\"\n",
+            "url = \"https://example.test/artifact.tar.zst\"\n",
+            "sha256 = \"abc\"\n"
+        ));
+        manifest
     }
 }
