@@ -3395,11 +3395,20 @@ fn sync_native_gui_registration_state_best_effort(
         })
         .cloned()
         .collect::<Vec<_>>();
+    let mut records_to_persist = current_records.clone();
     if !stale_records.is_empty() {
-        warnings.extend(remove_native_gui_registration_best_effort(&stale_records)?);
+        let stale_warnings = remove_native_gui_registration_best_effort(&stale_records)?;
+        if !stale_warnings.is_empty() {
+            records_to_persist.extend(stale_records.iter().cloned());
+            let mut seen_records = HashSet::new();
+            records_to_persist.retain(|record| {
+                seen_records.insert((record.key.clone(), record.kind.clone(), record.path.clone()))
+            });
+        }
+        warnings.extend(stale_warnings);
     }
 
-    write_gui_native_state(layout, package_name, &current_records)?;
+    write_gui_native_state(layout, package_name, &records_to_persist)?;
     Ok((current_records, warnings))
 }
 
@@ -8695,14 +8704,16 @@ old-cc = "<2.0.0"
         layout.ensure_base_dirs().expect("must create dirs");
         let install_root = layout.package_dir("demo", "1.0.0");
         fs::create_dir_all(&install_root).expect("must create install root");
+        let stale_path = layout.prefix().join("stale-native.desktop");
+        fs::write(&stale_path, b"stale").expect("must seed stale native file");
 
         write_gui_native_state(
             &layout,
             "demo",
             &[GuiNativeRegistrationRecord {
                 key: "app:demo".to_string(),
-                kind: "unknown-kind".to_string(),
-                path: "/tmp/demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: stale_path.display().to_string(),
             }],
         )
         .expect("must seed stale native state");
@@ -8717,9 +8728,31 @@ old-cc = "<2.0.0"
                 .is_empty(),
             "stale native state should be cleared"
         );
-        assert!(
-            !warnings.is_empty(),
-            "stale cleanup should surface warnings"
+        assert!(warnings.is_empty(), "stale cleanup should be warning-free");
+    }
+
+    #[test]
+    fn upgrade_preserves_stale_native_gui_records_when_cleanup_warns() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+
+        let stale = GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "unknown-kind".to_string(),
+            path: "/tmp/demo".to_string(),
+        };
+        write_gui_native_state(&layout, "demo", std::slice::from_ref(&stale))
+            .expect("must seed stale native state");
+
+        let (_records, warnings) =
+            sync_native_gui_registration_state_best_effort(&layout, "demo", &install_root, &[])
+                .expect("must sync native state");
+        assert!(!warnings.is_empty());
+        assert_eq!(
+            read_gui_native_state(&layout, "demo").expect("must read state"),
+            vec![stale]
         );
     }
 
@@ -8750,13 +8783,15 @@ old-cc = "<2.0.0"
             },
         )
         .expect("must write receipt");
+        let native_path = layout.prefix().join("demo-native.desktop");
+        fs::write(&native_path, b"demo").expect("must write native registration file");
         write_gui_native_state(
             &layout,
             "demo",
             &[GuiNativeRegistrationRecord {
                 key: "app:demo".to_string(),
-                kind: "unknown-kind".to_string(),
-                path: "/tmp/demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: native_path.display().to_string(),
             }],
         )
         .expect("must write native state");

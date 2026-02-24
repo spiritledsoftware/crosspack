@@ -741,7 +741,11 @@ pub fn remove_package_native_gui_registrations_best_effort(
     }
 
     let warnings = remove_native_gui_registration_best_effort(&records)?;
-    clear_gui_native_state(layout, package_name)?;
+    if warnings.is_empty() {
+        clear_gui_native_state(layout, package_name)?;
+    } else {
+        write_gui_native_state(layout, package_name, &records)?;
+    }
     Ok(warnings)
 }
 
@@ -1655,21 +1659,25 @@ where
         };
 
         let applications_dir = project_linux_user_applications_dir(&home);
-        fs::create_dir_all(&applications_dir).with_context(|| {
-            format!(
-                "failed to create Linux user applications dir: {}",
-                applications_dir.display()
-            )
-        })?;
+        if let Err(err) = fs::create_dir_all(&applications_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create Linux user applications dir {}: {}",
+                applications_dir.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
 
         let desktop_path = applications_dir.join(native_gui_launcher_filename(package_name, app));
         let desktop_entry = render_linux_native_desktop_entry(app, &source_path);
-        fs::write(&desktop_path, desktop_entry.as_bytes()).with_context(|| {
-            format!(
-                "failed to write Linux desktop entry: {}",
-                desktop_path.display()
-            )
-        })?;
+        if let Err(err) = fs::write(&desktop_path, desktop_entry.as_bytes()) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to write Linux desktop entry {}: {}",
+                desktop_path.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
 
         for asset in &projected_assets {
             records.push(GuiNativeRegistrationRecord {
@@ -1701,24 +1709,28 @@ where
         };
 
         let start_menu_dir = project_windows_start_menu_programs_dir(&appdata);
-        fs::create_dir_all(&start_menu_dir).with_context(|| {
-            format!(
-                "failed to create Windows Start Menu programs dir: {}",
-                start_menu_dir.display()
-            )
-        })?;
+        if let Err(err) = fs::create_dir_all(&start_menu_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create Windows Start Menu programs dir {}: {}",
+                start_menu_dir.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
 
         let launcher_path = start_menu_dir.join(format!(
             "{}.cmd",
             normalize_gui_token(&format!("{}-{}", package_name, app.app_id))
         ));
         let launcher = render_gui_launcher(app, &source_path);
-        fs::write(&launcher_path, launcher.as_bytes()).with_context(|| {
-            format!(
-                "failed to write Windows Start Menu launcher: {}",
-                launcher_path.display()
-            )
-        })?;
+        if let Err(err) = fs::write(&launcher_path, launcher.as_bytes()) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to write Windows Start Menu launcher {}: {}",
+                launcher_path.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
 
         for asset in projected_assets
             .iter()
@@ -1854,12 +1866,14 @@ where
         };
 
         let applications_dir = project_macos_user_applications_dir(&home);
-        fs::create_dir_all(&applications_dir).with_context(|| {
-            format!(
-                "failed to create macOS user applications dir: {}",
-                applications_dir.display()
-            )
-        })?;
+        if let Err(err) = fs::create_dir_all(&applications_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create macOS user applications dir {}: {}",
+                applications_dir.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
 
         let app_name = source_path
             .file_name()
@@ -1867,30 +1881,36 @@ where
         let link_path = applications_dir.join(app_name);
 
         if link_path.exists() {
-            let remove_result = if fs::symlink_metadata(&link_path)
-                .with_context(|| format!("failed to stat {}", link_path.display()))?
-                .is_dir()
-            {
-                fs::remove_dir(&link_path)
-            } else {
-                fs::remove_file(&link_path)
+            let remove_result = match fs::symlink_metadata(&link_path) {
+                Ok(metadata) => {
+                    if metadata.is_dir() {
+                        fs::remove_dir(&link_path)
+                    } else {
+                        fs::remove_file(&link_path)
+                    }
+                }
+                Err(err) => Err(err),
             };
-            remove_result.with_context(|| {
-                format!(
-                    "failed to replace existing macOS application link: {}",
-                    link_path.display()
-                )
-            })?;
+            if let Err(err) = remove_result {
+                warnings.push(format!(
+                    "native GUI registration warning: failed to replace existing macOS application link {}: {}",
+                    link_path.display(),
+                    err
+                ));
+                return Ok((records, warnings));
+            }
         }
 
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&source_path, &link_path).with_context(|| {
-            format!(
-                "failed to create macOS application symlink {} -> {}",
+        if let Err(err) = std::os::unix::fs::symlink(&source_path, &link_path) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create macOS application symlink {} -> {}: {}",
                 link_path.display(),
-                source_path.display()
-            )
-        })?;
+                source_path.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
 
         for asset in &projected_assets {
             records.push(GuiNativeRegistrationRecord {
@@ -3445,7 +3465,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_package_native_gui_registrations_clears_state_when_empty() {
+    fn remove_package_native_gui_registrations_preserves_state_when_cleanup_warns() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -3463,7 +3483,7 @@ mod tests {
         let warnings = remove_package_native_gui_registrations_best_effort(&layout, "demo")
             .expect("must remove native registrations");
         assert!(!warnings.is_empty());
-        assert!(!layout.gui_native_state_path("demo").exists());
+        assert!(layout.gui_native_state_path("demo").exists());
     }
 
     #[test]
