@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/spiritledsoftware/crosspack/compare/v0.3.1...v0.4.0) (2026-02-24)
+
+
+### Features
+
+* **cli:** add self-update command ([#40](https://github.com/spiritledsoftware/crosspack/issues/40)) ([8897184](https://github.com/spiritledsoftware/crosspack/commit/8897184b4eb24c0c6e727366722abe1aa5a2d868))
+
 ## [0.3.1](https://github.com/spiritledsoftware/crosspack/compare/v0.3.0...v0.3.1) (2026-02-24)
 
 
