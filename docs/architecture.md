@@ -32,7 +32,8 @@ Default user prefixes:
 3. Download and verify artifacts. (implemented for direct package install)
 4. Extract to versioned package paths. (implemented for `zip`, `tar.gz`, `tar.zst`)
 5. Expose binaries through symlinks (Unix) or shims (Windows).
-6. Record install state for upgrades and uninstalls.
+6. Expose completion and GUI application assets under the managed prefix.
+7. Record install state for upgrades and uninstalls.
 
 ## Current CLI Behavior
 
@@ -55,6 +56,7 @@ Default user prefixes:
 - This trust model does not defend against compromise of the entire registry root content itself (for example, if both manifests and `registry.pub` are replaced together).
 - `install` resolves a transitive dependency graph with pin constraints, selects artifacts, downloads to cache, verifies SHA-256, extracts into `<prefix>/pkgs/<name>/<version>`, and writes install receipts.
 - `install` exposes declared binaries into `<prefix>/bin/` (symlinks on Unix, `.cmd` shims on Windows) and hard-fails on collisions.
+- `install` exposes declared GUI application launchers and handler metadata into `<prefix>/share/gui/` and hard-fails on ownership/path collisions.
 - `install` supports:
   - `--target <triple>` to override host target selection.
   - `--dry-run` to print deterministic transaction preview lines (`transaction_summary`, `risk_flags`, ordered `change_*`) without mutation.
@@ -66,6 +68,7 @@ Default user prefixes:
 - Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
+- `install` and `upgrade` persist GUI asset ownership in optional `<prefix>/state/installed/<name>.gui` sidecars for deterministic stale cleanup and uninstall removal.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
 - Transaction recovery commands are shipped and operational:

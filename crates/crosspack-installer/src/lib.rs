@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use crosspack_core::{ArchiveType, ArtifactCompletionShell};
+use crosspack_core::{ArchiveType, ArtifactCompletionShell, ArtifactGuiApp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixLayout {
@@ -29,6 +29,12 @@ pub struct InstallReceipt {
     pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiExposureAsset {
+    pub key: String,
+    pub rel_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +138,18 @@ impl PrefixLayout {
         self.package_completions_dir().join(shell.as_str())
     }
 
+    pub fn gui_dir(&self) -> PathBuf {
+        self.share_dir().join("gui")
+    }
+
+    pub fn gui_launchers_dir(&self) -> PathBuf {
+        self.gui_dir().join("launchers")
+    }
+
+    pub fn gui_handlers_dir(&self) -> PathBuf {
+        self.gui_dir().join("handlers")
+    }
+
     pub fn artifacts_cache_dir(&self) -> PathBuf {
         self.cache_dir().join("artifacts")
     }
@@ -158,6 +176,10 @@ impl PrefixLayout {
 
     pub fn receipt_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.receipt"))
+    }
+
+    pub fn gui_state_path(&self, name: &str) -> PathBuf {
+        self.installed_state_dir().join(format!("{name}.gui"))
     }
 
     pub fn transactions_dir(&self) -> PathBuf {
@@ -207,6 +229,9 @@ impl PrefixLayout {
             self.share_dir(),
             self.completions_dir(),
             self.package_completions_dir(),
+            self.gui_dir(),
+            self.gui_launchers_dir(),
+            self.gui_handlers_dir(),
             self.artifacts_cache_dir(),
             self.tmp_state_dir(),
             self.installed_state_dir(),
@@ -518,6 +543,108 @@ pub fn read_install_receipts(layout: &PrefixLayout) -> Result<Vec<InstallReceipt
 
     receipts.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(receipts)
+}
+
+pub fn write_gui_exposure_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    assets: &[GuiExposureAsset],
+) -> Result<PathBuf> {
+    let path = layout.gui_state_path(package_name);
+    if assets.is_empty() {
+        let _ = remove_file_if_exists(&path);
+        return Ok(path);
+    }
+
+    let mut payload = String::new();
+    for asset in assets {
+        if asset.key.contains('\n') || asset.rel_path.contains('\n') {
+            return Err(anyhow!(
+                "gui exposure state values must not contain newlines"
+            ));
+        }
+        payload.push_str(&format!("asset={}\t{}\n", asset.key, asset.rel_path));
+    }
+
+    fs::write(&path, payload.as_bytes())
+        .with_context(|| format!("failed to write gui exposure state: {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_gui_exposure_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<GuiExposureAsset>> {
+    let path = layout.gui_state_path(package_name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read gui exposure state: {}", path.display()))?;
+    parse_gui_exposure_state(&raw)
+        .with_context(|| format!("failed to parse gui exposure state: {}", path.display()))
+}
+
+pub fn read_all_gui_exposure_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<GuiExposureAsset>>> {
+    let dir = layout.installed_state_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut states = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("gui") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read gui exposure state: {}", path.display()))?;
+        let assets = parse_gui_exposure_state(&raw)
+            .with_context(|| format!("failed to parse gui exposure state: {}", path.display()))?;
+        states.insert(stem.to_string(), assets);
+    }
+
+    Ok(states)
+}
+
+pub fn clear_gui_exposure_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    let path = layout.gui_state_path(package_name);
+    remove_file_if_exists(&path)?;
+    Ok(())
+}
+
+fn parse_gui_exposure_state(raw: &str) -> Result<Vec<GuiExposureAsset>> {
+    let mut assets = Vec::new();
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some(payload) = line.strip_prefix("asset=") else {
+            continue;
+        };
+        let Some((key, rel_path)) = payload.split_once('\t') else {
+            return Err(anyhow!("invalid gui state row format"));
+        };
+        if key.trim().is_empty() {
+            return Err(anyhow!("gui exposure key must not be empty"));
+        }
+        validated_relative_gui_storage_path(rel_path)?;
+        assets.push(GuiExposureAsset {
+            key: key.to_string(),
+            rel_path: rel_path.to_string(),
+        });
+    }
+    Ok(assets)
 }
 
 pub fn current_unix_timestamp() -> Result<u64> {
@@ -882,6 +1009,12 @@ fn remove_receipt_artifacts(
         remove_exposed_completion(layout, exposed_completion)?;
     }
 
+    let gui_assets = read_gui_exposure_state(layout, &receipt.name)?;
+    for asset in &gui_assets {
+        remove_exposed_gui_asset(layout, asset)?;
+    }
+    clear_gui_exposure_state(layout, &receipt.name)?;
+
     let receipt_path = layout.receipt_path(&receipt.name);
     fs::remove_file(&receipt_path).with_context(|| {
         format!(
@@ -1114,6 +1247,427 @@ pub fn remove_exposed_completion(
     })?;
 
     prune_empty_completion_dirs(layout, destination.parent())?;
+    Ok(())
+}
+
+pub fn gui_asset_path(layout: &PrefixLayout, gui_storage_rel_path: &str) -> Result<PathBuf> {
+    let relative = validated_relative_gui_storage_path(gui_storage_rel_path)?;
+    Ok(layout.gui_dir().join(relative))
+}
+
+pub fn projected_gui_assets(
+    package_name: &str,
+    app: &ArtifactGuiApp,
+) -> Result<Vec<GuiExposureAsset>> {
+    if app.app_id.trim().is_empty() {
+        return Err(anyhow!("gui app id must not be empty"));
+    }
+    if app.display_name.trim().is_empty() {
+        return Err(anyhow!(
+            "gui app '{}' display_name must not be empty",
+            app.app_id
+        ));
+    }
+    validated_relative_binary_path(&app.exec)
+        .with_context(|| format!("gui app '{}' exec path is invalid", app.app_id))?;
+
+    let package_token = normalize_gui_token(package_name);
+    let app_token = normalize_gui_token(&app.app_id);
+    let launcher_rel = format!(
+        "launchers/{package_token}--{app_token}.{}",
+        gui_launcher_extension()
+    );
+    let handler_rel = format!("handlers/{package_token}--{app_token}.meta");
+
+    let mut assets = Vec::new();
+    let mut seen_keys = HashSet::new();
+    let mut push_asset = |key: String, rel_path: &str| -> Result<()> {
+        if !seen_keys.insert(key.clone()) {
+            return Err(anyhow!(
+                "duplicate gui ownership key declaration '{}': app '{}'",
+                key,
+                app.app_id
+            ));
+        }
+        assets.push(GuiExposureAsset {
+            key,
+            rel_path: rel_path.to_string(),
+        });
+        Ok(())
+    };
+
+    push_asset(
+        format!("app:{}", app.app_id.trim().to_ascii_lowercase()),
+        &launcher_rel,
+    )?;
+    push_asset(
+        format!("handler:{}", app.app_id.trim().to_ascii_lowercase()),
+        &handler_rel,
+    )?;
+
+    for protocol in &app.protocols {
+        let scheme = normalized_protocol_scheme(&protocol.scheme)
+            .with_context(|| format!("gui app '{}' has invalid protocol scheme", app.app_id))?;
+        push_asset(format!("protocol:{scheme}"), &handler_rel)?;
+    }
+
+    for association in &app.file_associations {
+        let mime = association.mime_type.trim().to_ascii_lowercase();
+        if mime.is_empty() {
+            return Err(anyhow!(
+                "gui app '{}' file association mime_type must not be empty",
+                app.app_id
+            ));
+        }
+        push_asset(format!("mime:{mime}"), &handler_rel)?;
+        for extension in &association.extensions {
+            let normalized = normalized_extension(extension).with_context(|| {
+                format!(
+                    "gui app '{}' has invalid file association extension",
+                    app.app_id
+                )
+            })?;
+            push_asset(format!("extension:{normalized}"), &handler_rel)?;
+        }
+    }
+
+    Ok(assets)
+}
+
+pub fn expose_gui_app(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    package_name: &str,
+    app: &ArtifactGuiApp,
+) -> Result<Vec<GuiExposureAsset>> {
+    let projected = projected_gui_assets(package_name, app)?;
+    let launcher_asset = projected
+        .iter()
+        .find(|asset| asset.key.starts_with("app:"))
+        .cloned()
+        .ok_or_else(|| anyhow!("missing projected launcher asset for app '{}'", app.app_id))?;
+    let handler_asset = projected
+        .iter()
+        .find(|asset| asset.key.starts_with("handler:"))
+        .cloned()
+        .ok_or_else(|| anyhow!("missing projected handler asset for app '{}'", app.app_id))?;
+
+    let source_rel = validated_relative_binary_path(&app.exec)?;
+    let source_path = install_root.join(source_rel);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "declared gui app exec path '{}' was not found in install root: {}",
+            app.exec,
+            source_path.display()
+        ));
+    }
+
+    let launcher_path = gui_asset_path(layout, &launcher_asset.rel_path)?;
+    if let Some(parent) = launcher_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create gui launcher dir: {}", parent.display()))?;
+    }
+
+    let launcher = render_gui_launcher(app, &source_path);
+    fs::write(&launcher_path, launcher.as_bytes())
+        .with_context(|| format!("failed writing gui launcher: {}", launcher_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&launcher_path)
+            .with_context(|| {
+                format!(
+                    "failed to inspect gui launcher: {}",
+                    launcher_path.display()
+                )
+            })?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&launcher_path, permissions).with_context(|| {
+            format!(
+                "failed setting gui launcher permissions: {}",
+                launcher_path.display()
+            )
+        })?;
+    }
+
+    let handler_path = gui_asset_path(layout, &handler_asset.rel_path)?;
+    if let Some(parent) = handler_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create gui handler dir: {}", parent.display()))?;
+    }
+
+    let mut metadata = String::new();
+    metadata.push_str(&format!(
+        "app_id={}\n",
+        sanitize_gui_metadata_value(&app.app_id)
+    ));
+    metadata.push_str(&format!(
+        "display_name={}\n",
+        sanitize_gui_metadata_value(&app.display_name)
+    ));
+    metadata.push_str(&format!(
+        "exec={}\n",
+        sanitize_gui_metadata_value(&app.exec)
+    ));
+    if let Some(icon) = &app.icon {
+        metadata.push_str(&format!("icon={}\n", sanitize_gui_metadata_value(icon)));
+    }
+    for category in &app.categories {
+        metadata.push_str(&format!(
+            "category={}\n",
+            sanitize_gui_metadata_value(category)
+        ));
+    }
+    for protocol in &app.protocols {
+        metadata.push_str(&format!(
+            "protocol={}\n",
+            sanitize_gui_metadata_value(&protocol.scheme)
+        ));
+    }
+    for association in &app.file_associations {
+        metadata.push_str(&format!(
+            "mime={}\n",
+            sanitize_gui_metadata_value(&association.mime_type)
+        ));
+        for extension in &association.extensions {
+            metadata.push_str(&format!(
+                "extension={}\n",
+                sanitize_gui_metadata_value(extension)
+            ));
+        }
+    }
+    fs::write(&handler_path, metadata.as_bytes()).with_context(|| {
+        format!(
+            "failed writing gui handler metadata: {}",
+            handler_path.display()
+        )
+    })?;
+
+    Ok(projected)
+}
+
+pub fn remove_exposed_gui_asset(layout: &PrefixLayout, asset: &GuiExposureAsset) -> Result<()> {
+    let path = gui_asset_path(layout, &asset.rel_path)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path)
+        .with_context(|| format!("failed to remove exposed gui asset: {}", path.display()))?;
+    prune_empty_gui_dirs(layout, path.parent())?;
+    Ok(())
+}
+
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        return format!("@echo off\r\n\"{}\" %*\r\n", source_path.display());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut mime_entries = app
+            .file_associations
+            .iter()
+            .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
+            .filter(|entry| !entry.is_empty())
+            .collect::<Vec<_>>();
+        mime_entries.extend(app.protocols.iter().map(|protocol| {
+            format!(
+                "x-scheme-handler/{}",
+                sanitize_desktop_list_token(&protocol.scheme)
+            )
+        }));
+
+        let mut desktop = String::new();
+        desktop.push_str("[Desktop Entry]\n");
+        desktop.push_str("Type=Application\n");
+        desktop.push_str(&format!(
+            "Name={}\n",
+            sanitize_gui_metadata_value(&app.display_name)
+        ));
+        desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
+        if let Some(icon) = &app.icon {
+            desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
+        }
+        if !app.categories.is_empty() {
+            let categories = app
+                .categories
+                .iter()
+                .map(|category| sanitize_desktop_list_token(category))
+                .filter(|category| !category.is_empty())
+                .collect::<Vec<_>>();
+            if !categories.is_empty() {
+                desktop.push_str(&format!("Categories={};\n", categories.join(";")));
+            }
+        }
+        if !mime_entries.is_empty() {
+            desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
+        }
+        return desktop;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if source_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("app"))
+            .unwrap_or(false)
+        {
+            return format!(
+                "#!/bin/sh\n# {}\nopen -a \"{}\" --args \"$@\"\n",
+                sanitize_gui_metadata_value(&app.display_name),
+                source_path.display()
+            );
+        }
+    }
+
+    format!(
+        "#!/bin/sh\n# {}\nexec \"{}\" \"$@\"\n",
+        sanitize_gui_metadata_value(&app.display_name),
+        source_path.display()
+    )
+}
+
+fn gui_launcher_extension() -> &'static str {
+    if cfg!(windows) {
+        "cmd"
+    } else if cfg!(target_os = "linux") {
+        "desktop"
+    } else {
+        "command"
+    }
+}
+
+fn normalize_gui_token(value: &str) -> String {
+    let mut normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if normalized.is_empty() {
+        normalized.push('_');
+    }
+    normalized
+}
+
+fn normalized_protocol_scheme(scheme: &str) -> Result<String> {
+    let trimmed = scheme.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err(anyhow!("protocol scheme must not be empty"));
+    }
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return Err(anyhow!("protocol scheme must not be empty"));
+    };
+    if !first.is_ascii_alphabetic() {
+        return Err(anyhow!("protocol scheme must start with an ASCII letter"));
+    }
+    if chars.any(|ch| !(ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '.')) {
+        return Err(anyhow!("protocol scheme contains invalid character(s)"));
+    }
+    Ok(trimmed)
+}
+
+fn normalized_extension(extension: &str) -> Result<String> {
+    let trimmed = extension.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err(anyhow!("file association extension must not be empty"));
+    }
+    let normalized = if trimmed.starts_with('.') {
+        trimmed
+    } else {
+        format!(".{trimmed}")
+    };
+    if normalized
+        .chars()
+        .skip(1)
+        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+    {
+        return Err(anyhow!(
+            "file association extension contains invalid character(s)"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn sanitize_gui_metadata_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn sanitize_desktop_list_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch == '\n' || ch == '\r' || ch == ';' {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn validated_relative_gui_storage_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!("gui storage path must be relative: {}", path));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("gui storage path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("gui storage path must not include '..': {}", path));
+    }
+    Ok(relative)
+}
+
+fn prune_empty_gui_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
+    let mut current = start.map(PathBuf::from);
+    let gui_root = layout.gui_dir();
+    while let Some(dir) = current {
+        if !dir.starts_with(&gui_root) || dir == gui_root {
+            break;
+        }
+
+        let mut entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                current = dir.parent().map(PathBuf::from);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed reading gui dir: {}", dir.display()));
+            }
+        };
+
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&dir)
+            .with_context(|| format!("failed pruning gui dir: {}", dir.display()))?;
+        current = dir.parent().map(PathBuf::from);
+    }
     Ok(())
 }
 
@@ -1978,6 +2532,64 @@ mod tests {
     }
 
     #[test]
+    fn expose_gui_app_and_state_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("zed", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("zed"), b"#!/bin/sh\n").expect("must write gui app exec");
+
+        let app = ArtifactGuiApp {
+            app_id: "dev.zed.Zed".to_string(),
+            display_name: "Zed".to_string(),
+            exec: "zed".to_string(),
+            icon: None,
+            categories: vec!["Development".to_string()],
+            file_associations: vec![crosspack_core::ArtifactGuiFileAssociation {
+                mime_type: "text/plain".to_string(),
+                extensions: vec![".txt".to_string()],
+            }],
+            protocols: vec![crosspack_core::ArtifactGuiProtocol {
+                scheme: "zed".to_string(),
+            }],
+        };
+
+        let assets =
+            expose_gui_app(&layout, &package_dir, "zed", &app).expect("must expose gui app");
+        assert!(
+            assets.iter().any(|asset| asset.key == "app:dev.zed.zed"),
+            "launcher ownership key must be present"
+        );
+
+        for asset in &assets {
+            let path = gui_asset_path(&layout, &asset.rel_path).expect("must resolve gui path");
+            assert!(
+                path.exists(),
+                "gui asset path should exist: {}",
+                path.display()
+            );
+        }
+
+        write_gui_exposure_state(&layout, "zed", &assets).expect("must write gui state");
+        let loaded = read_gui_exposure_state(&layout, "zed").expect("must read gui state");
+        assert_eq!(loaded, assets);
+
+        for asset in &assets {
+            remove_exposed_gui_asset(&layout, asset).expect("must remove gui asset");
+        }
+        clear_gui_exposure_state(&layout, "zed").expect("must remove gui state file");
+
+        assert!(
+            read_gui_exposure_state(&layout, "zed")
+                .expect("must read removed gui state")
+                .is_empty(),
+            "gui state should be empty after clear"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn strip_components_behavior() {
         let p = Path::new("top/inner/bin/tool");
         assert_eq!(
@@ -2005,6 +2617,20 @@ mod tests {
         )
         .expect("must create completion parent dir");
         fs::write(&completion_path, b"# demo completion\n").expect("must create completion file");
+        let gui_rel_path = "launchers/demo--demo.command".to_string();
+        let gui_path = gui_asset_path(&layout, &gui_rel_path).expect("must resolve gui path");
+        fs::create_dir_all(gui_path.parent().expect("gui path must have parent"))
+            .expect("must create gui parent dir");
+        fs::write(&gui_path, b"#!/bin/sh\n").expect("must create gui launcher file");
+        write_gui_exposure_state(
+            &layout,
+            "demo",
+            &[GuiExposureAsset {
+                key: "app:demo".to_string(),
+                rel_path: gui_rel_path,
+            }],
+        )
+        .expect("must write gui state");
 
         write_install_receipt(
             &layout,
@@ -2032,6 +2658,8 @@ mod tests {
         assert!(!layout.receipt_path("demo").exists());
         assert!(!package_dir.exists());
         assert!(!completion_path.exists());
+        assert!(!gui_path.exists());
+        assert!(!layout.gui_state_path("demo").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
