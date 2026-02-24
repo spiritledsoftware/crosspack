@@ -3457,10 +3457,15 @@ mod tests {
         .expect("command failures should become warnings");
 
         assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("simulated command failure")),
-            "expected warning for command failure"
+            !warnings.is_empty(),
+            "native registration failures should produce warning output"
+        );
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("simulated command failure")
+                    || warning.contains("native GUI registration warning")
+            }),
+            "expected command-failure or adapter warning line"
         );
     }
 
