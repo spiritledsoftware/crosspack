@@ -56,8 +56,8 @@ enum OutputStyle {
     Rich,
 }
 
-fn resolve_output_style(stdout_is_tty: bool, stderr_is_tty: bool) -> OutputStyle {
-    if stdout_is_tty && stderr_is_tty {
+fn resolve_output_style(stdout_is_tty: bool, _stderr_is_tty: bool) -> OutputStyle {
+    if stdout_is_tty {
         OutputStyle::Rich
     } else {
         OutputStyle::Plain
@@ -8246,6 +8246,11 @@ old-cc = "<2.0.0"
     #[test]
     fn resolve_output_style_auto_uses_rich_when_both_streams_are_tty() {
         assert_eq!(resolve_output_style(true, true), OutputStyle::Rich);
+    }
+
+    #[test]
+    fn resolve_output_style_auto_uses_rich_when_stdout_is_tty_and_stderr_is_not() {
+        assert_eq!(resolve_output_style(true, false), OutputStyle::Rich);
     }
 
     #[test]
