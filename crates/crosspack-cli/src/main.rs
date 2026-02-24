@@ -3438,6 +3438,25 @@ fn validate_binary_preflight(
     receipts: &[InstallReceipt],
     replacement_targets: &HashSet<&str>,
 ) -> Result<()> {
+    let current_exe = std::env::current_exe().ok();
+    validate_binary_preflight_with_current_exe(
+        layout,
+        package_name,
+        desired_bins,
+        receipts,
+        replacement_targets,
+        current_exe.as_deref(),
+    )
+}
+
+fn validate_binary_preflight_with_current_exe(
+    layout: &PrefixLayout,
+    package_name: &str,
+    desired_bins: &[String],
+    receipts: &[InstallReceipt],
+    replacement_targets: &HashSet<&str>,
+    current_exe: Option<&Path>,
+) -> Result<()> {
     let owned_by_self: HashSet<&str> = receipts
         .iter()
         .find(|receipt| receipt.name == package_name)
@@ -3465,9 +3484,15 @@ fn validate_binary_preflight(
         }
 
         let path = bin_path(layout, desired);
+        let allows_self_replace = package_name == "crosspack"
+            && desired == "crosspack"
+            && current_exe
+                .map(|exe| path_matches_current_exe(exe, &path))
+                .unwrap_or(false);
         if path.exists()
             && !owned_by_self.contains(desired.as_str())
             && !owned_by_replacements.contains(desired.as_str())
+            && !allows_self_replace
         {
             return Err(anyhow!(
                 "binary '{}' at {} already exists and is not managed by crosspack",
@@ -3478,6 +3503,19 @@ fn validate_binary_preflight(
     }
 
     Ok(())
+}
+
+fn path_matches_current_exe(current_exe: &Path, candidate: &Path) -> bool {
+    if current_exe == candidate {
+        return true;
+    }
+
+    let canonical_current = fs::canonicalize(current_exe);
+    let canonical_candidate = fs::canonicalize(candidate);
+    match (canonical_current, canonical_candidate) {
+        (Ok(current), Ok(candidate)) => current == candidate,
+        _ => false,
+    }
 }
 
 fn build_dependency_receipts(
@@ -3815,10 +3853,11 @@ mod tests {
         run_rollback_command, run_search_command, run_uninstall_command, run_update_command,
         run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
         set_transaction_status, update_failure_reason_code, validate_binary_preflight,
-        validate_completion_preflight, validate_install_preflight_for_resolved,
-        validate_provider_overrides_used, write_completions_script, Cli, CliCompletionShell,
-        CliRegistryKind, Commands, MetadataBackend, PlannedPackageChange, PlannedRemoval,
-        ResolvedInstall, TransactionPreviewMode,
+        validate_binary_preflight_with_current_exe, validate_completion_preflight,
+        validate_install_preflight_for_resolved, validate_provider_overrides_used,
+        write_completions_script, Cli, CliCompletionShell, CliRegistryKind, Commands,
+        MetadataBackend, PlannedPackageChange, PlannedRemoval, ResolvedInstall,
+        TransactionPreviewMode,
     };
     use clap::{error::ErrorKind, Parser};
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -5871,6 +5910,27 @@ path = "rg"
             &replacement_targets,
         )
         .expect("replacement-owned binary should be allowed");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_binary_preflight_allows_self_update_current_exe_binary() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let existing = bin_path(&layout, "crosspack");
+        fs::write(&existing, b"#!/bin/sh\n").expect("must write existing file");
+
+        validate_binary_preflight_with_current_exe(
+            &layout,
+            "crosspack",
+            &["crosspack".to_string()],
+            &[],
+            &HashSet::new(),
+            Some(existing.as_path()),
+        )
+        .expect("self-update should allow replacing the currently running crosspack binary");
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
