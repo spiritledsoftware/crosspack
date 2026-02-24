@@ -730,6 +730,21 @@ pub fn clear_gui_native_state(layout: &PrefixLayout, package_name: &str) -> Resu
     Ok(())
 }
 
+pub fn remove_package_native_gui_registrations_best_effort(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<String>> {
+    let records = read_gui_native_state(layout, package_name)?;
+    if records.is_empty() {
+        clear_gui_native_state(layout, package_name)?;
+        return Ok(Vec::new());
+    }
+
+    let warnings = remove_native_gui_registration_best_effort(&records)?;
+    clear_gui_native_state(layout, package_name)?;
+    Ok(warnings)
+}
+
 fn parse_gui_exposure_state(raw: &str) -> Result<Vec<GuiExposureAsset>> {
     let mut assets = Vec::new();
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -3427,6 +3442,28 @@ mod tests {
                 .any(|warning| warning.contains("simulated command failure")),
             "expected warning for command failure"
         );
+    }
+
+    #[test]
+    fn remove_package_native_gui_registrations_clears_state_when_empty() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "unknown-kind".to_string(),
+                path: "/tmp/demo".to_string(),
+            }],
+        )
+        .expect("must seed native state");
+
+        let warnings = remove_package_native_gui_registrations_best_effort(&layout, "demo")
+            .expect("must remove native registrations");
+        assert!(!warnings.is_empty());
+        assert!(!layout.gui_native_state_path("demo").exists());
     }
 
     #[test]

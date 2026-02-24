@@ -18,13 +18,16 @@ use crosspack_installer::{
     default_user_prefix, expose_binary, expose_completion, expose_gui_app, exposed_completion_path,
     gui_asset_path, install_from_artifact, projected_exposed_completion_path, projected_gui_assets,
     read_active_transaction, read_all_gui_exposure_states, read_all_pins, read_gui_exposure_state,
-    read_install_receipts, read_transaction_metadata, remove_exposed_binary,
-    remove_exposed_completion, remove_exposed_gui_asset, remove_file_if_exists,
-    set_active_transaction, uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots,
-    uninstall_package, uninstall_package_with_dependency_overrides_and_ignored_roots,
-    update_transaction_status, write_gui_exposure_state, write_install_receipt, write_pin,
-    write_transaction_metadata, GuiExposureAsset, InstallReason, InstallReceipt, PrefixLayout,
-    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    read_gui_native_state, read_install_receipts, read_transaction_metadata,
+    register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
+    remove_exposed_gui_asset, remove_file_if_exists, remove_native_gui_registration_best_effort,
+    remove_package_native_gui_registrations_best_effort, set_active_transaction,
+    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
+    uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
+    write_gui_exposure_state, write_gui_native_state, write_install_receipt, write_pin,
+    write_transaction_metadata, GuiExposureAsset, GuiNativeRegistrationRecord, InstallReason,
+    InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
+    UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -2277,6 +2280,21 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         }
 
         let result = uninstall_package(layout, &name)?;
+        let mut native_gui_warnings = Vec::new();
+        if !matches!(
+            result.status,
+            UninstallStatus::BlockedByDependents | UninstallStatus::NotInstalled
+        ) {
+            native_gui_warnings.extend(remove_package_native_gui_registrations_best_effort(
+                layout,
+                &result.name,
+            )?);
+            for dependency in &result.pruned_dependencies {
+                native_gui_warnings.extend(remove_package_native_gui_registrations_best_effort(
+                    layout, dependency,
+                )?);
+            }
+        }
 
         if let Some(snapshot_path) = snapshot_paths.get(&name) {
             append_transaction_journal_entry(
@@ -2350,6 +2368,12 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         };
         for line in format_uninstall_messages(&result) {
             println!("{}", render_status_line(output_style, status, &line));
+        }
+        for warning in native_gui_warnings {
+            println!(
+                "{}",
+                render_status_line(output_style, "warn", &format!("warning: {warning}"))
+            );
         }
 
         Ok(())
@@ -2732,6 +2756,8 @@ struct InstallOutcome {
     exposed_bins: Vec<String>,
     exposed_completions: Vec<String>,
     exposed_gui_assets: Vec<String>,
+    native_gui_records: Vec<String>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -3326,6 +3352,57 @@ fn validate_install_preflight_for_resolved(
     Ok(())
 }
 
+fn sync_native_gui_registration_state_best_effort(
+    layout: &PrefixLayout,
+    package_name: &str,
+    install_root: &Path,
+    declared_gui_apps: &[ArtifactGuiApp],
+) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> {
+    let previous_records = read_gui_native_state(layout, package_name)?;
+    let mut current_records = Vec::new();
+    let mut warnings = Vec::new();
+
+    for app in declared_gui_apps {
+        let (records, app_warnings) =
+            register_native_gui_app_best_effort(package_name, app, install_root)?;
+        current_records.extend(records);
+        warnings.extend(app_warnings);
+    }
+
+    let mut seen = HashSet::new();
+    current_records.retain(|record| {
+        seen.insert((record.key.clone(), record.kind.clone(), record.path.clone()))
+    });
+
+    let current_keys = current_records
+        .iter()
+        .map(|record| {
+            (
+                record.key.as_str(),
+                record.kind.as_str(),
+                record.path.as_str(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let stale_records = previous_records
+        .iter()
+        .filter(|record| {
+            !current_keys.contains(&(
+                record.key.as_str(),
+                record.kind.as_str(),
+                record.path.as_str(),
+            ))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !stale_records.is_empty() {
+        warnings.extend(remove_native_gui_registration_best_effort(&stale_records)?);
+    }
+
+    write_gui_native_state(layout, package_name, &current_records)?;
+    Ok((current_records, warnings))
+}
+
 fn install_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
@@ -3433,6 +3510,13 @@ fn install_resolved(
     }
     write_gui_exposure_state(layout, &resolved.manifest.name, &exposed_gui_assets)?;
 
+    let (native_gui_records, native_gui_warnings) = sync_native_gui_registration_state_best_effort(
+        layout,
+        &resolved.manifest.name,
+        &install_root,
+        &declared_gui_apps,
+    )?;
+
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
         version: resolved.manifest.version.to_string(),
@@ -3471,6 +3555,11 @@ fn install_resolved(
             .iter()
             .map(|asset| asset.key.clone())
             .collect(),
+        native_gui_records: native_gui_records
+            .iter()
+            .map(|record| record.key.clone())
+            .collect(),
+        warnings: native_gui_warnings,
     })
 }
 
@@ -3535,6 +3624,23 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
                 "exposed_gui_assets: {}",
                 outcome.exposed_gui_assets.join(", ")
             ),
+        ));
+    }
+    if !outcome.native_gui_records.is_empty() {
+        lines.push(render_status_line(
+            style,
+            "step",
+            &format!(
+                "native_gui_records: {}",
+                outcome.native_gui_records.join(", ")
+            ),
+        ));
+    }
+    for warning in &outcome.warnings {
+        lines.push(render_status_line(
+            style,
+            "warn",
+            &format!("warning: {warning}"),
         ));
     }
     lines.push(render_status_line(
@@ -8569,6 +8675,97 @@ old-cc = "<2.0.0"
         assert!(lines.iter().any(|line| line.contains("receipt: ")));
     }
 
+    #[test]
+    fn install_resolved_emits_warning_when_native_gui_registration_fails() {
+        let mut outcome = sample_install_outcome();
+        outcome.warnings = vec!["native registration skipped".to_string()];
+
+        let lines = format_install_outcome_lines(&outcome, OutputStyle::Plain);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "warning: native registration skipped"),
+            "install output must include native GUI warning lines"
+        );
+    }
+
+    #[test]
+    fn upgrade_removes_stale_native_gui_records() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "unknown-kind".to_string(),
+                path: "/tmp/demo".to_string(),
+            }],
+        )
+        .expect("must seed stale native state");
+
+        let (records, warnings) =
+            sync_native_gui_registration_state_best_effort(&layout, "demo", &install_root, &[])
+                .expect("must sync native state");
+        assert!(records.is_empty());
+        assert!(
+            read_gui_native_state(&layout, "demo")
+                .expect("must read state")
+                .is_empty(),
+            "stale native state should be cleared"
+        );
+        assert!(
+            !warnings.is_empty(),
+            "stale cleanup should surface warnings"
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_native_gui_registrations_and_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo"), b"#!/bin/sh\n").expect("must write package binary");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "unknown-kind".to_string(),
+                path: "/tmp/demo".to_string(),
+            }],
+        )
+        .expect("must write native state");
+
+        run_uninstall_command(&layout, "demo".to_string()).expect("must uninstall package");
+
+        assert!(!layout.gui_native_state_path("demo").exists());
+    }
+
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
         let manifest = PackageManifest::from_toml_str(&format!(
             r#"
@@ -8605,6 +8802,8 @@ sha256 = "abc"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: vec!["bash:rg".to_string()],
             exposed_gui_assets: vec!["app:dev.ripgrep.viewer".to_string()],
+            native_gui_records: vec!["app:dev.ripgrep.viewer".to_string()],
+            warnings: Vec::new(),
         }
     }
 
