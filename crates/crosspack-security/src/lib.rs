@@ -72,9 +72,8 @@ pub fn verify_ed25519_signature_hex(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::io::Cursor;
-
-    use super::{sha256_hex, verify_ed25519_signature_hex, verify_sha256_reader};
 
     #[test]
     fn stable_sha256_hash() {

@@ -1,43 +1,50 @@
-# CROSSPACK-INSTALLER KNOWLEDGE
+# CROSSPACK-INSTALLER KNOWLEDGE BASE
 
 ## OVERVIEW
-Install/uninstall lifecycle crate; receipt state, extraction staging, dependency-prune traversal all in `crates/crosspack-installer/src/lib.rs`.
+Installer crate owns prefix filesystem layout and state transitions for install/uninstall transactions, including receipt durability and rollback recovery signals.
 
-## WHERE TO LOOK
-- Receipt write format: `write_install_receipt` in `crates/crosspack-installer/src/lib.rs:214`.
-- Receipt parse contract + backward-compat defaults: `parse_receipt` in `crates/crosspack-installer/src/lib.rs:486`.
-- Receipt load pipeline (`.receipt` filtering, parse error context): `read_install_receipts` in `crates/crosspack-installer/src/lib.rs:252`.
-- Uninstall orchestrator (block/prune decisions): `uninstall_package` in `crates/crosspack-installer/src/lib.rs:363`.
-- Uninstall graph walk helpers: `dependency_map`, `reachable_packages`, `package_reachable` in `crates/crosspack-installer/src/lib.rs:566`, `crates/crosspack-installer/src/lib.rs:586`, `crates/crosspack-installer/src/lib.rs:603`.
-- Artifact/receipt/bin deletion unit: `remove_receipt_artifacts` in `crates/crosspack-installer/src/lib.rs:536`.
-- Cache prune safety gate: `safe_cache_prune_path` in `crates/crosspack-installer/src/lib.rs:466`.
-- Install staging entrypoint: `install_from_artifact` in `crates/crosspack-installer/src/lib.rs:170`.
-- Archive extraction dispatch: `extract_archive`, `extract_tar`, `extract_zip` in `crates/crosspack-installer/src/lib.rs:722`, `crates/crosspack-installer/src/lib.rs:729`, `crates/crosspack-installer/src/lib.rs:740`.
-- Strip-components path rewrite: `copy_with_strip`, `copy_with_strip_recursive`, `strip_rel_components` in `crates/crosspack-installer/src/lib.rs:852`, `crates/crosspack-installer/src/lib.rs:870`, `crates/crosspack-installer/src/lib.rs:932`.
-- Path layout contract used by install/uninstall: `PrefixLayout` in `crates/crosspack-installer/src/lib.rs:13`.
+## CORE TYPES
+- `PrefixLayout`: canonical path builder for `pkgs/`, `bin/`, `state/`, `cache/`, `share/completions/`, and transaction/pin/receipt files.
+- `InstallReceipt`: persisted package state (`name`, `version`, deps, target, artifact origin/hash, cache path, exposed links, snapshot, reason, status, timestamp).
+- `InstallReason`: root vs dependency classification; used by uninstall graph logic to protect reachable roots.
+- `TransactionMetadata`: per-tx JSON record (`txid`, operation, status, start time, optional snapshot).
+- `TransactionJournalEntry`: append-only line records for step/state/path progress.
+- `UninstallResult` + `UninstallStatus`: reports blocked roots, stale-state repair, and dependency pruning outcomes.
 
-## CONVENTIONS
-- Receipt file is line-based `k=v`; repeated keys allowed for lists (`dependency=`, `exposed_bin=`).
-- `install_reason` parses via `InstallReason::parse`; unknown value is hard error.
-- Missing `install_reason` defaults to `Root`; missing `install_status` defaults to `"installed"`; missing `installed_at_unix` is hard error.
-- Receipt enumeration accepts only `*.receipt` regular files from `PrefixLayout::installed_state_dir()`.
-- Uninstall dependency edges come from receipt `dependencies` entries parsed as `name@version`; invalid/missing `@` edge dropped.
-- Root retention rule: package removal blocked when target remains reachable from other root receipts.
-- Prune rule: target closure minus reachable-from-remaining-roots becomes `pruned_dependencies`.
-- Cache prune allowed only for absolute paths under `PrefixLayout::artifacts_cache_dir()` and without `..` components.
-- Install extraction uses tmp dirs under `PrefixLayout::tmp_state_dir()` with `raw/` then `staged/` subdirs.
-- `artifact_root` is existence-checked under extracted `raw/`; strip behavior still governed by `strip_components` copy pass.
-- Archive extraction order for zip: PowerShell (Windows) -> `unzip` -> `tar` fallback; tar variants use `tar -xf`.
-- Binary exposure requires relative non-empty path without parent traversal (`validated_relative_binary_path`).
+## STATE + LAYOUT
+- Base dirs created by `PrefixLayout::ensure_base_dirs()`; callers must run this before any read/write flow.
+- Package payloads live at `pkgs/<name>/<version>`; exposed executables are linked/shimmed into `bin/`.
+- Receipts are one file per package at `state/installed/<name>.receipt`; parsing tolerates old receipt shapes where possible.
+- Pins live at `state/pins/<name>.pin`; empty pins are treated as absent.
+- Transaction state lives under `state/transactions/`:
+- `active`: single-writer lock marker containing active `txid`.
+- `<txid>.json`: metadata document; status updates rewrite this file.
+- `<txid>.journal`: newline-delimited serialized journal entries.
+- `staging/<txid>/`: tx-scoped staging area coupled to metadata creation.
+- Installer temp extraction uses `state/tmp/<prefix>-<pid>-<ts>` and is cleaned best-effort.
+- Artifact cache is rooted at `cache/artifacts/<name>/<version>/<target>/artifact.<ext>` and pruned only through validated safe paths.
+- Completion files are copied into `share/completions/packages/<shell>/...`; empty completion dirs are pruned upward.
 
-## ANTI-PATTERNS
-- Changing receipt key names/order without updating both `write_install_receipt` and `parse_receipt` + compatibility tests.
-- Parsing uninstall dependencies from package dirs instead of receipt state (`read_install_receipts` is source of truth).
-- Deleting cache files directly from `cache_path` without `safe_cache_prune_path` gate.
-- Treating malformed receipt lines as fatal globally; parser intentionally ignores unknown keys and malformed non-`=` lines.
-- Removing target package before blocked-by-dependents reachability check.
-- Using string concatenation for lifecycle paths instead of `PrefixLayout` helpers.
-- Skipping `copy_with_strip`/`strip_rel_components` invariants when modifying extraction path logic.
-- Replacing command fallback chain in `extract_zip` with a single-tool assumption.
-- Dropping stale-state branch (`RepairedStaleState`) in uninstall behavior.
-- Editing lifecycle logic without running targeted tests in `crates/crosspack-installer/src/lib.rs` test module.
+## CHANGE IMPACT
+- Path schema changes in `PrefixLayout` are breaking for receipts, uninstall cleanup, cache pruning, and CLI state inspection.
+- Receipt field additions/removals must preserve parse compatibility and sort stability in `read_install_receipts()`.
+- Transaction file format changes affect recovery and operator debugging; update both serializer and parser together.
+- Uninstall dependency traversal changes alter `BlockedByDependents` behavior and automatic dependency pruning decisions.
+- Binary/completion exposure changes impact rollback correctness because uninstall relies on receipt-recorded exposed artifacts.
+- Cache pruning guardrails (`safe_cache_prune_path`) are security-sensitive; broadening acceptance can permit unintended deletions.
+
+## ANTI-PATTERNS (INSTALLER)
+- Do not write outside `PrefixLayout`-derived paths or bypass path validation helpers.
+- Do not delete `state/transactions/active` without corresponding transaction completion/abort handling.
+- Do not mutate receipt semantics without updating both write and parse paths in this crate.
+- Do not treat dependency overrides as persisted state; they are planning-time inputs only.
+- Do not remove package dirs before confirming uninstall is not blocked by remaining roots.
+- Do not prune cached artifacts by raw receipt string paths unless `safe_cache_prune_path()` accepts them.
+
+## VERIFICATION
+- `rustup run stable cargo test -p crosspack-installer`
+- `rustup run stable cargo clippy -p crosspack-installer --all-targets -- -D warnings`
+- `rustup run stable cargo build -p crosspack-installer --locked`
+- Validate tx lifecycle: claim active marker, write metadata/journal, update status, then clear active marker.
+- Validate uninstall edge cases: blocked roots, stale package dir repair, and dependency prune set determinism.
+- Validate exposure cleanup: removed bins/completions and completion directory pruning after uninstall.

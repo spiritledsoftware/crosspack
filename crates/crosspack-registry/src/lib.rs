@@ -1215,21 +1215,9 @@ fn source_has_ready_snapshot(cache_root: &Path) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::Path;
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+    use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-
-    use super::{
-        combine_replace_restore_errors, derive_snapshot_id_from_full_git_sha,
-        ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
-        RegistrySourceSnapshotState, RegistrySourceStore, RegistrySourceWithSnapshotStatus,
-        SourceUpdateStatus,
-    };
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn source_store_add_rejects_duplicate_name() {
