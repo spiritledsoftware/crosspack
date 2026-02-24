@@ -1,22 +1,57 @@
 # Release Checklist
 
-## Release Artifacts Workflow (SPI-22)
+## Release Automation Workflows
 
-Workflow: `.github/workflows/release-artifacts.yml` (GitHub Actions: `https://github.com/spiritledsoftware/crosspack/actions/workflows/release-artifacts.yml`)
+- Release PR + version/changelog automation: `.github/workflows/release-please.yml`
+- Stable release artifacts (`vX.Y.Z`): `.github/workflows/release-artifacts.yml`
+- Prerelease artifacts (`vX.Y.Z-rc.N` from `release/*`): `.github/workflows/prerelease-artifacts.yml`
 
-1. Choose release trigger:
-   - Final release: push `v*` tag (example `v0.2.0`).
-   - RC build: run **Release Artifacts** with manual dispatch and set `release_tag` (example `v0.2.0-rc.1`).
-2. Verify all target artifacts are uploaded:
+## Stable Release Flow (`main`)
+
+1. Confirm repository variable `CROSSPACK_BOT_APP_ID` and repository secret `CROSSPACK_BOT_APP_PRIVATE_KEY` are configured for `.github/workflows/release-please.yml`.
+2. Verify merged commits on `main` follow Conventional Commits:
+   - `fix:` -> patch bump
+   - `feat:` -> minor bump
+   - `BREAKING CHANGE:` footer -> major bump
+3. Confirm **Release Please** has an open release PR with:
+   - `Cargo.toml` workspace version bump
+   - `CHANGELOG.md` updates
+4. Validate CI checks on release PR:
+   - `cargo fmt --all --check`
+   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+   - `cargo build --workspace --locked`
+   - `cargo test --workspace`
+5. Merge the release PR.
+6. Confirm stable tag `vX.Y.Z` and GitHub release were created.
+7. Confirm **Release Artifacts** completed and uploaded:
    - `crosspack-<release_tag>-x86_64-unknown-linux-gnu.tar.gz`
+   - `crosspack-<release_tag>-aarch64-unknown-linux-gnu.tar.gz`
+   - `crosspack-<release_tag>-x86_64-unknown-linux-musl.tar.gz`
+   - `crosspack-<release_tag>-aarch64-unknown-linux-musl.tar.gz`
    - `crosspack-<release_tag>-x86_64-apple-darwin.tar.gz`
+   - `crosspack-<release_tag>-aarch64-apple-darwin.tar.gz`
    - `crosspack-<release_tag>-x86_64-pc-windows-msvc.zip`
-3. Verify uploaded artifact records use name `crosspack-<release_tag>-<target>` and 30-day retention.
-4. Promotion from RC to final:
-   - Ensure RC artifact set is complete.
-   - Create/move final `v*` tag to promoted commit.
-   - Wait for tag-triggered workflow to complete.
-   - Attach workflow run URL and checksums to release notes.
+   - `SHA256SUMS.txt`
+
+## Prerelease Flow (`release/*`)
+
+1. Create or update a `release/*` branch from the candidate commit.
+2. Ensure `Cargo.toml` `[workspace.package].version` matches the intended base version.
+3. Push to `release/*` and confirm **Prerelease Artifacts** runs automatically.
+4. Verify generated prerelease tag format: `v<version>-rc.<run_number>`.
+5. Verify prerelease assets and checksums are attached to the GitHub prerelease.
+
+## Manual Override and Rollback
+
+- Rebuild or republish a specific stable/prerelease tag via manual dispatch of `.github/workflows/release-artifacts.yml` with `release_tag`.
+- For a bad stable release:
+  1. Revert the release commit on `main`.
+  2. Merge fix PR(s).
+  3. Let Release Please cut a corrective follow-up release.
+- For a bad prerelease:
+  1. Fix on `release/*`.
+  2. Push again to generate the next `-rc.N` tag.
+  3. Mark superseded prerelease entries clearly in release notes.
 
 ## Post-Merge Snapshot Validation (SPI-20)
 
@@ -37,7 +72,7 @@ Interpretation:
 
 Before release promotion, run a docs-claim pass to ensure launch-facing wording only promises shipped GA behavior:
 
-- Confirm README and architecture docs describe current v0.3 shipped scope.
+- Confirm README and architecture docs describe current shipped scope.
 - Confirm v0.4/v0.5 specs are labeled as roadmap drafts (non-GA).
 - Confirm command examples/help text do not imply unimplemented guarantees.
 - Reconcile this docs set before promotion:

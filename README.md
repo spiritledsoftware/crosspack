@@ -246,6 +246,7 @@ Run the same quality gates as CI:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --workspace --locked
 cargo test --workspace
 ```
 
@@ -255,6 +256,25 @@ Post-merge and pre-release snapshot-flow check:
 scripts/validate-snapshot-flow.sh
 ```
 
+## Release Automation
+
+Crosspack release metadata is automated from Conventional Commits on `main`:
+
+- `.github/workflows/release-please.yml` uses GitHub App auth via `CROSSPACK_BOT_APP_ID` (repository variable) and `CROSSPACK_BOT_APP_PRIVATE_KEY` (repository secret) so created tags trigger downstream artifact workflows.
+- `.github/workflows/release-please.yml` opens/updates release PRs that bump workspace version and update `CHANGELOG.md`.
+- Merging the release PR creates the stable tag (`vX.Y.Z`) and GitHub release metadata.
+- `.github/workflows/release-artifacts.yml` builds multi-platform artifacts for stable tags and uploads `SHA256SUMS.txt`.
+- `.github/workflows/prerelease-artifacts.yml` builds prerelease (`vX.Y.Z-rc.N`) artifacts automatically on `release/*` branch pushes.
+
+Version bump rules:
+- `fix:` -> patch
+- `feat:` -> minor
+- `BREAKING CHANGE:` footer -> major
+
+Dependency maintenance automation:
+- `.github/dependabot.yml` opens weekly grouped dependency update PRs (Cargo + GitHub Actions).
+- `.github/workflows/dependency-review.yml` checks pull requests for high-severity dependency risk deltas.
+
 ## Documentation Map
 
 - `docs/architecture.md` - architecture and module responsibilities.
@@ -263,6 +283,8 @@ scripts/validate-snapshot-flow.sh
 - `docs/manifest-spec.md` - manifest schema.
 - `docs/source-management-spec.md` - v0.3 source-management design.
 - `docs/registry-bootstrap-runbook.md` - trusted default source bootstrap, rotation, and failure recovery.
+- `docs/release-checklist.md` - release and prerelease operator checklist with rollback paths.
+- `docs/contributor-playbook.md` - contributor workflow and launch runbook.
 - `docs/dependency-policy-spec.md` - dependency policy and providers roadmap spec (v0.4 draft, non-GA).
 - `docs/transaction-rollback-spec.md` - transaction and recovery roadmap spec (v0.5 draft, non-GA).
 

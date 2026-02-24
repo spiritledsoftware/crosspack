@@ -1,26 +1,48 @@
-name: Release Artifacts
+name: Prerelease Artifacts
 
 on:
   push:
-    tags:
-      - "v*"
-      - "!v*-rc.*"
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Release tag or RC label for artifact naming (for example: v0.4.0 or v0.4.0-rc.1)"
-        required: true
-        type: string
+    branches:
+      - "release/**"
 
 permissions:
   contents: write
 
-env:
-  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+concurrency:
+  group: prerelease-artifacts-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: prepare-prerelease-tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      release_version: ${{ steps.metadata.outputs.release_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve prerelease tag
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml | head -n1)"
+          if [ -z "${release_version}" ]; then
+            echo "failed to resolve [workspace.package].version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          release_tag="v${release_version}-rc.${GITHUB_RUN_NUMBER}"
+
+          echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+
   build:
     name: build-${{ matrix.target }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -47,6 +69,8 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
 
     steps:
       - name: Checkout
@@ -106,9 +130,11 @@ jobs:
           retention-days: 30
 
   publish-release:
-    name: publish-release
-    needs: build
+    name: publish-prerelease
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
 
     steps:
       - name: Download packaged artifacts
@@ -141,14 +167,15 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
 
-      - name: Create GitHub release and upload assets
+      - name: Create prerelease and upload assets
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ steps.app-token.outputs.token }}
           tag_name: ${{ env.RELEASE_TAG }}
           name: Crosspack ${{ env.RELEASE_TAG }}
+          prerelease: true
           draft: false
-          prerelease: ${{ contains(env.RELEASE_TAG, '-rc.') }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             release-assets/crosspack-${{ env.RELEASE_TAG }}-*

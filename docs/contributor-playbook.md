@@ -108,8 +108,10 @@ git checkout --theirs <path>  # prefer incoming version
 - All required checks pass:
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - `cargo build --workspace --locked`
   - `cargo test --workspace`
   - `scripts/validate-snapshot-flow.sh` (automated in CI at `.github/workflows/ci.yml`, step `Snapshot-flow validation`)
+- If dependency manifests/lockfiles changed, ensure `.github/workflows/dependency-review.yml` is green.
 - Docs updated for any behavior or contributor-facing changes.
 - For install/resolver/transaction changes, reconcile:
   - `docs/architecture.md`
@@ -121,24 +123,25 @@ git checkout --theirs <path>  # prefer incoming version
 ### Deploy
 - Merge after approvals, with merge commit policy required by the repo.
 - Confirm cross-platform CI jobs are queued (`ubuntu`, `macOS`, `windows`).
-- Run the release workflow at `.github/workflows/release-artifacts.yml` (`https://github.com/spiritledsoftware/crosspack/actions/workflows/release-artifacts.yml`):
-  1. For a final release: push a tag like `v0.2.0` to trigger it automatically.
-  2. For a release candidate: run **Release Artifacts** via manual dispatch and provide `release_tag` (example: `v0.2.0-rc.1`).
-  3. Confirm artifacts exist for all supported targets:
-     - `crosspack-<release_tag>-x86_64-unknown-linux-gnu.tar.gz`
-     - `crosspack-<release_tag>-x86_64-apple-darwin.tar.gz`
-     - `crosspack-<release_tag>-x86_64-pc-windows-msvc.zip`
-  4. Confirm each uploaded artifact name follows `crosspack-<release_tag>-<target>` and is retained for 30 days.
+- Ensure `CROSSPACK_BOT_APP_ID` (repository variable) and `CROSSPACK_BOT_APP_PRIVATE_KEY` (repository secret) are configured so release tags trigger downstream workflows.
+- Stable release flow:
+  1. Let `.github/workflows/release-please.yml` create/update the release PR from `main`.
+  2. Confirm release PR includes `Cargo.toml` workspace version bump + `CHANGELOG.md` updates.
+  3. Merge release PR to create stable tag `vX.Y.Z` and GitHub release metadata.
+  4. Confirm `.github/workflows/release-artifacts.yml` completed for that tag and uploaded all target artifacts + `SHA256SUMS.txt`.
+- Prerelease flow:
+  1. Push to `release/*` branch.
+  2. Confirm `.github/workflows/prerelease-artifacts.yml` creates `vX.Y.Z-rc.N` and uploads artifacts/checksums.
 
 ### Post-launch
 - Monitor CI dashboards for regression windows (especially snapshot checks).
 - Run `scripts/validate-snapshot-flow.sh` before promoting a release candidate.
 - Run `scripts/check-snapshot-mismatch-health.sh` to detect repeated `snapshot-id-mismatch` errors.
 - Promotion steps:
-  1. Validate RC artifacts from **Release Artifacts** job are complete and downloadable.
-  2. Create or move the final `v*` tag to the promoted commit.
-  3. Wait for the tag-triggered release workflow run to finish for all targets.
-  4. Record artifact run URL + checksums in release notes before public announcement.
+  1. Validate RC artifacts from **Prerelease Artifacts** are complete and downloadable.
+  2. Merge intended changes to `main`.
+  3. Let **Release Please** produce/refresh the stable release PR.
+  4. Merge stable release PR and confirm stable artifact workflow completion.
 - Verify no unexpected snapshot mismatch failures in logs.
 - Capture and triage any failed jobs before public rollout.
 
@@ -148,6 +151,7 @@ git checkout --theirs <path>  # prefer incoming version
   1. Revert merge or release commit.
   2. Reopen/patch the failing work item quickly.
   3. Re-run checks, then re-merge once stable.
+  4. Allow Release Please to cut the corrective follow-up release.
 - If `scripts/check-snapshot-mismatch-health.sh` returns `CRIT`, open a launch blocker review and include output and mitigation status.
 - Announce blocker status and mitigation steps in the issue/thread.
 
