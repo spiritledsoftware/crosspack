@@ -1,0 +1,79 @@
+name: Sync Crosspack Release To Registry
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Stable release tag to sync (for example: v0.1.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync-crosspack-version:
+    name: sync-crosspack-version
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')) }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout crosspack repository
+        uses: actions/checkout@v6
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            release_tag="${{ inputs.release_tag }}"
+          else
+            release_tag="${{ github.event.release.tag_name }}"
+          fi
+
+          if [[ "$release_tag" == *"-rc."* ]]; then
+            echo "release tag is prerelease; skipping: ${release_tag}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub App token for registry repository
+        if: steps.meta.outputs.skip == 'false'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CROSSPACK_BOT_APP_ID }}
+          private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ vars.CROSSPACK_REGISTRY_REPOSITORY_NAME || 'crosspack-registry' }}
+          permission-contents: write
+
+      - name: Sync registry metadata
+        if: steps.meta.outputs.skip == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          REGISTRY_REPOSITORY_RAW: ${{ vars.CROSSPACK_REGISTRY_REPOSITORY }}
+          REGISTRY_REPOSITORY_NAME: ${{ vars.CROSSPACK_REGISTRY_REPOSITORY_NAME || 'crosspack-registry' }}
+          REGISTRY_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REGISTRY_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.CROSSPACK_REGISTRY_SIGNING_PRIVATE_KEY_PEM }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${REGISTRY_REPOSITORY_RAW}" ]; then
+            export REGISTRY_REPOSITORY="${REGISTRY_REPOSITORY_RAW}"
+          else
+            export REGISTRY_REPOSITORY="${REGISTRY_REPOSITORY_OWNER}/${REGISTRY_REPOSITORY_NAME}"
+          fi
+
+          ./scripts/sync-crosspack-registry-release.sh

@@ -4,26 +4,31 @@
 
 - Release PR + version/changelog automation: `.github/workflows/release-please.yml`
 - Stable release artifacts (`vX.Y.Z`): `.github/workflows/release-artifacts.yml`
+- Registry sync from stable release (`vX.Y.Z`): `.github/workflows/registry-sync.yml`
 - Prerelease artifacts (`vX.Y.Z-rc.N` from `release/*`): `.github/workflows/prerelease-artifacts.yml`
 
 ## Stable Release Flow (`main`)
 
 1. Confirm repository variable `CROSSPACK_BOT_APP_ID` and repository secret `CROSSPACK_BOT_APP_PRIVATE_KEY` are configured for `.github/workflows/release-please.yml`.
-2. Verify merged commits on `main` follow Conventional Commits:
+2. Confirm registry sync configuration for `.github/workflows/registry-sync.yml`:
+   - repository variable `CROSSPACK_REGISTRY_REPOSITORY` (default `spiritledsoftware/crosspack-registry`) or `CROSSPACK_REGISTRY_REPOSITORY_NAME`
+   - repository secret `CROSSPACK_REGISTRY_SIGNING_PRIVATE_KEY_PEM` (Ed25519 private key PEM used to sign `index/crosspack/<version>.toml`)
+   - GitHub App installation has `contents:write` on the registry repository
+3. Verify merged commits on `main` follow Conventional Commits:
    - `fix:` -> patch bump
    - `feat:` -> minor bump
    - `BREAKING CHANGE:` footer -> major bump
-3. Confirm **Release Please** has an open release PR with:
+4. Confirm **Release Please** has an open release PR with:
    - `Cargo.toml` workspace version bump
    - `CHANGELOG.md` updates
-4. Validate CI checks on release PR:
+5. Validate CI checks on release PR:
    - `cargo fmt --all --check`
    - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
    - `cargo build --workspace --locked`
    - `cargo test --workspace`
-5. Merge the release PR.
-6. Confirm stable tag `vX.Y.Z` and GitHub release were created.
-7. Confirm **Release Artifacts** completed and uploaded:
+6. Merge the release PR.
+7. Confirm stable tag `vX.Y.Z` and GitHub release were created.
+8. Confirm **Release Artifacts** completed and uploaded:
    - `crosspack-<release_tag>-x86_64-unknown-linux-gnu.tar.gz`
    - `crosspack-<release_tag>-aarch64-unknown-linux-gnu.tar.gz`
    - `crosspack-<release_tag>-x86_64-unknown-linux-musl.tar.gz`
