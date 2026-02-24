@@ -81,11 +81,14 @@ upsert_profile_block() {
     return 1
   fi
 
-  if ! mv "${filtered_path}" "${profile_path}"; then
+  # Write via redirection so symlinked profiles (e.g. ~/.zshrc -> dotfiles repo)
+  # keep the symlink inode and update the target file contents in place.
+  if ! cat "${filtered_path}" > "${profile_path}"; then
     rm -f "${filtered_path}"
     return 1
   fi
 
+  rm -f "${filtered_path}"
   return 0
 }
 
