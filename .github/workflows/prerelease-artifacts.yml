@@ -21,7 +21,7 @@ jobs:
       release_version: ${{ steps.metadata.outputs.release_version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve prerelease tag
         id: metadata
@@ -74,7 +74,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -122,7 +122,7 @@ jobs:
           Compress-Archive -Path "dist/crosspack.exe" -DestinationPath "dist/crosspack-${env:RELEASE_TAG}-${{ matrix.target }}.zip" -Force
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: crosspack-${{ env.RELEASE_TAG }}-${{ matrix.target }}
           path: dist/crosspack-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}
@@ -138,7 +138,7 @@ jobs:
 
     steps:
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: crosspack-${{ env.RELEASE_TAG }}-*
           merge-multiple: true
