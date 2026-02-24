@@ -70,14 +70,14 @@ jobs:
           case "${{ matrix.target }}" in
             x86_64-unknown-linux-musl)
               CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
-                cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+                cargo build --release -p crosspack-cli --target ${{ matrix.target }}
               ;;
             aarch64-unknown-linux-musl)
               CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
-                cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+                cargo build --release -p crosspack-cli --target ${{ matrix.target }}
               ;;
             *)
-              cargo build --locked --release -p crosspack-cli --target ${{ matrix.target }}
+              cargo build --release -p crosspack-cli --target ${{ matrix.target }}
               ;;
           esac
 
