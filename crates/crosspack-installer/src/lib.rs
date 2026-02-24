@@ -443,7 +443,13 @@ pub fn install_from_artifact(
     fs::create_dir_all(&staged_dir)
         .with_context(|| format!("failed to create {}", staged_dir.display()))?;
 
-    extract_archive(archive_path, &raw_dir, archive_type)?;
+    stage_artifact_payload(
+        archive_path,
+        &raw_dir,
+        archive_type,
+        strip_components,
+        artifact_root,
+    )?;
 
     if let Some(root) = artifact_root {
         let root_path = raw_dir.join(root);
@@ -1827,11 +1833,53 @@ fn make_tmp_dir(layout: &PrefixLayout, prefix: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn extract_archive(archive_path: &Path, dst: &Path, archive_type: ArchiveType) -> Result<()> {
-    match archive_type {
-        ArchiveType::Zip => extract_zip(archive_path, dst),
-        ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(archive_path, dst),
+fn stage_artifact_payload(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    artifact_type: ArchiveType,
+    strip_components: u32,
+    artifact_root: Option<&str>,
+) -> Result<()> {
+    match artifact_type {
+        ArchiveType::Zip => extract_zip(artifact_path, raw_dir),
+        ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(artifact_path, raw_dir),
+        ArchiveType::AppImage => {
+            stage_appimage_payload(artifact_path, raw_dir, strip_components, artifact_root)
+        }
+        ArchiveType::Msi => stage_msi_payload(artifact_path, raw_dir),
+        ArchiveType::Dmg => stage_dmg_payload(artifact_path, raw_dir),
     }
+}
+
+fn stage_appimage_payload(
+    _artifact_path: &Path,
+    _raw_dir: &Path,
+    strip_components: u32,
+    artifact_root: Option<&str>,
+) -> Result<()> {
+    if strip_components != 0 {
+        return Err(anyhow!("strip_components must be 0 for AppImage artifacts"));
+    }
+    if artifact_root.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(anyhow!(
+            "artifact_root is not supported for AppImage artifacts"
+        ));
+    }
+    Err(anyhow!("AppImage artifact staging is not implemented yet"))
+}
+
+fn stage_msi_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(anyhow!("MSI artifacts are supported only on Windows hosts"));
+    }
+    Err(anyhow!("MSI artifact staging is not implemented yet"))
+}
+
+fn stage_dmg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err(anyhow!("DMG artifacts are supported only on macOS hosts"));
+    }
+    Err(anyhow!("DMG artifact staging is not implemented yet"))
 }
 
 fn extract_tar(archive_path: &Path, dst: &Path) -> Result<()> {
@@ -2602,6 +2650,86 @@ mod tests {
             Path::new("inner/bin/tool")
         );
         assert!(strip_rel_components(p, 4).is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn install_from_artifact_rejects_msi_on_non_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.msi");
+        fs::write(&artifact_path, b"dummy msi").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Msi,
+            0,
+            None,
+        )
+        .expect_err("msi should be rejected on non-Windows host");
+        assert!(
+            err.to_string()
+                .contains("MSI artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_from_artifact_rejects_dmg_on_non_macos_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.dmg");
+        fs::write(&artifact_path, b"dummy dmg").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Dmg,
+            0,
+            None,
+        )
+        .expect_err("dmg should be rejected on non-macOS host");
+        assert!(
+            err.to_string()
+                .contains("DMG artifacts are supported only on macOS hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn install_from_artifact_rejects_appimage_with_strip_components() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.AppImage");
+        fs::write(&artifact_path, b"dummy appimage").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::AppImage,
+            1,
+            None,
+        )
+        .expect_err("appimage strip_components should be rejected");
+        assert!(
+            err.to_string()
+                .contains("strip_components must be 0 for AppImage artifacts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
