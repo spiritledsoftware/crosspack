@@ -2346,14 +2346,12 @@ struct TransactionPreview {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TransactionPreviewMode {
     DryRun,
-    Apply,
 }
 
 impl TransactionPreviewMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::DryRun => "dry-run",
-            Self::Apply => "apply",
         }
     }
 }
@@ -6615,7 +6613,7 @@ ripgrep-legacy = "*"
     }
 
     #[test]
-    fn transaction_preview_dry_run_and_apply_modes_have_change_parity() {
+    fn transaction_preview_dry_run_output_is_stable_for_same_plan() {
         let preview = build_transaction_preview(
             "install",
             &[PlannedPackageChange {
@@ -6626,19 +6624,14 @@ ripgrep-legacy = "*"
                 replacement_removals: Vec::new(),
             }],
         );
-        let dry_lines = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
-        let apply_lines = render_transaction_preview_lines(&preview, TransactionPreviewMode::Apply);
+        let first = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        let second = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
 
-        assert_eq!(dry_lines.len(), apply_lines.len());
+        assert_eq!(first, second);
         assert_eq!(
-            dry_lines[0],
+            first[0],
             "transaction_preview operation=install mode=dry-run"
         );
-        assert_eq!(
-            apply_lines[0],
-            "transaction_preview operation=install mode=apply"
-        );
-        assert_eq!(&dry_lines[1..], &apply_lines[1..]);
     }
 
     #[test]
