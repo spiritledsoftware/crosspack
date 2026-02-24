@@ -492,11 +492,18 @@ fn package_completion_loader_snippet(layout: &PrefixLayout, shell: CliCompletion
     let package_completion_dir =
         layout.package_completions_shell_dir(shell.package_completion_shell());
     match shell {
-        CliCompletionShell::Bash | CliCompletionShell::Zsh => {
+        CliCompletionShell::Bash => {
             let escaped_dir =
                 escape_single_quote_shell(&package_completion_dir.display().to_string());
             format!(
                 "# crosspack package completions\nif [ -d '{escaped_dir}' ]; then\n  find '{escaped_dir}' -mindepth 1 -maxdepth 1 -type f -print 2>/dev/null \\\n    | LC_ALL=C sort \\\n    | while IFS= read -r _crosspack_pkg_completion_path; do\n        . \"${{_crosspack_pkg_completion_path}}\"\n      done\nfi\n"
+            )
+        }
+        CliCompletionShell::Zsh => {
+            let escaped_dir =
+                escape_single_quote_shell(&package_completion_dir.display().to_string());
+            format!(
+                "# crosspack package completions\nif [ -d '{escaped_dir}' ]; then\n  if (( ${{fpath[(Ie)'{escaped_dir}']}} == 0 )); then\n    fpath=('{escaped_dir}' $fpath)\n  fi\n  autoload -Uz compinit\n  compinit -i >/dev/null 2>&1 || true\nfi\n"
             )
         }
         CliCompletionShell::Fish => {
@@ -6929,6 +6936,46 @@ ripgrep-legacy = "*"
             );
         }
         let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn zsh_completion_script_uses_fpath_for_package_completions() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut output = Vec::new();
+        write_completions_script(CliCompletionShell::Zsh, &layout, &mut output)
+            .expect("completion script generation should succeed");
+        let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+
+        assert!(
+            rendered.contains("fpath=('"),
+            "zsh loader should register package completion directory via fpath"
+        );
+        assert!(
+            rendered.contains("compinit -i"),
+            "zsh loader should refresh completion system after fpath update"
+        );
+    }
+
+    #[test]
+    fn zsh_completion_script_does_not_source_package_completion_files_directly() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut output = Vec::new();
+        write_completions_script(CliCompletionShell::Zsh, &layout, &mut output)
+            .expect("completion script generation should succeed");
+        let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+
+        assert!(
+            !rendered.contains("_crosspack_pkg_completion_path"),
+            "zsh loader must avoid sourcing completion files directly"
+        );
+        assert!(
+            !rendered.contains("while IFS= read -r"),
+            "zsh loader should not use bash-style source loop"
+        );
     }
 
     #[test]
