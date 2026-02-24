@@ -32,7 +32,15 @@
      - set `install_reason=dependency` for transitive-only packages,
      - preserve existing `install_reason=root` when upgrading already-rooted packages.
 
+`crosspack install --dry-run` executes the same planning and emits deterministic, script-friendly preview lines:
+- `transaction_preview operation=... mode=dry-run`
+- `transaction_summary adds=... removals=... replacements=... transitions=...`
+- `risk_flags=...`
+- ordered `change_*` entries (`change_add`, `change_remove`, `change_replace`, `change_transition`).
+- no transaction metadata, receipts, package files, or binaries are mutated.
+
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
+`crosspack upgrade --dry-run` emits the same preview format and performs planning without mutation.
 
 ## Transaction Phases and Recovery (current v0.3)
 
