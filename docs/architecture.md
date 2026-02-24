@@ -48,6 +48,7 @@ Default user prefixes:
 - `registry remove <name> [--purge-cache]` removes a source and optionally deletes its cached snapshot.
 - `update [--registry <name>]...` refreshes all or selected sources and prints per-source status plus `update summary: updated=<n> up-to-date=<n> failed=<n>`.
 - `self-update [--dry-run] [--force-redownload]` refreshes configured source snapshots and then installs the latest `crosspack` package for the current host target.
+- Lifecycle-oriented commands use automatic output mode selection: rich status badges on interactive terminals, plain deterministic output for non-interactive/piped usage.
 - Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root, which acts as the local trust anchor for that registry snapshot or mirror.
 - Every version manifest requires a detached hex signature sidecar at `<version>.toml.sig`.
 - Metadata-dependent commands fail closed on missing or invalid registry key/signature material.
@@ -58,6 +59,7 @@ Default user prefixes:
   - `--target <triple>` to override host target selection.
   - `--dry-run` to print deterministic transaction preview lines (`transaction_summary`, `risk_flags`, ordered `change_*`) without mutation.
   - `--force-redownload` to bypass artifact cache.
+- Output determinism contract remains fixed for machine-oriented lines (`transaction_preview`, `transaction_summary`, `risk_flags`, ordered `change_*`, and `update summary: updated=<n> up-to-date=<n> failed=<n>`).
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - `upgrade --dry-run` performs full planning and emits the same deterministic transaction preview format without mutating install state.

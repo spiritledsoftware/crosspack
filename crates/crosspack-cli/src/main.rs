@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
@@ -49,6 +49,64 @@ const METADATA_CONFIG_GUIDANCE: &str =
 const SNAPSHOT_ID_MISMATCH_ERROR_CODE: &str = "snapshot-id-mismatch";
 const SEARCH_METADATA_GUIDANCE: &str =
     "search metadata unavailable; run `crosspack update` to refresh local snapshots and `crosspack registry list` to inspect source status";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum OutputStyle {
+    Plain,
+    Rich,
+}
+
+fn resolve_output_style(stdout_is_tty: bool, stderr_is_tty: bool) -> OutputStyle {
+    if stdout_is_tty && stderr_is_tty {
+        OutputStyle::Rich
+    } else {
+        OutputStyle::Plain
+    }
+}
+
+fn render_status_line(style: OutputStyle, status: &str, message: &str) -> String {
+    match style {
+        OutputStyle::Plain => message.to_string(),
+        OutputStyle::Rich => {
+            let badge = match status {
+                "ok" => "[OK]",
+                "warn" => "[WARN]",
+                "error" => "[ERR]",
+                "step" => "[..]",
+                _ => "[*]",
+            };
+            format!("{badge} {message}")
+        }
+    }
+}
+
+fn render_update_line(style: OutputStyle, line: &str) -> String {
+    if line.contains(": failed") {
+        return render_status_line(style, "error", line);
+    }
+    if line.contains(": updated") {
+        return render_status_line(style, "ok", line);
+    }
+    if line.contains(": up-to-date") {
+        return render_status_line(style, "step", line);
+    }
+    render_status_line(style, "step", line)
+}
+
+fn format_update_output_lines(report: &UpdateReport, style: OutputStyle) -> Vec<String> {
+    report
+        .lines
+        .iter()
+        .map(|line| render_update_line(style, line))
+        .collect()
+}
+
+fn current_output_style() -> OutputStyle {
+    resolve_output_style(
+        std::io::stdout().is_terminal(),
+        std::io::stderr().is_terminal(),
+    )
+}
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -222,6 +280,7 @@ fn main() -> Result<()> {
         } => {
             let (name, requirement) = parse_spec(&spec)?;
             let provider_overrides = parse_provider_overrides(&provider)?;
+            let output_style = current_output_style();
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -322,7 +381,7 @@ fn main() -> Result<()> {
                         snapshot_id.as_deref(),
                         force_redownload,
                     )?;
-                    print_install_outcome(&outcome);
+                    print_install_outcome(&outcome, output_style);
                 }
 
                 append_transaction_journal_entry(
@@ -461,10 +520,39 @@ fn main() -> Result<()> {
         Commands::Doctor => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            println!("prefix: {}", layout.prefix().display());
-            println!("bin: {}", layout.bin_dir().display());
-            println!("cache: {}", layout.cache_dir().display());
-            println!("{}", doctor_transaction_health_line(&layout)?);
+            let output_style = current_output_style();
+            println!(
+                "{}",
+                render_status_line(
+                    output_style,
+                    "step",
+                    &format!("prefix: {}", layout.prefix().display())
+                )
+            );
+            println!(
+                "{}",
+                render_status_line(
+                    output_style,
+                    "step",
+                    &format!("bin: {}", layout.bin_dir().display())
+                )
+            );
+            println!(
+                "{}",
+                render_status_line(
+                    output_style,
+                    "step",
+                    &format!("cache: {}", layout.cache_dir().display())
+                )
+            );
+            println!(
+                "{}",
+                render_status_line(
+                    output_style,
+                    "step",
+                    &doctor_transaction_health_line(&layout)?
+                )
+            );
         }
         Commands::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -999,6 +1087,7 @@ fn run_upgrade_command(
     dry_run: bool,
     provider_overrides: &BTreeMap<String, String>,
 ) -> Result<()> {
+    let output_style = current_output_style();
     ensure_upgrade_command_ready(layout)?;
     let backend = select_metadata_backend(registry_root, layout)?;
 
@@ -1146,7 +1235,17 @@ fn run_upgrade_command(
                             )
                         })?;
                         if package.manifest.version <= old_version {
-                            println!("{} is up-to-date ({})", package.manifest.name, old.version);
+                            println!(
+                                "{}",
+                                render_status_line(
+                                    output_style,
+                                    "step",
+                                    &format!(
+                                        "{} is up-to-date ({})",
+                                        package.manifest.name, old.version
+                                    )
+                                )
+                            );
                             continue;
                         }
                     }
@@ -1189,11 +1288,25 @@ fn run_upgrade_command(
                     )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         println!(
-                            "upgraded {} from {} to {}",
-                            package.manifest.name, old.version, package.manifest.version
+                            "{}",
+                            render_status_line(
+                                output_style,
+                                "ok",
+                                &format!(
+                                    "upgraded {} from {} to {}",
+                                    package.manifest.name, old.version, package.manifest.version
+                                )
+                            )
                         );
                     }
-                    println!("receipt: {}", outcome.receipt_path.display());
+                    println!(
+                        "{}",
+                        render_status_line(
+                            output_style,
+                            "step",
+                            &format!("receipt: {}", outcome.receipt_path.display())
+                        )
+                    );
                 }
             }
             None => {
@@ -1266,8 +1379,15 @@ fn run_upgrade_command(
                             })?;
                             if package.manifest.version <= old_version {
                                 println!(
-                                    "{} is up-to-date ({})",
-                                    package.manifest.name, old.version
+                                    "{}",
+                                    render_status_line(
+                                        output_style,
+                                        "step",
+                                        &format!(
+                                            "{} is up-to-date ({})",
+                                            package.manifest.name, old.version
+                                        )
+                                    )
                                 );
                                 continue;
                             }
@@ -1315,16 +1435,39 @@ fn run_upgrade_command(
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
                             println!(
-                                "upgraded {} from {} to {}",
-                                package.manifest.name, old.version, package.manifest.version
+                                "{}",
+                                render_status_line(
+                                    output_style,
+                                    "ok",
+                                    &format!(
+                                        "upgraded {} from {} to {}",
+                                        package.manifest.name,
+                                        old.version,
+                                        package.manifest.version
+                                    )
+                                )
                             );
                         } else {
                             println!(
-                                "installed dependency {} {}",
-                                package.manifest.name, package.manifest.version
+                                "{}",
+                                render_status_line(
+                                    output_style,
+                                    "ok",
+                                    &format!(
+                                        "installed dependency {} {}",
+                                        package.manifest.name, package.manifest.version
+                                    )
+                                )
                             );
                         }
-                        println!("receipt: {}", outcome.receipt_path.display());
+                        println!(
+                            "{}",
+                            render_status_line(
+                                output_style,
+                                "step",
+                                &format!("receipt: {}", outcome.receipt_path.display())
+                            )
+                        );
                     }
                 }
             }
@@ -1954,6 +2097,7 @@ fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String
 }
 
 fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<()> {
+    let output_style = current_output_style();
     layout.ensure_base_dirs()?;
 
     let target_txid = match txid {
@@ -1969,7 +2113,10 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
             } else if let Some(candidate_txid) = latest_rollback_candidate_txid(layout)? {
                 candidate_txid
             } else {
-                println!("no rollback needed");
+                println!(
+                    "{}",
+                    render_status_line(output_style, "step", "no rollback needed")
+                );
                 return Ok(());
             }
         }
@@ -1993,7 +2140,10 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         if active_txid.as_deref() == Some(target_txid.as_str()) {
             clear_active_transaction(layout)?;
         }
-        println!("no rollback needed");
+        println!(
+            "{}",
+            render_status_line(output_style, "step", "no rollback needed")
+        );
         return Ok(());
     }
 
@@ -2030,35 +2180,63 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         eprintln!("{err}");
     }
 
-    println!("rolled back {target_txid}");
+    println!(
+        "{}",
+        render_status_line(output_style, "ok", &format!("rolled back {target_txid}"))
+    );
     Ok(())
 }
 
 fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
+    let output_style = current_output_style();
     layout.ensure_base_dirs()?;
 
     let Some(txid) = read_active_transaction(layout)? else {
-        println!("repair: no action needed");
+        println!(
+            "{}",
+            render_status_line(output_style, "step", "repair: no action needed")
+        );
         return Ok(());
     };
 
     let metadata = read_transaction_metadata(layout, &txid)?;
     let Some(metadata) = metadata else {
         clear_active_transaction(layout)?;
-        println!("repair: cleared stale marker {txid}");
+        println!(
+            "{}",
+            render_status_line(
+                output_style,
+                "ok",
+                &format!("repair: cleared stale marker {txid}")
+            )
+        );
         return Ok(());
     };
 
     if status_allows_stale_marker_cleanup(&metadata.status) {
         clear_active_transaction(layout)?;
-        println!("repair: cleared stale marker {txid}");
+        println!(
+            "{}",
+            render_status_line(
+                output_style,
+                "ok",
+                &format!("repair: cleared stale marker {txid}")
+            )
+        );
         return Ok(());
     }
 
     match metadata.status.as_str() {
         "planning" | "applying" | "failed" | "rolling_back" => {
             run_rollback_command(layout, Some(txid.clone()))?;
-            println!("recovered interrupted transaction {txid}: rolled back");
+            println!(
+                "{}",
+                render_status_line(
+                    output_style,
+                    "ok",
+                    &format!("recovered interrupted transaction {txid}: rolled back")
+                )
+            );
             Ok(())
         }
         status => Err(anyhow!(
@@ -2068,6 +2246,7 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
 }
 
 fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
+    let output_style = current_output_style();
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "uninstall")?;
 
@@ -2146,8 +2325,13 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
             },
         )?;
 
+        let status = if matches!(result.status, UninstallStatus::BlockedByDependents) {
+            "warn"
+        } else {
+            "ok"
+        };
         for line in format_uninstall_messages(&result) {
-            println!("{line}");
+            println!("{}", render_status_line(output_style, status, &line));
         }
 
         Ok(())
@@ -2161,9 +2345,10 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
 }
 
 fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Result<()> {
+    let output_style = current_output_style();
     let results = store.update_sources(registry)?;
     let report = build_update_report(&results);
-    for line in report.lines {
+    for line in format_update_output_lines(&report, output_style) {
         println!("{line}");
     }
     println!(
@@ -2179,16 +2364,33 @@ fn run_self_update_command(
     dry_run: bool,
     force_redownload: bool,
 ) -> Result<()> {
+    let output_style = current_output_style();
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "self-update")?;
 
     if registry_root.is_none() {
+        println!(
+            "{}",
+            render_status_line(
+                output_style,
+                "step",
+                "self-update: refreshing source snapshots"
+            )
+        );
         let source_state_root = registry_state_root(layout);
         let store = RegistrySourceStore::new(&source_state_root);
         run_update_command(&store, &[])?;
     }
 
     let args = build_self_update_install_args(registry_root, dry_run, force_redownload);
+    println!(
+        "{}",
+        render_status_line(
+            output_style,
+            "step",
+            "self-update: installing latest crosspack"
+        )
+    );
     run_current_exe_command(&args, "self-update install")
 }
 
@@ -3224,29 +3426,72 @@ fn install_resolved(
     })
 }
 
-fn print_install_outcome(outcome: &InstallOutcome) {
-    println!(
-        "resolved {} {} for {}",
-        outcome.name, outcome.version, outcome.resolved_target
-    );
-    println!("archive: {}", outcome.archive_type.as_str());
-    println!("artifact: {}", outcome.artifact_url);
-    println!(
-        "cache: {} ({})",
-        outcome.cache_path.display(),
-        outcome.download_status
-    );
-    println!("install_root: {}", outcome.install_root.display());
+fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) -> Vec<String> {
+    let mut lines = vec![
+        render_status_line(
+            style,
+            "ok",
+            &format!(
+                "resolved {} {} for {}",
+                outcome.name, outcome.version, outcome.resolved_target
+            ),
+        ),
+        render_status_line(
+            style,
+            "step",
+            &format!("archive: {}", outcome.archive_type.as_str()),
+        ),
+        render_status_line(
+            style,
+            "step",
+            &format!("artifact: {}", outcome.artifact_url),
+        ),
+        render_status_line(
+            style,
+            "step",
+            &format!(
+                "cache: {} ({})",
+                outcome.cache_path.display(),
+                outcome.download_status
+            ),
+        ),
+        render_status_line(
+            style,
+            "step",
+            &format!("install_root: {}", outcome.install_root.display()),
+        ),
+    ];
+
     if !outcome.exposed_bins.is_empty() {
-        println!("exposed_bins: {}", outcome.exposed_bins.join(", "));
+        lines.push(render_status_line(
+            style,
+            "step",
+            &format!("exposed_bins: {}", outcome.exposed_bins.join(", ")),
+        ));
     }
     if !outcome.exposed_completions.is_empty() {
-        println!(
-            "exposed_completions: {}",
-            outcome.exposed_completions.join(", ")
-        );
+        lines.push(render_status_line(
+            style,
+            "step",
+            &format!(
+                "exposed_completions: {}",
+                outcome.exposed_completions.join(", ")
+            ),
+        ));
     }
-    println!("receipt: {}", outcome.receipt_path.display());
+    lines.push(render_status_line(
+        style,
+        "step",
+        &format!("receipt: {}", outcome.receipt_path.display()),
+    ));
+
+    lines
+}
+
+fn print_install_outcome(outcome: &InstallOutcome, style: OutputStyle) {
+    for line in format_install_outcome_lines(outcome, style) {
+        println!("{line}");
+    }
 }
 
 fn collect_declared_binaries(artifact: &Artifact) -> Result<Vec<String>> {
@@ -3844,19 +4089,20 @@ mod tests {
         current_unix_timestamp, determine_install_reason, doctor_transaction_health_line,
         enforce_disjoint_multi_target_upgrade, enforce_no_downgrades, ensure_no_active_transaction,
         ensure_no_active_transaction_for, ensure_update_succeeded, ensure_upgrade_command_ready,
-        execute_with_transaction, format_info_lines, format_registry_add_lines,
-        format_registry_list_lines, format_registry_list_snapshot_state,
+        execute_with_transaction, format_info_lines, format_install_outcome_lines,
+        format_registry_add_lines, format_registry_list_lines, format_registry_list_snapshot_state,
         format_registry_remove_lines, format_search_results, format_uninstall_messages,
-        format_update_summary_line, normalize_command_token, parse_pin_spec,
-        parse_provider_overrides, registry_state_root, render_transaction_preview_lines,
-        resolve_init_shell, resolve_transaction_snapshot_id, run_repair_command,
-        run_rollback_command, run_search_command, run_uninstall_command, run_update_command,
-        run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
-        set_transaction_status, update_failure_reason_code, validate_binary_preflight,
+        format_update_output_lines, format_update_summary_line, normalize_command_token,
+        parse_pin_spec, parse_provider_overrides, registry_state_root, render_status_line,
+        render_transaction_preview_lines, resolve_init_shell, resolve_output_style,
+        resolve_transaction_snapshot_id, run_repair_command, run_rollback_command,
+        run_search_command, run_uninstall_command, run_update_command, run_upgrade_command,
+        select_manifest_with_pin, select_metadata_backend, set_transaction_status,
+        update_failure_reason_code, validate_binary_preflight,
         validate_binary_preflight_with_current_exe, validate_completion_preflight,
         validate_install_preflight_for_resolved, validate_provider_overrides_used,
         write_completions_script, Cli, CliCompletionShell, CliRegistryKind, Commands,
-        MetadataBackend, PlannedPackageChange, PlannedRemoval, ResolvedInstall,
+        MetadataBackend, OutputStyle, PlannedPackageChange, PlannedRemoval, ResolvedInstall,
         TransactionPreviewMode,
     };
     use clap::{error::ErrorKind, Parser};
@@ -8036,6 +8282,77 @@ old-cc = "<2.0.0"
         assert_eq!(line, "update summary: updated=2 up-to-date=5 failed=1");
     }
 
+    #[test]
+    fn resolve_output_style_auto_uses_rich_when_both_streams_are_tty() {
+        assert_eq!(resolve_output_style(true, true), OutputStyle::Rich);
+    }
+
+    #[test]
+    fn resolve_output_style_auto_uses_plain_when_stdout_is_not_tty() {
+        assert_eq!(resolve_output_style(false, true), OutputStyle::Plain);
+    }
+
+    #[test]
+    fn render_status_line_plain_is_unadorned() {
+        assert_eq!(
+            render_status_line(OutputStyle::Plain, "ok", "installed ripgrep 14.1.0"),
+            "installed ripgrep 14.1.0"
+        );
+    }
+
+    #[test]
+    fn render_status_line_rich_includes_ascii_badge() {
+        assert_eq!(
+            render_status_line(OutputStyle::Rich, "ok", "installed ripgrep 14.1.0"),
+            "[OK] installed ripgrep 14.1.0"
+        );
+    }
+
+    #[test]
+    fn render_status_line_rich_formats_warning() {
+        assert_eq!(
+            render_status_line(OutputStyle::Rich, "warn", "completion sync skipped"),
+            "[WARN] completion sync skipped"
+        );
+    }
+
+    #[test]
+    fn format_update_output_lines_plain_preserves_contract_lines() {
+        let report = sample_update_report();
+        assert_eq!(
+            format_update_output_lines(&report, OutputStyle::Plain),
+            report.lines
+        );
+    }
+
+    #[test]
+    fn format_update_output_lines_rich_adds_status_badges() {
+        let report = sample_update_report();
+        let lines = format_update_output_lines(&report, OutputStyle::Rich);
+        assert_eq!(lines[0], "[OK] core: updated (snapshot=git:abc)");
+        assert_eq!(lines[1], "[..] mirror: up-to-date (snapshot=git:abc)");
+        assert_eq!(lines[2], "[ERR] edge: failed (reason=source-sync-failed)");
+    }
+
+    #[test]
+    fn format_install_outcome_lines_plain_matches_existing_contract() {
+        let outcome = sample_install_outcome();
+        let lines = format_install_outcome_lines(&outcome, OutputStyle::Plain);
+        assert_eq!(
+            lines[0],
+            "resolved ripgrep 14.1.0 for x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(lines[1], "archive: tar.zst");
+    }
+
+    #[test]
+    fn format_install_outcome_lines_rich_adds_step_indicators() {
+        let outcome = sample_install_outcome();
+        let lines = format_install_outcome_lines(&outcome, OutputStyle::Rich);
+        assert!(lines[0].starts_with("[OK] "));
+        assert!(lines.iter().any(|line| line.contains("receipt: ")));
+    }
+
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
         let manifest = PackageManifest::from_toml_str(&format!(
             r#"
@@ -8055,6 +8372,35 @@ sha256 = "abc"
             artifact,
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarZst,
+        }
+    }
+
+    fn sample_install_outcome() -> super::InstallOutcome {
+        super::InstallOutcome {
+            name: "ripgrep".to_string(),
+            version: "14.1.0".to_string(),
+            resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+            archive_type: ArchiveType::TarZst,
+            artifact_url: "https://example.test/ripgrep-14.1.0.tar.zst".to_string(),
+            cache_path: PathBuf::from("/tmp/crosspack/cache/ripgrep/14.1.0/artifact.tar.zst"),
+            download_status: "downloaded",
+            install_root: PathBuf::from("/tmp/crosspack/pkgs/ripgrep/14.1.0"),
+            receipt_path: PathBuf::from("/tmp/crosspack/state/installed/ripgrep.receipt"),
+            exposed_bins: vec!["rg".to_string()],
+            exposed_completions: vec!["bash:rg".to_string()],
+        }
+    }
+
+    fn sample_update_report() -> super::UpdateReport {
+        super::UpdateReport {
+            lines: vec![
+                "core: updated (snapshot=git:abc)".to_string(),
+                "mirror: up-to-date (snapshot=git:abc)".to_string(),
+                "edge: failed (reason=source-sync-failed)".to_string(),
+            ],
+            updated: 1,
+            up_to_date: 1,
+            failed: 1,
         }
     }
 
