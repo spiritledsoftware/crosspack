@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/spiritledsoftware/crosspack/compare/v0.5.0...v0.6.0) (2026-02-24)
+
+
+### Features
+
+* **gui:** add managed GUI app install lifecycle ([#48](https://github.com/spiritledsoftware/crosspack/issues/48)) ([542b8d9](https://github.com/spiritledsoftware/crosspack/commit/542b8d917d8754ebb43986848292d15311c62ce8))
+
+
+### Bug Fixes
+
+* **cli:** initialize zsh completion system before registration ([#46](https://github.com/spiritledsoftware/crosspack/issues/46)) ([ee4c226](https://github.com/spiritledsoftware/crosspack/commit/ee4c2266356939177b2099b288728d9513ac5fc9))
+
 ## [0.5.0](https://github.com/spiritledsoftware/crosspack/compare/v0.4.1...v0.5.0) (2026-02-24)
 
 
