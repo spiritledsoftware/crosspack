@@ -37,6 +37,8 @@ Default user prefixes:
 ## Current CLI Behavior
 
 - `search` and `info` query the local registry index.
+- `search <query>` returns deterministic rows with `name`, short description fallback, latest version, and source; match order is exact name, then prefix, then keyword.
+- Manifest metadata currently has no dedicated description field, so `search` short description falls back to manifest `provides`, then `license`, then `homepage` (or `-` when none are present).
 - Metadata command backend selection is:
   - if `--registry-root` is set, read directly from that registry root (legacy single-root mode),
   - otherwise read from configured snapshots under `<prefix>/state/registries/cache/`.
