@@ -9,6 +9,9 @@ pub enum ArchiveType {
     Zip,
     TarGz,
     TarZst,
+    Msi,
+    Dmg,
+    AppImage,
 }
 
 impl ArchiveType {
@@ -17,6 +20,9 @@ impl ArchiveType {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::Msi => "msi",
+            Self::Dmg => "dmg",
+            Self::AppImage => "appimage",
         }
     }
 
@@ -25,6 +31,9 @@ impl ArchiveType {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::Msi => "msi",
+            Self::Dmg => "dmg",
+            Self::AppImage => "appimage",
         }
     }
 
@@ -33,6 +42,9 @@ impl ArchiveType {
             "zip" => Some(Self::Zip),
             "tar.gz" | "tgz" => Some(Self::TarGz),
             "tar.zst" | "tzst" => Some(Self::TarZst),
+            "msi" => Some(Self::Msi),
+            "dmg" => Some(Self::Dmg),
+            "appimage" => Some(Self::AppImage),
             _ => None,
         }
     }
@@ -47,6 +59,15 @@ impl ArchiveType {
         }
         if lower.ends_with(".tar.zst") || lower.ends_with(".tzst") {
             return Some(Self::TarZst);
+        }
+        if lower.ends_with(".msi") {
+            return Some(Self::Msi);
+        }
+        if lower.ends_with(".dmg") {
+            return Some(Self::Dmg);
+        }
+        if lower.ends_with(".appimage") {
+            return Some(Self::AppImage);
         }
         None
     }
@@ -133,7 +154,7 @@ impl Artifact {
         if let Some(archive) = &self.archive {
             return ArchiveType::parse(archive).ok_or_else(|| {
                 anyhow!(
-                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst",
+                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage",
                     self.target
                 )
             });
@@ -497,6 +518,13 @@ ripgrep = "*"
     }
 
     #[test]
+    fn archive_type_parse_supports_msi_dmg_appimage() {
+        assert_eq!(ArchiveType::parse("msi"), Some(ArchiveType::Msi));
+        assert_eq!(ArchiveType::parse("dmg"), Some(ArchiveType::Dmg));
+        assert_eq!(ArchiveType::parse("appimage"), Some(ArchiveType::AppImage));
+    }
+
+    #[test]
     fn archive_type_from_url() {
         assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg.tar.gz"),
@@ -513,6 +541,47 @@ ripgrep = "*"
         assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg"),
             None
+        );
+    }
+
+    #[test]
+    fn archive_type_infer_from_url_supports_msi_dmg_appimage() {
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.msi"),
+            Some(ArchiveType::Msi)
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.dmg"),
+            Some(ArchiveType::Dmg)
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.appimage"),
+            Some(ArchiveType::AppImage)
+        );
+    }
+
+    #[test]
+    fn manifest_allows_gui_package_with_installer_artifact_kind() {
+        let content = r#"
+name = "zed"
+version = "0.190.5"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/zed-x86_64.AppImage"
+archive = "appimage"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.zed.Zed"
+display_name = "Zed"
+exec = "artifact.appimage"
+"#;
+
+        let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+        assert_eq!(
+            parsed.artifacts[0].archive_type().expect("archive type"),
+            ArchiveType::AppImage
         );
     }
 }
