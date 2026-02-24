@@ -576,9 +576,13 @@ pub fn write_gui_exposure_state(
 
     let mut payload = String::new();
     for asset in assets {
-        if asset.key.contains('\n') || asset.rel_path.contains('\n') {
+        if asset.key.contains('\n')
+            || asset.key.contains('\t')
+            || asset.rel_path.contains('\n')
+            || asset.rel_path.contains('\t')
+        {
             return Err(anyhow!(
-                "gui exposure state values must not contain newlines"
+                "gui exposure state values must not contain tabs or newlines"
             ));
         }
         payload.push_str(&format!("asset={}\t{}\n", asset.key, asset.rel_path));
@@ -1166,6 +1170,8 @@ fn remove_receipt_artifacts(
         remove_exposed_gui_asset(layout, asset)?;
     }
     clear_gui_exposure_state(layout, &receipt.name)?;
+    let _native_gui_warnings =
+        remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;
 
     let receipt_path = layout.receipt_path(&receipt.name);
     fs::remove_file(&receipt_path).with_context(|| {
@@ -3400,6 +3406,26 @@ mod tests {
     }
 
     #[test]
+    fn write_gui_exposure_state_rejects_tab_delimiter_characters() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let err = write_gui_exposure_state(
+            &layout,
+            "demo",
+            &[GuiExposureAsset {
+                key: "app:demo\tbad".to_string(),
+                rel_path: "launchers/demo.command".to_string(),
+            }],
+        )
+        .expect_err("tab-delimited values should be rejected");
+        assert!(
+            err.to_string().contains("must not contain"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn register_native_gui_linux_projects_user_desktop_path() {
         let home = Path::new("/home/tester");
         assert_eq!(
@@ -3749,6 +3775,18 @@ mod tests {
             }],
         )
         .expect("must write gui state");
+        let native_launcher = layout.prefix().join("native-demo.desktop");
+        fs::write(&native_launcher, b"[Desktop Entry]\n").expect("must write native launcher");
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: native_launcher.display().to_string(),
+            }],
+        )
+        .expect("must write native gui state");
 
         write_install_receipt(
             &layout,
@@ -3777,7 +3815,9 @@ mod tests {
         assert!(!package_dir.exists());
         assert!(!completion_path.exists());
         assert!(!gui_path.exists());
+        assert!(!native_launcher.exists());
         assert!(!layout.gui_state_path("demo").exists());
+        assert!(!layout.gui_native_state_path("demo").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
