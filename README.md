@@ -301,7 +301,13 @@ Contributions are welcome. Before opening a PR:
 1. Run fmt, clippy, and tests.
 2. Keep command semantics and user-facing output deterministic.
 3. Update docs whenever command behavior changes.
+4. Unless explicitly stated otherwise, contributions are licensed under `MIT OR Apache-2.0`.
 
 ## License
 
-MIT
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.

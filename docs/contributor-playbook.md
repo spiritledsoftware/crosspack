@@ -3,6 +3,9 @@
 ## Purpose
 Use this playbook when landing code changes, handling PRs, and preparing release-cutting actions in Crosspack.
 
+## Contribution licensing
+- Unless explicitly stated otherwise, contributions are licensed under `MIT OR Apache-2.0`.
+
 ## 1) Local setup
 
 Prerequisites:
