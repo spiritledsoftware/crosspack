@@ -14,13 +14,17 @@
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
 3. Select artifact for each resolved package for requested target (`--target` or host triple).
-4. Determine archive type (`artifact.archive` or infer from URL suffix).
+4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`.
 5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
 6. Download artifact if needed (or if `--force-redownload`).
 7. Verify artifact SHA-256 against manifest `sha256`.
-8. Extract archive into temporary state directory.
-9. Apply `strip_components` during staging copy.
+8. Stage artifact payload into temporary state directory with deterministic adapters:
+   - `zip`, `tar.gz`, `tar.zst`: extract archive payload,
+   - `appimage`: copy payload as `artifact.appimage` (requires `strip_components=0` and no `artifact_root`),
+   - `msi`: administrative extraction only on Windows hosts,
+   - `dmg`: attach/copy/detach extraction only on macOS hosts.
+9. Apply `strip_components` during staging copy where supported.
 10. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
 11. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
 12. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
@@ -28,12 +32,14 @@
     - Unix: symlink `<prefix>/bin/<name>` to installed package path.
     - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
 14. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
-15. Remove stale previously-owned binaries and completion files no longer declared for that package.
-16. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
-     - set `install_reason=root` for requested roots,
-     - set `install_reason=dependency` for transitive-only packages,
-     - preserve existing `install_reason=root` when upgrading already-rooted packages.
-17. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
+15. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
+16. Register native GUI integrations (user-scope only) as best-effort adapters; failures emit warning lines and do not fail successful install.
+17. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
+18. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+      - set `install_reason=root` for requested roots,
+      - set `install_reason=dependency` for transitive-only packages,
+      - preserve existing `install_reason=root` when upgrading already-rooted packages.
+18. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
 `crosspack install --dry-run` executes the same planning and emits deterministic, script-friendly preview lines:
 - `transaction_preview operation=... mode=dry-run`
@@ -105,6 +111,8 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - `cache_path` (optional)
 - `exposed_bin` (repeated, optional)
 - `exposed_completion` (repeated, optional)
+- `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
+- `state/installed/<name>.gui-native` sidecar (optional): native GUI registration records (`key`, `kind`, `path`) for deterministic cleanup.
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
@@ -115,10 +123,14 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - Checksum mismatch: cached artifact is removed and install fails.
 - Registry key/signature validation failure: install/upgrade and other metadata-dependent operations fail closed.
 - Unsupported archive type: install fails with actionable message.
+- Unsupported MSI host (non-Windows) or DMG host (non-macOS): install fails with actionable message.
+- MSI/DMG/AppImage staging failures: install fails closed; Crosspack does not execute vendor installers as fallback.
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
 - Completion collision: install fails if a projected package completion file is already owned by another package or exists unmanaged in Crosspack completion storage.
+- GUI asset collision: install fails if a projected GUI ownership key is already owned by another package or a projected GUI asset path already exists unmanaged.
+- Native GUI registration failures: install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 - Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
 
@@ -132,6 +144,8 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 4. Otherwise remove the requested package and prune orphaned dependency closure no longer reachable from any remaining root.
 5. For all removed packages:
    - remove package directories, exposed binaries, and exposed package completion files,
+   - remove native GUI registrations using `.gui-native` state records (best-effort warnings),
+   - remove GUI sidecars (`.gui` and `.gui-native`),
    - remove receipt files,
    - collect cache paths from receipts.
 6. Remove cache files that are no longer referenced by any remaining receipt.

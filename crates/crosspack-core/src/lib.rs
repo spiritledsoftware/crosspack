@@ -9,6 +9,9 @@ pub enum ArchiveType {
     Zip,
     TarGz,
     TarZst,
+    Msi,
+    Dmg,
+    AppImage,
 }
 
 impl ArchiveType {
@@ -17,6 +20,9 @@ impl ArchiveType {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::Msi => "msi",
+            Self::Dmg => "dmg",
+            Self::AppImage => "appimage",
         }
     }
 
@@ -25,6 +31,9 @@ impl ArchiveType {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::Msi => "msi",
+            Self::Dmg => "dmg",
+            Self::AppImage => "appimage",
         }
     }
 
@@ -33,6 +42,9 @@ impl ArchiveType {
             "zip" => Some(Self::Zip),
             "tar.gz" | "tgz" => Some(Self::TarGz),
             "tar.zst" | "tzst" => Some(Self::TarZst),
+            "msi" => Some(Self::Msi),
+            "dmg" => Some(Self::Dmg),
+            "appimage" => Some(Self::AppImage),
             _ => None,
         }
     }
@@ -47,6 +59,15 @@ impl ArchiveType {
         }
         if lower.ends_with(".tar.zst") || lower.ends_with(".tzst") {
             return Some(Self::TarZst);
+        }
+        if lower.ends_with(".msi") {
+            return Some(Self::Msi);
+        }
+        if lower.ends_with(".dmg") {
+            return Some(Self::Dmg);
+        }
+        if lower.ends_with(".appimage") {
+            return Some(Self::AppImage);
         }
         None
     }
@@ -85,6 +106,32 @@ pub struct ArtifactCompletion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactGuiFileAssociation {
+    pub mime_type: String,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactGuiProtocol {
+    pub scheme: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactGuiApp {
+    pub app_id: String,
+    pub display_name: String,
+    pub exec: String,
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub file_associations: Vec<ArtifactGuiFileAssociation>,
+    #[serde(default)]
+    pub protocols: Vec<ArtifactGuiProtocol>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Artifact {
     pub target: String,
     pub url: String,
@@ -98,6 +145,8 @@ pub struct Artifact {
     pub binaries: Vec<ArtifactBinary>,
     #[serde(default)]
     pub completions: Vec<ArtifactCompletion>,
+    #[serde(default)]
+    pub gui_apps: Vec<ArtifactGuiApp>,
 }
 
 impl Artifact {
@@ -105,7 +154,7 @@ impl Artifact {
         if let Some(archive) = &self.archive {
             return ArchiveType::parse(archive).ok_or_else(|| {
                 anyhow!(
-                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst",
+                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage",
                     self.target
                 )
             });
@@ -151,8 +200,58 @@ impl PackageManifest {
         if manifest.replaces.contains_key(&manifest.name) {
             return Err(anyhow!("manifest '{}' replaces itself", manifest.name));
         }
+        for artifact in &manifest.artifacts {
+            let mut seen_app_ids = std::collections::HashSet::new();
+            for gui_app in &artifact.gui_apps {
+                if gui_app.app_id.trim().is_empty() {
+                    return Err(anyhow!(
+                        "gui app id must not be empty for target '{}'",
+                        artifact.target
+                    ));
+                }
+                if !seen_app_ids.insert(gui_app.app_id.clone()) {
+                    return Err(anyhow!(
+                        "duplicate gui app declaration '{}' for target '{}'",
+                        gui_app.app_id,
+                        artifact.target
+                    ));
+                }
+                for protocol in &gui_app.protocols {
+                    validate_protocol_scheme(&protocol.scheme).with_context(|| {
+                        format!(
+                            "invalid gui protocol scheme '{}' for app '{}' target '{}'",
+                            protocol.scheme, gui_app.app_id, artifact.target
+                        )
+                    })?;
+                }
+            }
+        }
         Ok(manifest)
     }
+}
+
+fn validate_protocol_scheme(scheme: &str) -> anyhow::Result<()> {
+    let trimmed = scheme.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("protocol scheme must not be empty"));
+    }
+
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return Err(anyhow!("protocol scheme must not be empty"));
+    };
+    if !first.is_ascii_alphabetic() {
+        return Err(anyhow!(
+            "protocol scheme must start with an ASCII letter: {scheme}"
+        ));
+    }
+    if chars.any(|ch| !(ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '.')) {
+        return Err(anyhow!(
+            "protocol scheme contains invalid character(s): {scheme}"
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -256,6 +355,98 @@ path = "completions/_zoxide.ps1"
     }
 
     #[test]
+    fn parse_manifest_with_gui_apps() {
+        let content = r#"
+name = "zed"
+version = "0.190.5"
+
+[[artifacts]]
+target = "x86_64-apple-darwin"
+url = "https://example.test/zed-macos.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.zed.Zed"
+display_name = "Zed"
+exec = "Zed.app"
+icon = "resources/zed.icns"
+categories = ["Development", "IDE"]
+
+[[artifacts.gui_apps.file_associations]]
+mime_type = "text/plain"
+extensions = [".txt", ".md"]
+
+[[artifacts.gui_apps.protocols]]
+scheme = "zed"
+"#;
+
+        let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+        assert_eq!(parsed.artifacts[0].gui_apps.len(), 1);
+        let gui = &parsed.artifacts[0].gui_apps[0];
+        assert_eq!(gui.app_id, "dev.zed.Zed");
+        assert_eq!(gui.display_name, "Zed");
+        assert_eq!(gui.exec, "Zed.app");
+        assert_eq!(gui.categories, vec!["Development", "IDE"]);
+        assert_eq!(gui.file_associations.len(), 1);
+        assert_eq!(gui.protocols.len(), 1);
+    }
+
+    #[test]
+    fn parse_manifest_rejects_duplicate_gui_app_id_per_artifact() {
+        let content = r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "demo.app"
+display_name = "Demo"
+exec = "demo"
+
+[[artifacts.gui_apps]]
+app_id = "demo.app"
+display_name = "Demo 2"
+exec = "demo2"
+"#;
+
+        let err =
+            PackageManifest::from_toml_str(content).expect_err("duplicate gui app id must fail");
+        assert!(err.to_string().contains("duplicate gui app declaration"));
+    }
+
+    #[test]
+    fn parse_manifest_rejects_invalid_gui_protocol_scheme() {
+        let content = r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "demo.app"
+display_name = "Demo"
+exec = "demo"
+
+[[artifacts.gui_apps.protocols]]
+scheme = "1bad"
+"#;
+
+        let err =
+            PackageManifest::from_toml_str(content).expect_err("invalid protocol scheme must fail");
+        assert!(
+            err.to_string().contains("invalid gui protocol scheme"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn parse_manifest_rejects_invalid_completion_shell_token() {
         let content = r#"
 name = "zoxide"
@@ -327,6 +518,13 @@ ripgrep = "*"
     }
 
     #[test]
+    fn archive_type_parse_supports_msi_dmg_appimage() {
+        assert_eq!(ArchiveType::parse("msi"), Some(ArchiveType::Msi));
+        assert_eq!(ArchiveType::parse("dmg"), Some(ArchiveType::Dmg));
+        assert_eq!(ArchiveType::parse("appimage"), Some(ArchiveType::AppImage));
+    }
+
+    #[test]
     fn archive_type_from_url() {
         assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg.tar.gz"),
@@ -343,6 +541,47 @@ ripgrep = "*"
         assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg"),
             None
+        );
+    }
+
+    #[test]
+    fn archive_type_infer_from_url_supports_msi_dmg_appimage() {
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.msi"),
+            Some(ArchiveType::Msi)
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.dmg"),
+            Some(ArchiveType::Dmg)
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.appimage"),
+            Some(ArchiveType::AppImage)
+        );
+    }
+
+    #[test]
+    fn manifest_allows_gui_package_with_installer_artifact_kind() {
+        let content = r#"
+name = "zed"
+version = "0.190.5"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/zed-x86_64.AppImage"
+archive = "appimage"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.zed.Zed"
+display_name = "Zed"
+exec = "artifact.appimage"
+"#;
+
+        let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+        assert_eq!(
+            parsed.artifacts[0].archive_type().expect("archive type"),
+            ArchiveType::AppImage
         );
     }
 }

@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use crosspack_core::{ArchiveType, ArtifactCompletionShell};
+use crosspack_core::{ArchiveType, ArtifactCompletionShell, ArtifactGuiApp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixLayout {
@@ -29,6 +29,19 @@ pub struct InstallReceipt {
     pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiExposureAsset {
+    pub key: String,
+    pub rel_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiNativeRegistrationRecord {
+    pub key: String,
+    pub kind: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +145,18 @@ impl PrefixLayout {
         self.package_completions_dir().join(shell.as_str())
     }
 
+    pub fn gui_dir(&self) -> PathBuf {
+        self.share_dir().join("gui")
+    }
+
+    pub fn gui_launchers_dir(&self) -> PathBuf {
+        self.gui_dir().join("launchers")
+    }
+
+    pub fn gui_handlers_dir(&self) -> PathBuf {
+        self.gui_dir().join("handlers")
+    }
+
     pub fn artifacts_cache_dir(&self) -> PathBuf {
         self.cache_dir().join("artifacts")
     }
@@ -158,6 +183,15 @@ impl PrefixLayout {
 
     pub fn receipt_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.receipt"))
+    }
+
+    pub fn gui_state_path(&self, name: &str) -> PathBuf {
+        self.installed_state_dir().join(format!("{name}.gui"))
+    }
+
+    pub fn gui_native_state_path(&self, name: &str) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{name}.gui-native"))
     }
 
     pub fn transactions_dir(&self) -> PathBuf {
@@ -207,6 +241,9 @@ impl PrefixLayout {
             self.share_dir(),
             self.completions_dir(),
             self.package_completions_dir(),
+            self.gui_dir(),
+            self.gui_launchers_dir(),
+            self.gui_handlers_dir(),
             self.artifacts_cache_dir(),
             self.tmp_state_dir(),
             self.installed_state_dir(),
@@ -418,7 +455,13 @@ pub fn install_from_artifact(
     fs::create_dir_all(&staged_dir)
         .with_context(|| format!("failed to create {}", staged_dir.display()))?;
 
-    extract_archive(archive_path, &raw_dir, archive_type)?;
+    stage_artifact_payload(
+        archive_path,
+        &raw_dir,
+        archive_type,
+        strip_components,
+        artifact_root,
+    )?;
 
     if let Some(root) = artifact_root {
         let root_path = raw_dir.join(root);
@@ -518,6 +561,246 @@ pub fn read_install_receipts(layout: &PrefixLayout) -> Result<Vec<InstallReceipt
 
     receipts.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(receipts)
+}
+
+pub fn write_gui_exposure_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    assets: &[GuiExposureAsset],
+) -> Result<PathBuf> {
+    let path = layout.gui_state_path(package_name);
+    if assets.is_empty() {
+        let _ = remove_file_if_exists(&path);
+        return Ok(path);
+    }
+
+    let mut payload = String::new();
+    for asset in assets {
+        if asset.key.contains('\n')
+            || asset.key.contains('\t')
+            || asset.rel_path.contains('\n')
+            || asset.rel_path.contains('\t')
+        {
+            return Err(anyhow!(
+                "gui exposure state values must not contain tabs or newlines"
+            ));
+        }
+        payload.push_str(&format!("asset={}\t{}\n", asset.key, asset.rel_path));
+    }
+
+    fs::write(&path, payload.as_bytes())
+        .with_context(|| format!("failed to write gui exposure state: {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_gui_exposure_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<GuiExposureAsset>> {
+    let path = layout.gui_state_path(package_name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read gui exposure state: {}", path.display()))?;
+    parse_gui_exposure_state(&raw)
+        .with_context(|| format!("failed to parse gui exposure state: {}", path.display()))
+}
+
+pub fn read_all_gui_exposure_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<GuiExposureAsset>>> {
+    let dir = layout.installed_state_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut states = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("gui") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read gui exposure state: {}", path.display()))?;
+        let assets = parse_gui_exposure_state(&raw)
+            .with_context(|| format!("failed to parse gui exposure state: {}", path.display()))?;
+        states.insert(stem.to_string(), assets);
+    }
+
+    Ok(states)
+}
+
+pub fn clear_gui_exposure_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    let path = layout.gui_state_path(package_name);
+    remove_file_if_exists(&path)?;
+    Ok(())
+}
+
+pub fn write_gui_native_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    records: &[GuiNativeRegistrationRecord],
+) -> Result<PathBuf> {
+    let path = layout.gui_native_state_path(package_name);
+    if records.is_empty() {
+        let _ = remove_file_if_exists(&path);
+        return Ok(path);
+    }
+
+    let mut payload = String::new();
+    for record in records {
+        if record.key.contains('\n') || record.kind.contains('\n') || record.path.contains('\n') {
+            return Err(anyhow!("native gui state values must not contain newlines"));
+        }
+        payload.push_str(&format!(
+            "record={}\t{}\t{}\n",
+            record.key, record.kind, record.path
+        ));
+    }
+
+    fs::write(&path, payload.as_bytes())
+        .with_context(|| format!("failed to write native gui state: {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_gui_native_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<GuiNativeRegistrationRecord>> {
+    let path = layout.gui_native_state_path(package_name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read native gui state: {}", path.display()))?;
+    parse_gui_native_state(&raw)
+        .with_context(|| format!("failed to parse native gui state: {}", path.display()))
+}
+
+pub fn read_all_gui_native_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<GuiNativeRegistrationRecord>>> {
+    let dir = layout.installed_state_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut states = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".gui-native"))
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read native gui state: {}", path.display()))?;
+        let records = parse_gui_native_state(&raw)
+            .with_context(|| format!("failed to parse native gui state: {}", path.display()))?;
+        states.insert(stem.to_string(), records);
+    }
+
+    Ok(states)
+}
+
+pub fn clear_gui_native_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    let path = layout.gui_native_state_path(package_name);
+    remove_file_if_exists(&path)?;
+    Ok(())
+}
+
+pub fn remove_package_native_gui_registrations_best_effort(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<String>> {
+    let records = read_gui_native_state(layout, package_name)?;
+    if records.is_empty() {
+        clear_gui_native_state(layout, package_name)?;
+        return Ok(Vec::new());
+    }
+
+    let warnings = remove_native_gui_registration_best_effort(&records)?;
+    if warnings.is_empty() {
+        clear_gui_native_state(layout, package_name)?;
+    } else {
+        write_gui_native_state(layout, package_name, &records)?;
+    }
+    Ok(warnings)
+}
+
+fn parse_gui_exposure_state(raw: &str) -> Result<Vec<GuiExposureAsset>> {
+    let mut assets = Vec::new();
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some(payload) = line.strip_prefix("asset=") else {
+            continue;
+        };
+        let Some((key, rel_path)) = payload.split_once('\t') else {
+            return Err(anyhow!("invalid gui state row format"));
+        };
+        if key.trim().is_empty() {
+            return Err(anyhow!("gui exposure key must not be empty"));
+        }
+        validated_relative_gui_storage_path(rel_path)?;
+        assets.push(GuiExposureAsset {
+            key: key.to_string(),
+            rel_path: rel_path.to_string(),
+        });
+    }
+    Ok(assets)
+}
+
+fn parse_gui_native_state(raw: &str) -> Result<Vec<GuiNativeRegistrationRecord>> {
+    let mut records = Vec::new();
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some(payload) = line.strip_prefix("record=") else {
+            continue;
+        };
+        let parts = payload.splitn(3, '\t').collect::<Vec<_>>();
+        if parts.len() != 3 {
+            return Err(anyhow!("invalid native gui state row format"));
+        }
+        if parts[0].trim().is_empty() {
+            return Err(anyhow!("native gui registration key must not be empty"));
+        }
+        if parts[1].trim().is_empty() {
+            return Err(anyhow!("native gui registration kind must not be empty"));
+        }
+        if parts[2].trim().is_empty() {
+            return Err(anyhow!("native gui registration path must not be empty"));
+        }
+        records.push(GuiNativeRegistrationRecord {
+            key: parts[0].to_string(),
+            kind: parts[1].to_string(),
+            path: parts[2].to_string(),
+        });
+    }
+
+    Ok(records)
 }
 
 pub fn current_unix_timestamp() -> Result<u64> {
@@ -882,6 +1165,14 @@ fn remove_receipt_artifacts(
         remove_exposed_completion(layout, exposed_completion)?;
     }
 
+    let gui_assets = read_gui_exposure_state(layout, &receipt.name)?;
+    for asset in &gui_assets {
+        remove_exposed_gui_asset(layout, asset)?;
+    }
+    clear_gui_exposure_state(layout, &receipt.name)?;
+    let _native_gui_warnings =
+        remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;
+
     let receipt_path = layout.receipt_path(&receipt.name);
     fs::remove_file(&receipt_path).with_context(|| {
         format!(
@@ -1117,6 +1408,891 @@ pub fn remove_exposed_completion(
     Ok(())
 }
 
+pub fn gui_asset_path(layout: &PrefixLayout, gui_storage_rel_path: &str) -> Result<PathBuf> {
+    let relative = validated_relative_gui_storage_path(gui_storage_rel_path)?;
+    Ok(layout.gui_dir().join(relative))
+}
+
+pub fn projected_gui_assets(
+    package_name: &str,
+    app: &ArtifactGuiApp,
+) -> Result<Vec<GuiExposureAsset>> {
+    if app.app_id.trim().is_empty() {
+        return Err(anyhow!("gui app id must not be empty"));
+    }
+    if app.display_name.trim().is_empty() {
+        return Err(anyhow!(
+            "gui app '{}' display_name must not be empty",
+            app.app_id
+        ));
+    }
+    validated_relative_binary_path(&app.exec)
+        .with_context(|| format!("gui app '{}' exec path is invalid", app.app_id))?;
+
+    let package_token = normalize_gui_token(package_name);
+    let app_token = normalize_gui_token(&app.app_id);
+    let launcher_rel = format!(
+        "launchers/{package_token}--{app_token}.{}",
+        gui_launcher_extension()
+    );
+    let handler_rel = format!("handlers/{package_token}--{app_token}.meta");
+
+    let mut assets = Vec::new();
+    let mut seen_keys = HashSet::new();
+    let mut push_asset = |key: String, rel_path: &str| -> Result<()> {
+        if !seen_keys.insert(key.clone()) {
+            return Err(anyhow!(
+                "duplicate gui ownership key declaration '{}': app '{}'",
+                key,
+                app.app_id
+            ));
+        }
+        assets.push(GuiExposureAsset {
+            key,
+            rel_path: rel_path.to_string(),
+        });
+        Ok(())
+    };
+
+    push_asset(
+        format!("app:{}", app.app_id.trim().to_ascii_lowercase()),
+        &launcher_rel,
+    )?;
+    push_asset(
+        format!("handler:{}", app.app_id.trim().to_ascii_lowercase()),
+        &handler_rel,
+    )?;
+
+    for protocol in &app.protocols {
+        let scheme = normalized_protocol_scheme(&protocol.scheme)
+            .with_context(|| format!("gui app '{}' has invalid protocol scheme", app.app_id))?;
+        push_asset(format!("protocol:{scheme}"), &handler_rel)?;
+    }
+
+    for association in &app.file_associations {
+        let mime = association.mime_type.trim().to_ascii_lowercase();
+        if mime.is_empty() {
+            return Err(anyhow!(
+                "gui app '{}' file association mime_type must not be empty",
+                app.app_id
+            ));
+        }
+        push_asset(format!("mime:{mime}"), &handler_rel)?;
+        for extension in &association.extensions {
+            let normalized = normalized_extension(extension).with_context(|| {
+                format!(
+                    "gui app '{}' has invalid file association extension",
+                    app.app_id
+                )
+            })?;
+            push_asset(format!("extension:{normalized}"), &handler_rel)?;
+        }
+    }
+
+    Ok(assets)
+}
+
+pub fn expose_gui_app(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    package_name: &str,
+    app: &ArtifactGuiApp,
+) -> Result<Vec<GuiExposureAsset>> {
+    let projected = projected_gui_assets(package_name, app)?;
+    let launcher_asset = projected
+        .iter()
+        .find(|asset| asset.key.starts_with("app:"))
+        .cloned()
+        .ok_or_else(|| anyhow!("missing projected launcher asset for app '{}'", app.app_id))?;
+    let handler_asset = projected
+        .iter()
+        .find(|asset| asset.key.starts_with("handler:"))
+        .cloned()
+        .ok_or_else(|| anyhow!("missing projected handler asset for app '{}'", app.app_id))?;
+
+    let source_rel = validated_relative_binary_path(&app.exec)?;
+    let source_path = install_root.join(source_rel);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "declared gui app exec path '{}' was not found in install root: {}",
+            app.exec,
+            source_path.display()
+        ));
+    }
+
+    let launcher_path = gui_asset_path(layout, &launcher_asset.rel_path)?;
+    if let Some(parent) = launcher_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create gui launcher dir: {}", parent.display()))?;
+    }
+
+    let launcher = render_gui_launcher(app, &source_path);
+    fs::write(&launcher_path, launcher.as_bytes())
+        .with_context(|| format!("failed writing gui launcher: {}", launcher_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&launcher_path)
+            .with_context(|| {
+                format!(
+                    "failed to inspect gui launcher: {}",
+                    launcher_path.display()
+                )
+            })?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&launcher_path, permissions).with_context(|| {
+            format!(
+                "failed setting gui launcher permissions: {}",
+                launcher_path.display()
+            )
+        })?;
+    }
+
+    let handler_path = gui_asset_path(layout, &handler_asset.rel_path)?;
+    if let Some(parent) = handler_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create gui handler dir: {}", parent.display()))?;
+    }
+
+    let mut metadata = String::new();
+    metadata.push_str(&format!(
+        "app_id={}\n",
+        sanitize_gui_metadata_value(&app.app_id)
+    ));
+    metadata.push_str(&format!(
+        "display_name={}\n",
+        sanitize_gui_metadata_value(&app.display_name)
+    ));
+    metadata.push_str(&format!(
+        "exec={}\n",
+        sanitize_gui_metadata_value(&app.exec)
+    ));
+    if let Some(icon) = &app.icon {
+        metadata.push_str(&format!("icon={}\n", sanitize_gui_metadata_value(icon)));
+    }
+    for category in &app.categories {
+        metadata.push_str(&format!(
+            "category={}\n",
+            sanitize_gui_metadata_value(category)
+        ));
+    }
+    for protocol in &app.protocols {
+        metadata.push_str(&format!(
+            "protocol={}\n",
+            sanitize_gui_metadata_value(&protocol.scheme)
+        ));
+    }
+    for association in &app.file_associations {
+        metadata.push_str(&format!(
+            "mime={}\n",
+            sanitize_gui_metadata_value(&association.mime_type)
+        ));
+        for extension in &association.extensions {
+            metadata.push_str(&format!(
+                "extension={}\n",
+                sanitize_gui_metadata_value(extension)
+            ));
+        }
+    }
+    fs::write(&handler_path, metadata.as_bytes()).with_context(|| {
+        format!(
+            "failed writing gui handler metadata: {}",
+            handler_path.display()
+        )
+    })?;
+
+    Ok(projected)
+}
+
+pub fn remove_exposed_gui_asset(layout: &PrefixLayout, asset: &GuiExposureAsset) -> Result<()> {
+    let path = gui_asset_path(layout, &asset.rel_path)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path)
+        .with_context(|| format!("failed to remove exposed gui asset: {}", path.display()))?;
+    prune_empty_gui_dirs(layout, path.parent())?;
+    Ok(())
+}
+
+pub fn register_native_gui_app_best_effort(
+    package_name: &str,
+    app: &ArtifactGuiApp,
+    install_root: &Path,
+) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> {
+    register_native_gui_app_best_effort_with_executor(package_name, app, install_root, run_command)
+}
+
+pub fn remove_native_gui_registration_best_effort(
+    records: &[GuiNativeRegistrationRecord],
+) -> Result<Vec<String>> {
+    remove_native_gui_registration_best_effort_with_executor(records, run_command)
+}
+
+fn register_native_gui_app_best_effort_with_executor<RunCommand>(
+    package_name: &str,
+    app: &ArtifactGuiApp,
+    install_root: &Path,
+    mut run_command_executor: RunCommand,
+) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    let source_rel = validated_relative_binary_path(&app.exec)
+        .with_context(|| format!("gui app '{}' exec path is invalid", app.app_id))?;
+    let source_path = install_root.join(source_rel);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "declared gui app exec path '{}' was not found in install root: {}",
+            app.exec,
+            source_path.display()
+        ));
+    }
+
+    let projected_assets = projected_gui_assets(package_name, app)?;
+    let mut records = Vec::new();
+    let mut warnings = Vec::new();
+
+    if cfg!(target_os = "linux") {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            warnings.push(
+                "native GUI registration warning: HOME is not set; skipped Linux desktop registration"
+                    .to_string(),
+            );
+            return Ok((records, warnings));
+        };
+
+        let applications_dir = project_linux_user_applications_dir(&home);
+        if let Err(err) = fs::create_dir_all(&applications_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create Linux user applications dir {}: {}",
+                applications_dir.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
+
+        let desktop_path = applications_dir.join(native_gui_launcher_filename(package_name, app));
+        let desktop_entry = render_linux_native_desktop_entry(app, &source_path);
+        if let Err(err) = fs::write(&desktop_path, desktop_entry.as_bytes()) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to write Linux desktop entry {}: {}",
+                desktop_path.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
+
+        for asset in &projected_assets {
+            records.push(GuiNativeRegistrationRecord {
+                key: asset.key.clone(),
+                kind: "desktop-entry".to_string(),
+                path: desktop_path.display().to_string(),
+            });
+        }
+
+        let mut refresh = Command::new("update-desktop-database");
+        refresh.arg(&applications_dir);
+        if let Err(err) = run_command_executor(
+            &mut refresh,
+            "failed to refresh Linux desktop entry database",
+        ) {
+            warnings.push(format!("native GUI registration warning: {err}"));
+        }
+
+        return Ok((records, warnings));
+    }
+
+    if cfg!(windows) {
+        let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) else {
+            warnings.push(
+                "native GUI registration warning: APPDATA is not set; skipped Windows GUI registration"
+                    .to_string(),
+            );
+            return Ok((records, warnings));
+        };
+
+        let start_menu_dir = project_windows_start_menu_programs_dir(&appdata);
+        if let Err(err) = fs::create_dir_all(&start_menu_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create Windows Start Menu programs dir {}: {}",
+                start_menu_dir.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
+
+        let launcher_path = start_menu_dir.join(format!(
+            "{}.cmd",
+            normalize_gui_token(&format!("{}-{}", package_name, app.app_id))
+        ));
+        let launcher = render_gui_launcher(app, &source_path);
+        if let Err(err) = fs::write(&launcher_path, launcher.as_bytes()) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to write Windows Start Menu launcher {}: {}",
+                launcher_path.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
+
+        for asset in projected_assets
+            .iter()
+            .filter(|asset| asset.key.starts_with("app:"))
+        {
+            records.push(GuiNativeRegistrationRecord {
+                key: asset.key.clone(),
+                kind: "start-menu-launcher".to_string(),
+                path: launcher_path.display().to_string(),
+            });
+        }
+
+        let open_command = format!("\"{}\" \"%1\"", source_path.display());
+        for protocol in &app.protocols {
+            let scheme = normalized_protocol_scheme(&protocol.scheme)?;
+            let key_path = format!(r"HKCU\Software\Classes\{scheme}");
+            let mut register_scheme = Command::new("reg");
+            register_scheme
+                .arg("add")
+                .arg(&key_path)
+                .arg("/ve")
+                .arg("/d")
+                .arg(format!("URL:{}", app.display_name.trim()))
+                .arg("/f");
+            if let Err(err) = run_command_executor(
+                &mut register_scheme,
+                "failed to register Windows protocol class",
+            ) {
+                warnings.push(format!("native GUI registration warning: {err}"));
+            }
+
+            let mut protocol_marker = Command::new("reg");
+            protocol_marker
+                .arg("add")
+                .arg(&key_path)
+                .arg("/v")
+                .arg("URL Protocol")
+                .arg("/d")
+                .arg("")
+                .arg("/f");
+            if let Err(err) = run_command_executor(
+                &mut protocol_marker,
+                "failed to set Windows protocol marker",
+            ) {
+                warnings.push(format!("native GUI registration warning: {err}"));
+            }
+
+            let mut open_key = Command::new("reg");
+            open_key
+                .arg("add")
+                .arg(format!(r"{key_path}\shell\open\command"))
+                .arg("/ve")
+                .arg("/d")
+                .arg(&open_command)
+                .arg("/f");
+            if let Err(err) = run_command_executor(
+                &mut open_key,
+                "failed to register Windows protocol open command",
+            ) {
+                warnings.push(format!("native GUI registration warning: {err}"));
+            }
+
+            records.push(GuiNativeRegistrationRecord {
+                key: format!("protocol:{scheme}"),
+                kind: "registry-key".to_string(),
+                path: key_path,
+            });
+        }
+
+        for association in &app.file_associations {
+            for extension in &association.extensions {
+                let normalized = normalized_extension(extension)?;
+                let ext_key = format!(r"HKCU\Software\Classes\{normalized}");
+                let class_key = format!(
+                    r"HKCU\Software\Classes\Crosspack.{}.{}.file",
+                    normalize_gui_token(package_name),
+                    normalize_gui_token(&app.app_id)
+                );
+
+                let mut map_extension = Command::new("reg");
+                map_extension
+                    .arg("add")
+                    .arg(&ext_key)
+                    .arg("/ve")
+                    .arg("/d")
+                    .arg(class_key.clone())
+                    .arg("/f");
+                if let Err(err) = run_command_executor(
+                    &mut map_extension,
+                    "failed to register Windows file extension mapping",
+                ) {
+                    warnings.push(format!("native GUI registration warning: {err}"));
+                }
+
+                let mut class_open = Command::new("reg");
+                class_open
+                    .arg("add")
+                    .arg(format!(r"{class_key}\shell\open\command"))
+                    .arg("/ve")
+                    .arg("/d")
+                    .arg(&open_command)
+                    .arg("/f");
+                if let Err(err) = run_command_executor(
+                    &mut class_open,
+                    "failed to register Windows file extension open command",
+                ) {
+                    warnings.push(format!("native GUI registration warning: {err}"));
+                }
+
+                records.push(GuiNativeRegistrationRecord {
+                    key: format!("extension:{normalized}"),
+                    kind: "registry-key".to_string(),
+                    path: ext_key,
+                });
+                records.push(GuiNativeRegistrationRecord {
+                    key: format!("mime:{}", association.mime_type.trim().to_ascii_lowercase()),
+                    kind: "registry-key".to_string(),
+                    path: class_key,
+                });
+            }
+        }
+
+        return Ok((records, warnings));
+    }
+
+    if cfg!(target_os = "macos") {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            warnings.push(
+                "native GUI registration warning: HOME is not set; skipped macOS GUI registration"
+                    .to_string(),
+            );
+            return Ok((records, warnings));
+        };
+
+        let applications_dir = project_macos_user_applications_dir(&home);
+        if let Err(err) = fs::create_dir_all(&applications_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create macOS user applications dir {}: {}",
+                applications_dir.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
+
+        let app_name = source_path
+            .file_name()
+            .ok_or_else(|| anyhow!("gui app '{}' has invalid executable path", app.app_id))?;
+        let link_path = applications_dir.join(app_name);
+
+        if link_path.exists() {
+            let remove_result = match fs::symlink_metadata(&link_path) {
+                Ok(metadata) => {
+                    if metadata.is_dir() {
+                        fs::remove_dir(&link_path)
+                    } else {
+                        fs::remove_file(&link_path)
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            if let Err(err) = remove_result {
+                warnings.push(format!(
+                    "native GUI registration warning: failed to replace existing macOS application link {}: {}",
+                    link_path.display(),
+                    err
+                ));
+                return Ok((records, warnings));
+            }
+        }
+
+        #[cfg(unix)]
+        if let Err(err) = std::os::unix::fs::symlink(&source_path, &link_path) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to create macOS application symlink {} -> {}: {}",
+                link_path.display(),
+                source_path.display(),
+                err
+            ));
+            return Ok((records, warnings));
+        }
+
+        for asset in &projected_assets {
+            records.push(GuiNativeRegistrationRecord {
+                key: asset.key.clone(),
+                kind: "applications-symlink".to_string(),
+                path: link_path.display().to_string(),
+            });
+        }
+
+        let mut refresh = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister");
+        refresh.arg("-f").arg(&link_path);
+        if let Err(err) = run_command_executor(
+            &mut refresh,
+            "failed to refresh macOS LaunchServices registry",
+        ) {
+            warnings.push(format!("native GUI registration warning: {err}"));
+        }
+
+        return Ok((records, warnings));
+    }
+
+    warnings.push("native GUI registration warning: host platform is not supported".to_string());
+    Ok((records, warnings))
+}
+
+fn remove_native_gui_registration_best_effort_with_executor<RunCommand>(
+    records: &[GuiNativeRegistrationRecord],
+    mut run_command_executor: RunCommand,
+) -> Result<Vec<String>>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    let mut warnings = Vec::new();
+    let mut removed_files = HashSet::new();
+
+    for record in records {
+        match record.kind.as_str() {
+            "desktop-entry" | "start-menu-launcher" | "applications-symlink" => {
+                let path = PathBuf::from(&record.path);
+                if !removed_files.insert(path.clone()) {
+                    continue;
+                }
+                let remove_result = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => {
+                        if metadata.is_dir() {
+                            fs::remove_dir(&path)
+                        } else {
+                            fs::remove_file(&path)
+                        }
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(err) => Err(err),
+                };
+                if let Err(err) = remove_result {
+                    warnings.push(format!(
+                        "native GUI deregistration warning: failed to remove '{}': {}",
+                        path.display(),
+                        err
+                    ));
+                }
+            }
+            "registry-key" => {
+                if !cfg!(windows) {
+                    warnings.push(format!(
+                        "native GUI deregistration warning: skipped Windows registry cleanup '{}' on non-Windows host",
+                        record.path
+                    ));
+                    continue;
+                }
+
+                let mut command = Command::new("reg");
+                command.arg("delete").arg(&record.path).arg("/f");
+                if let Err(err) =
+                    run_command_executor(&mut command, "failed to remove Windows registry key")
+                {
+                    warnings.push(format!("native GUI deregistration warning: {err}"));
+                }
+            }
+            other => warnings.push(format!(
+                "native GUI deregistration warning: unsupported registration kind '{}' for key '{}'",
+                other, record.key
+            )),
+        }
+    }
+
+    Ok(warnings)
+}
+
+fn project_linux_user_applications_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("share").join("applications")
+}
+
+fn project_windows_start_menu_programs_dir(appdata: &Path) -> PathBuf {
+    appdata
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs")
+}
+
+fn project_macos_user_applications_dir(home: &Path) -> PathBuf {
+    home.join("Applications")
+}
+
+fn native_gui_launcher_filename(package_name: &str, app: &ArtifactGuiApp) -> String {
+    format!(
+        "{}--{}.desktop",
+        normalize_gui_token(package_name),
+        normalize_gui_token(&app.app_id)
+    )
+}
+
+fn render_linux_native_desktop_entry(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    let mut mime_entries = app
+        .file_associations
+        .iter()
+        .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    mime_entries.extend(app.protocols.iter().map(|protocol| {
+        format!(
+            "x-scheme-handler/{}",
+            sanitize_desktop_list_token(&protocol.scheme)
+        )
+    }));
+
+    let mut desktop = String::new();
+    desktop.push_str("[Desktop Entry]\n");
+    desktop.push_str("Type=Application\n");
+    desktop.push_str(&format!(
+        "Name={}\n",
+        sanitize_gui_metadata_value(&app.display_name)
+    ));
+    desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
+    if let Some(icon) = &app.icon {
+        desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
+    }
+    if !app.categories.is_empty() {
+        let categories = app
+            .categories
+            .iter()
+            .map(|category| sanitize_desktop_list_token(category))
+            .filter(|category| !category.is_empty())
+            .collect::<Vec<_>>();
+        if !categories.is_empty() {
+            desktop.push_str(&format!("Categories={};\n", categories.join(";")));
+        }
+    }
+    if !mime_entries.is_empty() {
+        desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
+    }
+    desktop
+}
+
+#[cfg(windows)]
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    format!(
+        "@echo off\r\nREM {}\r\n\"{}\" %*\r\n",
+        sanitize_gui_metadata_value(&app.display_name),
+        source_path.display()
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    let mut mime_entries = app
+        .file_associations
+        .iter()
+        .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    mime_entries.extend(app.protocols.iter().map(|protocol| {
+        format!(
+            "x-scheme-handler/{}",
+            sanitize_desktop_list_token(&protocol.scheme)
+        )
+    }));
+
+    let mut desktop = String::new();
+    desktop.push_str("[Desktop Entry]\n");
+    desktop.push_str("Type=Application\n");
+    desktop.push_str(&format!(
+        "Name={}\n",
+        sanitize_gui_metadata_value(&app.display_name)
+    ));
+    desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
+    if let Some(icon) = &app.icon {
+        desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
+    }
+    if !app.categories.is_empty() {
+        let categories = app
+            .categories
+            .iter()
+            .map(|category| sanitize_desktop_list_token(category))
+            .filter(|category| !category.is_empty())
+            .collect::<Vec<_>>();
+        if !categories.is_empty() {
+            desktop.push_str(&format!("Categories={};\n", categories.join(";")));
+        }
+    }
+    if !mime_entries.is_empty() {
+        desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
+    }
+    desktop
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if source_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("app"))
+            .unwrap_or(false)
+        {
+            return format!(
+                "#!/bin/sh\n# {}\nopen -a \"{}\" --args \"$@\"\n",
+                sanitize_gui_metadata_value(&app.display_name),
+                source_path.display()
+            );
+        }
+    }
+
+    format!(
+        "#!/bin/sh\n# {}\nexec \"{}\" \"$@\"\n",
+        sanitize_gui_metadata_value(&app.display_name),
+        source_path.display()
+    )
+}
+
+fn gui_launcher_extension() -> &'static str {
+    if cfg!(windows) {
+        "cmd"
+    } else if cfg!(target_os = "linux") {
+        "desktop"
+    } else {
+        "command"
+    }
+}
+
+fn normalize_gui_token(value: &str) -> String {
+    let mut normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if normalized.is_empty() {
+        normalized.push('_');
+    }
+    normalized
+}
+
+fn normalized_protocol_scheme(scheme: &str) -> Result<String> {
+    let trimmed = scheme.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err(anyhow!("protocol scheme must not be empty"));
+    }
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return Err(anyhow!("protocol scheme must not be empty"));
+    };
+    if !first.is_ascii_alphabetic() {
+        return Err(anyhow!("protocol scheme must start with an ASCII letter"));
+    }
+    if chars.any(|ch| !(ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '.')) {
+        return Err(anyhow!("protocol scheme contains invalid character(s)"));
+    }
+    Ok(trimmed)
+}
+
+fn normalized_extension(extension: &str) -> Result<String> {
+    let trimmed = extension.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err(anyhow!("file association extension must not be empty"));
+    }
+    let normalized = if trimmed.starts_with('.') {
+        trimmed
+    } else {
+        format!(".{trimmed}")
+    };
+    if normalized
+        .chars()
+        .skip(1)
+        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+    {
+        return Err(anyhow!(
+            "file association extension contains invalid character(s)"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn sanitize_gui_metadata_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn sanitize_desktop_list_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch == '\n' || ch == '\r' || ch == ';' {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sanitize_desktop_list_token(value: &str) -> String {
+    sanitize_gui_metadata_value(value)
+}
+
+fn validated_relative_gui_storage_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!("gui storage path must be relative: {}", path));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("gui storage path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("gui storage path must not include '..': {}", path));
+    }
+    Ok(relative)
+}
+
+fn prune_empty_gui_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
+    let mut current = start.map(PathBuf::from);
+    let gui_root = layout.gui_dir();
+    while let Some(dir) = current {
+        if !dir.starts_with(&gui_root) || dir == gui_root {
+            break;
+        }
+
+        let mut entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                current = dir.parent().map(PathBuf::from);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed reading gui dir: {}", dir.display()));
+            }
+        };
+
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&dir)
+            .with_context(|| format!("failed pruning gui dir: {}", dir.display()))?;
+        current = dir.parent().map(PathBuf::from);
+    }
+    Ok(())
+}
+
 fn prune_empty_completion_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
     let mut current = start.map(PathBuf::from);
     let completions_root = layout.completions_dir();
@@ -1268,10 +2444,152 @@ fn make_tmp_dir(layout: &PrefixLayout, prefix: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn extract_archive(archive_path: &Path, dst: &Path, archive_type: ArchiveType) -> Result<()> {
-    match archive_type {
-        ArchiveType::Zip => extract_zip(archive_path, dst),
-        ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(archive_path, dst),
+fn stage_artifact_payload(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    artifact_type: ArchiveType,
+    strip_components: u32,
+    artifact_root: Option<&str>,
+) -> Result<()> {
+    match artifact_type {
+        ArchiveType::Zip => extract_zip(artifact_path, raw_dir),
+        ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(artifact_path, raw_dir),
+        ArchiveType::AppImage => {
+            stage_appimage_payload(artifact_path, raw_dir, strip_components, artifact_root)
+        }
+        ArchiveType::Msi => stage_msi_payload(artifact_path, raw_dir),
+        ArchiveType::Dmg => stage_dmg_payload(artifact_path, raw_dir),
+    }
+}
+
+fn stage_appimage_payload(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    strip_components: u32,
+    artifact_root: Option<&str>,
+) -> Result<()> {
+    if strip_components != 0 {
+        return Err(anyhow!("strip_components must be 0 for AppImage artifacts"));
+    }
+    if artifact_root.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(anyhow!(
+            "artifact_root is not supported for AppImage artifacts"
+        ));
+    }
+
+    fs::create_dir_all(raw_dir)
+        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
+    let staged = raw_dir.join("artifact.appimage");
+    fs::copy(artifact_path, &staged).with_context(|| {
+        format!(
+            "failed to stage AppImage payload from {} to {}",
+            artifact_path.display(),
+            staged.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&staged)
+            .with_context(|| format!("failed to stat {}", staged.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&staged, permissions)
+            .with_context(|| format!("failed to set executable mode on {}", staged.display()))?;
+    }
+
+    Ok(())
+}
+
+fn stage_msi_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(anyhow!("MSI artifacts are supported only on Windows hosts"));
+    }
+    let mut command = build_msi_admin_extract_command(_artifact_path, _raw_dir);
+    run_command(
+        &mut command,
+        "failed to stage MSI artifact with administrative extraction",
+    )
+}
+
+fn stage_dmg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err(anyhow!("DMG artifacts are supported only on macOS hosts"));
+    }
+
+    let mount_point = _raw_dir.join(".crosspack-dmg-mount");
+    fs::create_dir_all(&mount_point)
+        .with_context(|| format!("failed to create {}", mount_point.display()))?;
+
+    let result = stage_dmg_payload_with_hooks(
+        _artifact_path,
+        _raw_dir,
+        &mount_point,
+        run_command,
+        copy_dir_recursive,
+    );
+
+    let _ = fs::remove_dir_all(&mount_point);
+    result
+}
+
+fn build_msi_admin_extract_command(artifact_path: &Path, raw_dir: &Path) -> Command {
+    let mut command = Command::new("msiexec");
+    command
+        .arg("/a")
+        .arg(artifact_path)
+        .arg("/qn")
+        .arg(format!("TARGETDIR={}", raw_dir.display()));
+    command
+}
+
+fn build_dmg_attach_command(artifact_path: &Path, mount_point: &Path) -> Command {
+    let mut command = Command::new("hdiutil");
+    command
+        .arg("attach")
+        .arg(artifact_path)
+        .arg("-readonly")
+        .arg("-nobrowse")
+        .arg("-mountpoint")
+        .arg(mount_point);
+    command
+}
+
+fn build_dmg_detach_command(mount_point: &Path) -> Command {
+    let mut command = Command::new("hdiutil");
+    command.arg("detach").arg(mount_point);
+    command
+}
+
+fn stage_dmg_payload_with_hooks<RunCommand, CopyPayload>(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    mount_point: &Path,
+    mut run: RunCommand,
+    mut copy_payload: CopyPayload,
+) -> Result<()>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+    CopyPayload: FnMut(&Path, &Path) -> Result<()>,
+{
+    let mut attach_command = build_dmg_attach_command(artifact_path, mount_point);
+    run(&mut attach_command, "failed to attach DMG artifact")?;
+
+    let copy_result = copy_payload(mount_point, raw_dir);
+
+    let mut detach_command = build_dmg_detach_command(mount_point);
+    let detach_result = run(&mut detach_command, "failed to detach DMG mount");
+
+    match (copy_result, detach_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(copy_err), Ok(())) => Err(copy_err),
+        (Ok(()), Err(detach_err)) => Err(detach_err),
+        (Err(copy_err), Err(detach_err)) => Err(anyhow!(
+            "failed to copy mounted DMG payload: {copy_err}; additionally failed to detach mount {}: {detach_err}",
+            mount_point.display()
+        )),
     }
 }
 
@@ -1978,6 +3296,230 @@ mod tests {
     }
 
     #[test]
+    fn expose_gui_app_and_state_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("zed", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("zed"), b"#!/bin/sh\n").expect("must write gui app exec");
+
+        let app = ArtifactGuiApp {
+            app_id: "dev.zed.Zed".to_string(),
+            display_name: "Zed".to_string(),
+            exec: "zed".to_string(),
+            icon: None,
+            categories: vec!["Development".to_string()],
+            file_associations: vec![crosspack_core::ArtifactGuiFileAssociation {
+                mime_type: "text/plain".to_string(),
+                extensions: vec![".txt".to_string()],
+            }],
+            protocols: vec![crosspack_core::ArtifactGuiProtocol {
+                scheme: "zed".to_string(),
+            }],
+        };
+
+        let assets =
+            expose_gui_app(&layout, &package_dir, "zed", &app).expect("must expose gui app");
+        assert!(
+            assets.iter().any(|asset| asset.key == "app:dev.zed.zed"),
+            "launcher ownership key must be present"
+        );
+
+        for asset in &assets {
+            let path = gui_asset_path(&layout, &asset.rel_path).expect("must resolve gui path");
+            assert!(
+                path.exists(),
+                "gui asset path should exist: {}",
+                path.display()
+            );
+        }
+
+        write_gui_exposure_state(&layout, "zed", &assets).expect("must write gui state");
+        let loaded = read_gui_exposure_state(&layout, "zed").expect("must read gui state");
+        assert_eq!(loaded, assets);
+
+        for asset in &assets {
+            remove_exposed_gui_asset(&layout, asset).expect("must remove gui asset");
+        }
+        clear_gui_exposure_state(&layout, "zed").expect("must remove gui state file");
+
+        assert!(
+            read_gui_exposure_state(&layout, "zed")
+                .expect("must read removed gui state")
+                .is_empty(),
+            "gui state should be empty after clear"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn native_gui_state_round_trip() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let records = vec![
+            GuiNativeRegistrationRecord {
+                key: "app:dev.zed.zed".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: "/tmp/dev.zed.zed.desktop".to_string(),
+            },
+            GuiNativeRegistrationRecord {
+                key: "protocol:zed".to_string(),
+                kind: "protocol-handler".to_string(),
+                path: "HKCU\\Software\\Classes\\zed".to_string(),
+            },
+        ];
+
+        write_gui_native_state(&layout, "zed", &records).expect("must write native gui state");
+        let loaded = read_gui_native_state(&layout, "zed").expect("must read native gui state");
+        assert_eq!(loaded, records);
+    }
+
+    #[test]
+    fn native_gui_state_read_missing_returns_empty() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let records = read_gui_native_state(&layout, "missing").expect("must read missing state");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn native_gui_state_clear_removes_state_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_gui_native_state(
+            &layout,
+            "zed",
+            &[GuiNativeRegistrationRecord {
+                key: "app:dev.zed.zed".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: "/tmp/dev.zed.zed.desktop".to_string(),
+            }],
+        )
+        .expect("must write native gui state");
+        clear_gui_native_state(&layout, "zed").expect("must clear native gui state");
+
+        assert!(!layout.gui_native_state_path("zed").exists());
+    }
+
+    #[test]
+    fn write_gui_exposure_state_rejects_tab_delimiter_characters() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let err = write_gui_exposure_state(
+            &layout,
+            "demo",
+            &[GuiExposureAsset {
+                key: "app:demo\tbad".to_string(),
+                rel_path: "launchers/demo.command".to_string(),
+            }],
+        )
+        .expect_err("tab-delimited values should be rejected");
+        assert!(
+            err.to_string().contains("must not contain"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn register_native_gui_linux_projects_user_desktop_path() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            project_linux_user_applications_dir(home),
+            PathBuf::from("/home/tester/.local/share/applications")
+        );
+    }
+
+    #[test]
+    fn register_native_gui_windows_projects_start_menu_path() {
+        let appdata = Path::new(r"C:\Users\tester\AppData\Roaming");
+        assert_eq!(
+            project_windows_start_menu_programs_dir(appdata),
+            PathBuf::from(r"C:\Users\tester\AppData\Roaming")
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+        );
+    }
+
+    #[test]
+    fn register_native_gui_macos_projects_user_applications_path() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            project_macos_user_applications_dir(home),
+            PathBuf::from("/Users/tester/Applications")
+        );
+    }
+
+    #[test]
+    fn register_native_gui_returns_warnings_without_error_on_command_failure() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+        fs::write(install_root.join("demo"), b"#!/bin/sh\n").expect("must write executable");
+
+        let app = ArtifactGuiApp {
+            app_id: "dev.demo.App".to_string(),
+            display_name: "Demo".to_string(),
+            exec: "demo".to_string(),
+            icon: None,
+            categories: vec!["Utility".to_string()],
+            file_associations: Vec::new(),
+            protocols: vec![crosspack_core::ArtifactGuiProtocol {
+                scheme: "demo".to_string(),
+            }],
+        };
+
+        let (_records, warnings) = register_native_gui_app_best_effort_with_executor(
+            "demo",
+            &app,
+            &install_root,
+            |_command, _context| Err(anyhow!("simulated command failure")),
+        )
+        .expect("command failures should become warnings");
+
+        assert!(
+            !warnings.is_empty(),
+            "native registration failures should produce warning output"
+        );
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("simulated command failure")
+                    || warning.contains("native GUI registration warning")
+            }),
+            "expected command-failure or adapter warning line"
+        );
+    }
+
+    #[test]
+    fn remove_package_native_gui_registrations_preserves_state_when_cleanup_warns() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "unknown-kind".to_string(),
+                path: "/tmp/demo".to_string(),
+            }],
+        )
+        .expect("must seed native state");
+
+        let warnings = remove_package_native_gui_registrations_best_effort(&layout, "demo")
+            .expect("must remove native registrations");
+        assert!(!warnings.is_empty());
+        assert!(layout.gui_native_state_path("demo").exists());
+    }
+
+    #[test]
     fn strip_components_behavior() {
         let p = Path::new("top/inner/bin/tool");
         assert_eq!(
@@ -1985,6 +3527,220 @@ mod tests {
             Path::new("inner/bin/tool")
         );
         assert!(strip_rel_components(p, 4).is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn install_from_artifact_rejects_msi_on_non_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.msi");
+        fs::write(&artifact_path, b"dummy msi").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Msi,
+            0,
+            None,
+        )
+        .expect_err("msi should be rejected on non-Windows host");
+        assert!(
+            err.to_string()
+                .contains("MSI artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_from_artifact_rejects_dmg_on_non_macos_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.dmg");
+        fs::write(&artifact_path, b"dummy dmg").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Dmg,
+            0,
+            None,
+        )
+        .expect_err("dmg should be rejected on non-macOS host");
+        assert!(
+            err.to_string()
+                .contains("DMG artifacts are supported only on macOS hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn install_from_artifact_rejects_appimage_with_strip_components() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.AppImage");
+        fs::write(&artifact_path, b"dummy appimage").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::AppImage,
+            1,
+            None,
+        )
+        .expect_err("appimage strip_components should be rejected");
+        assert!(
+            err.to_string()
+                .contains("strip_components must be 0 for AppImage artifacts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_appimage_copies_payload_into_raw_dir() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.AppImage");
+        fs::write(&artifact_path, b"appimage payload").expect("must write artifact");
+        let raw_dir = layout.prefix().join("raw");
+        fs::create_dir_all(&raw_dir).expect("must create raw dir");
+
+        stage_appimage_payload(&artifact_path, &raw_dir, 0, None)
+            .expect("must stage appimage payload");
+
+        let staged = raw_dir.join("artifact.appimage");
+        assert!(staged.exists(), "staged payload should exist");
+        assert_eq!(
+            fs::read(&staged).expect("must read staged payload"),
+            b"appimage payload"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_appimage_sets_executable_permissions_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.AppImage");
+        fs::write(&artifact_path, b"appimage payload").expect("must write artifact");
+        let raw_dir = layout.prefix().join("raw");
+        fs::create_dir_all(&raw_dir).expect("must create raw dir");
+
+        stage_appimage_payload(&artifact_path, &raw_dir, 0, None)
+            .expect("must stage appimage payload");
+
+        let mode = fs::metadata(raw_dir.join("artifact.appimage"))
+            .expect("must stat staged payload")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_msi_builds_admin_extract_command() {
+        let artifact_path = Path::new("/tmp/demo.msi");
+        let raw_dir = Path::new("/tmp/raw");
+        let command = build_msi_admin_extract_command(artifact_path, raw_dir);
+
+        assert_eq!(command.get_program(), "msiexec");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "/a".to_string(),
+                artifact_path.display().to_string(),
+                "/qn".to_string(),
+                format!("TARGETDIR={}", raw_dir.display())
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_dmg_attach_and_detach_command_shapes_are_stable() {
+        let artifact_path = Path::new("/tmp/demo.dmg");
+        let mount_point = Path::new("/tmp/mount-point");
+
+        let attach = build_dmg_attach_command(artifact_path, mount_point);
+        assert_eq!(attach.get_program(), "hdiutil");
+        let attach_args = attach
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attach_args,
+            vec![
+                "attach".to_string(),
+                artifact_path.display().to_string(),
+                "-readonly".to_string(),
+                "-nobrowse".to_string(),
+                "-mountpoint".to_string(),
+                mount_point.display().to_string(),
+            ]
+        );
+
+        let detach = build_dmg_detach_command(mount_point);
+        assert_eq!(detach.get_program(), "hdiutil");
+        let detach_args = detach
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            detach_args,
+            vec!["detach".to_string(), mount_point.display().to_string()]
+        );
+    }
+
+    #[test]
+    fn stage_dmg_detach_runs_on_copy_failure() {
+        let artifact_path = Path::new("/tmp/demo.dmg");
+        let raw_dir = Path::new("/tmp/raw");
+        let mount_point = Path::new("/tmp/mount-point");
+        let mut command_invocations = Vec::new();
+
+        let err = stage_dmg_payload_with_hooks(
+            artifact_path,
+            raw_dir,
+            mount_point,
+            |command, _context| {
+                let mut invocation = command.get_program().to_string_lossy().into_owned();
+                for arg in command.get_args() {
+                    invocation.push(' ');
+                    invocation.push_str(arg.to_string_lossy().as_ref());
+                }
+                command_invocations.push(invocation);
+                Ok(())
+            },
+            |_mounted, _dst| Err(anyhow!("simulated copy failure")),
+        )
+        .expect_err("copy failure should propagate");
+
+        assert!(err.to_string().contains("simulated copy failure"));
+        assert_eq!(command_invocations.len(), 2, "attach + detach must run");
+        assert!(command_invocations[0].starts_with("hdiutil attach "));
+        assert!(command_invocations[1].starts_with("hdiutil detach "));
     }
 
     #[test]
@@ -2005,6 +3761,32 @@ mod tests {
         )
         .expect("must create completion parent dir");
         fs::write(&completion_path, b"# demo completion\n").expect("must create completion file");
+        let gui_rel_path = "launchers/demo--demo.command".to_string();
+        let gui_path = gui_asset_path(&layout, &gui_rel_path).expect("must resolve gui path");
+        fs::create_dir_all(gui_path.parent().expect("gui path must have parent"))
+            .expect("must create gui parent dir");
+        fs::write(&gui_path, b"#!/bin/sh\n").expect("must create gui launcher file");
+        write_gui_exposure_state(
+            &layout,
+            "demo",
+            &[GuiExposureAsset {
+                key: "app:demo".to_string(),
+                rel_path: gui_rel_path,
+            }],
+        )
+        .expect("must write gui state");
+        let native_launcher = layout.prefix().join("native-demo.desktop");
+        fs::write(&native_launcher, b"[Desktop Entry]\n").expect("must write native launcher");
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: native_launcher.display().to_string(),
+            }],
+        )
+        .expect("must write native gui state");
 
         write_install_receipt(
             &layout,
@@ -2032,6 +3814,10 @@ mod tests {
         assert!(!layout.receipt_path("demo").exists());
         assert!(!package_dir.exists());
         assert!(!completion_path.exists());
+        assert!(!gui_path.exists());
+        assert!(!native_launcher.exists());
+        assert!(!layout.gui_state_path("demo").exists());
+        assert!(!layout.gui_native_state_path("demo").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }

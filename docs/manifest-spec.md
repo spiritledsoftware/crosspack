@@ -21,11 +21,29 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
 - `signature` (optional in v0.1): artifact-level detached signature reference.
-- `archive` (optional): archive type override (`zip`, `tar.gz`, `tar.zst`). If omitted, inferred from URL suffix.
+- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
 - `completions` (optional): list of shell completion files exposed for this artifact.
+- `gui_apps` (optional): list of GUI application integrations exposed for this artifact.
+
+### Artifact Kind Policy
+
+- Artifact ingestion is deterministic and fail-closed.
+- Crosspack does not run vendor installer UI/execution fallback flows.
+- `msi` artifacts are staged only on Windows hosts.
+- `dmg` artifacts are staged only on macOS hosts.
+- `appimage` artifacts are staged as direct payload files and require `strip_components = 0` with no `artifact_root` override.
+
+### Native GUI Registration Policy
+
+- GUI metadata may be projected into native user-scope registration locations by platform.
+- Native registration is best-effort and warning-driven (install success does not require adapter success).
+- Known current limits:
+  - Linux refresh depends on `update-desktop-database` availability.
+  - Windows protocol/file-association registration is scoped to HKCU only.
+  - macOS registration links into `~/Applications` and best-effort refreshes LaunchServices.
 
 ## Registry Metadata Signing
 
@@ -65,6 +83,25 @@ Until these milestones land, manifests should use the current v0.2 field set doc
 - `shell`: one of `bash`, `zsh`, `fish`, `powershell`.
 - `path`: relative path inside extracted package content.
 
+### Artifact GUI App Fields
+
+- `app_id`: stable GUI application identifier (unique per artifact target).
+- `display_name`: user-facing name for launcher metadata.
+- `exec`: relative executable path inside extracted package content.
+- `icon` (optional): relative icon path inside extracted package content.
+- `categories` (optional): category labels for launcher metadata.
+- `file_associations` (optional): list of file association declarations.
+- `protocols` (optional): list of URL protocol handler declarations.
+
+#### GUI File Association Fields
+
+- `mime_type`: MIME type identifier.
+- `extensions` (optional): list of file extensions (for example `.txt`, `.md`).
+
+#### GUI Protocol Fields
+
+- `scheme`: URL scheme token (for example `zed`, `myapp+internal`).
+
 ## Example
 
 ```toml
@@ -85,6 +122,19 @@ strip_components = 1
 [[artifacts.binaries]]
 name = "rg"
 path = "rg"
+
+[[artifacts.gui_apps]]
+app_id = "org.example.ripgrep-viewer"
+display_name = "Ripgrep Viewer"
+exec = "tools/rg-viewer"
+categories = ["Utility", "Development"]
+
+[[artifacts.gui_apps.file_associations]]
+mime_type = "text/plain"
+extensions = [".txt"]
+
+[[artifacts.gui_apps.protocols]]
+scheme = "rgview"
 
 [[artifacts.completions]]
 shell = "bash"

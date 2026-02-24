@@ -10,17 +10,23 @@ use std::process::Stdio;
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use crosspack_core::{ArchiveType, Artifact, ArtifactCompletionShell, PackageManifest};
+use crosspack_core::{
+    ArchiveType, Artifact, ArtifactCompletionShell, ArtifactGuiApp, PackageManifest,
+};
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
-    default_user_prefix, expose_binary, expose_completion, exposed_completion_path,
-    install_from_artifact, projected_exposed_completion_path, read_active_transaction,
-    read_all_pins, read_install_receipts, read_transaction_metadata, remove_exposed_binary,
-    remove_exposed_completion, remove_file_if_exists, set_active_transaction,
-    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
-    uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
-    write_install_receipt, write_pin, write_transaction_metadata, InstallReason, InstallReceipt,
-    PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    default_user_prefix, expose_binary, expose_completion, expose_gui_app, exposed_completion_path,
+    gui_asset_path, install_from_artifact, projected_exposed_completion_path, projected_gui_assets,
+    read_active_transaction, read_all_gui_exposure_states, read_all_pins, read_gui_exposure_state,
+    read_gui_native_state, read_install_receipts, read_transaction_metadata,
+    register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
+    remove_exposed_gui_asset, remove_file_if_exists, remove_native_gui_registration_best_effort,
+    set_active_transaction, uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots,
+    uninstall_package, uninstall_package_with_dependency_overrides_and_ignored_roots,
+    update_transaction_status, write_gui_exposure_state, write_gui_native_state,
+    write_install_receipt, write_pin, write_transaction_metadata, GuiExposureAsset,
+    GuiNativeRegistrationRecord, InstallReason, InstallReceipt, PrefixLayout,
+    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -2727,6 +2733,9 @@ struct InstallOutcome {
     receipt_path: PathBuf,
     exposed_bins: Vec<String>,
     exposed_completions: Vec<String>,
+    exposed_gui_assets: Vec<String>,
+    native_gui_records: Vec<String>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -3285,6 +3294,8 @@ fn validate_install_preflight_for_resolved(
 
     let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
     let declared_completions = collect_declared_completions(&resolved.artifact)?;
+    let declared_gui_assets =
+        collect_declared_gui_assets(&resolved.manifest.name, &resolved.artifact)?;
     let projected_completion_paths = declared_completions
         .iter()
         .map(|completion| {
@@ -3309,8 +3320,74 @@ fn validate_install_preflight_for_resolved(
         &projected_completion_paths,
         receipts,
     )?;
+    validate_gui_preflight(
+        layout,
+        &resolved.manifest.name,
+        &declared_gui_assets,
+        &replacement_targets,
+    )?;
 
     Ok(())
+}
+
+fn sync_native_gui_registration_state_best_effort(
+    layout: &PrefixLayout,
+    package_name: &str,
+    install_root: &Path,
+    declared_gui_apps: &[ArtifactGuiApp],
+) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> {
+    let previous_records = read_gui_native_state(layout, package_name)?;
+    let mut current_records = Vec::new();
+    let mut warnings = Vec::new();
+
+    for app in declared_gui_apps {
+        let (records, app_warnings) =
+            register_native_gui_app_best_effort(package_name, app, install_root)?;
+        current_records.extend(records);
+        warnings.extend(app_warnings);
+    }
+
+    let mut seen = HashSet::new();
+    current_records.retain(|record| {
+        seen.insert((record.key.clone(), record.kind.clone(), record.path.clone()))
+    });
+
+    let current_keys = current_records
+        .iter()
+        .map(|record| {
+            (
+                record.key.as_str(),
+                record.kind.as_str(),
+                record.path.as_str(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let stale_records = previous_records
+        .iter()
+        .filter(|record| {
+            !current_keys.contains(&(
+                record.key.as_str(),
+                record.kind.as_str(),
+                record.path.as_str(),
+            ))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut records_to_persist = current_records.clone();
+    if !stale_records.is_empty() {
+        let stale_warnings = remove_native_gui_registration_best_effort(&stale_records)?;
+        if !stale_warnings.is_empty() {
+            records_to_persist.extend(stale_records.iter().cloned());
+            let mut seen_records = HashSet::new();
+            records_to_persist.retain(|record| {
+                seen_records.insert((record.key.clone(), record.kind.clone(), record.path.clone()))
+            });
+        }
+        warnings.extend(stale_warnings);
+    }
+
+    write_gui_native_state(layout, package_name, &records_to_persist)?;
+    Ok((current_records, warnings))
 }
 
 fn install_resolved(
@@ -3329,6 +3406,7 @@ fn install_resolved(
 
     let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
     let declared_completions = collect_declared_completions(&resolved.artifact)?;
+    let declared_gui_apps = collect_declared_gui_apps(&resolved.artifact)?;
 
     let cache_path = layout.artifact_cache_path(
         &resolved.manifest.name,
@@ -3383,6 +3461,12 @@ fn install_resolved(
         exposed_completions.push(storage_path);
     }
 
+    let mut exposed_gui_assets = Vec::new();
+    for app in &declared_gui_apps {
+        let exposed = expose_gui_app(layout, &install_root, &resolved.manifest.name, app)?;
+        exposed_gui_assets.extend(exposed);
+    }
+
     if let Some(previous_receipt) = receipts
         .iter()
         .find(|receipt| receipt.name == resolved.manifest.name)
@@ -3402,6 +3486,23 @@ fn install_resolved(
             remove_exposed_completion(layout, stale_completion)?;
         }
     }
+
+    let previous_gui_assets = read_gui_exposure_state(layout, &resolved.manifest.name)?;
+    for stale_gui_asset in previous_gui_assets.iter().filter(|old| {
+        !exposed_gui_assets
+            .iter()
+            .any(|current| current.rel_path == old.rel_path)
+    }) {
+        remove_exposed_gui_asset(layout, stale_gui_asset)?;
+    }
+    write_gui_exposure_state(layout, &resolved.manifest.name, &exposed_gui_assets)?;
+
+    let (native_gui_records, native_gui_warnings) = sync_native_gui_registration_state_best_effort(
+        layout,
+        &resolved.manifest.name,
+        &install_root,
+        &declared_gui_apps,
+    )?;
 
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
@@ -3437,6 +3538,15 @@ fn install_resolved(
         receipt_path,
         exposed_bins,
         exposed_completions,
+        exposed_gui_assets: exposed_gui_assets
+            .iter()
+            .map(|asset| asset.key.clone())
+            .collect(),
+        native_gui_records: native_gui_records
+            .iter()
+            .map(|record| record.key.clone())
+            .collect(),
+        warnings: native_gui_warnings,
     })
 }
 
@@ -3491,6 +3601,33 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
                 "exposed_completions: {}",
                 outcome.exposed_completions.join(", ")
             ),
+        ));
+    }
+    if !outcome.exposed_gui_assets.is_empty() {
+        lines.push(render_status_line(
+            style,
+            "step",
+            &format!(
+                "exposed_gui_assets: {}",
+                outcome.exposed_gui_assets.join(", ")
+            ),
+        ));
+    }
+    if !outcome.native_gui_records.is_empty() {
+        lines.push(render_status_line(
+            style,
+            "step",
+            &format!(
+                "native_gui_records: {}",
+                outcome.native_gui_records.join(", ")
+            ),
+        ));
+    }
+    for warning in &outcome.warnings {
+        lines.push(render_status_line(
+            style,
+            "warn",
+            &format!("warning: {warning}"),
         ));
     }
     lines.push(render_status_line(
@@ -3552,6 +3689,65 @@ fn collect_declared_completions(artifact: &Artifact) -> Result<Vec<DeclaredCompl
     Ok(declared)
 }
 
+fn collect_declared_gui_apps(artifact: &Artifact) -> Result<Vec<ArtifactGuiApp>> {
+    let mut declared = Vec::with_capacity(artifact.gui_apps.len());
+    let mut seen = HashSet::new();
+    for app in &artifact.gui_apps {
+        if !seen.insert(app.app_id.clone()) {
+            return Err(anyhow!(
+                "duplicate gui app declaration '{}' for target '{}'",
+                app.app_id,
+                artifact.target
+            ));
+        }
+        declared.push(app.clone());
+    }
+    Ok(declared)
+}
+
+fn collect_declared_gui_assets(
+    package_name: &str,
+    artifact: &Artifact,
+) -> Result<Vec<GuiExposureAsset>> {
+    let declared_apps = collect_declared_gui_apps(artifact)?;
+    let mut assets = Vec::new();
+    let mut seen_keys = HashSet::new();
+    let mut seen_paths = HashMap::new();
+    for app in &declared_apps {
+        let projected = projected_gui_assets(package_name, app)?;
+        let projected_paths = projected
+            .iter()
+            .map(|asset| asset.rel_path.clone())
+            .collect::<HashSet<_>>();
+        for rel_path in projected_paths {
+            if let Some(existing_app_id) =
+                seen_paths.insert(rel_path.clone(), app.app_id.trim().to_ascii_lowercase())
+            {
+                return Err(anyhow!(
+                    "duplicate gui storage path declaration '{}' for package '{}' target '{}'; app '{}' collides with app '{}'",
+                    rel_path,
+                    package_name,
+                    artifact.target,
+                    app.app_id,
+                    existing_app_id
+                ));
+            }
+        }
+        for asset in projected {
+            if !seen_keys.insert(asset.key.clone()) {
+                return Err(anyhow!(
+                    "duplicate gui ownership key declaration '{}' for package '{}' target '{}'",
+                    asset.key,
+                    package_name,
+                    artifact.target
+                ));
+            }
+            assets.push(asset);
+        }
+    }
+    Ok(assets)
+}
+
 fn validate_binary_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         return Err(anyhow!("binary name must not be empty"));
@@ -3605,6 +3801,60 @@ fn validate_completion_preflight(
             return Err(anyhow!(
                 "completion '{}' at {} already exists and is not managed by crosspack",
                 desired,
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_gui_preflight(
+    layout: &PrefixLayout,
+    package_name: &str,
+    desired_gui_assets: &[GuiExposureAsset],
+    replacement_targets: &HashSet<&str>,
+) -> Result<()> {
+    let states = read_all_gui_exposure_states(layout)?;
+
+    let owned_by_self_paths = states
+        .get(package_name)
+        .map(|assets| {
+            assets
+                .iter()
+                .map(|asset| asset.rel_path.as_str())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let owned_by_replacement_paths = states
+        .iter()
+        .filter(|(owner, _)| replacement_targets.contains(owner.as_str()))
+        .flat_map(|(_, assets)| assets.iter().map(|asset| asset.rel_path.as_str()))
+        .collect::<HashSet<_>>();
+
+    for desired in desired_gui_assets {
+        for (owner, assets) in &states {
+            if owner == package_name || replacement_targets.contains(owner.as_str()) {
+                continue;
+            }
+            if assets.iter().any(|owned| owned.key == desired.key) {
+                return Err(anyhow!(
+                    "gui ownership key '{}' is already owned by package '{}'",
+                    desired.key,
+                    owner
+                ));
+            }
+        }
+
+        let path = gui_asset_path(layout, &desired.rel_path)?;
+        if path.exists()
+            && !owned_by_self_paths.contains(desired.rel_path.as_str())
+            && !owned_by_replacement_paths.contains(desired.rel_path.as_str())
+        {
+            return Err(anyhow!(
+                "gui asset '{}' at {} already exists and is not managed by crosspack",
+                desired.rel_path,
                 path.display()
             ));
         }
@@ -6254,6 +6504,151 @@ path = "rg"
     }
 
     #[test]
+    fn validate_gui_preflight_rejects_other_package_owner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_gui_exposure_state(
+            &layout,
+            "zed",
+            &[GuiExposureAsset {
+                key: "protocol:zed".to_string(),
+                rel_path: "handlers/zed--app.meta".to_string(),
+            }],
+        )
+        .expect("must seed gui ownership");
+
+        let desired = vec![GuiExposureAsset {
+            key: "protocol:zed".to_string(),
+            rel_path: "handlers/newapp.meta".to_string(),
+        }];
+
+        let err = validate_gui_preflight(&layout, "other", &desired, &HashSet::new())
+            .expect_err("must reject gui ownership conflict");
+        assert!(err.to_string().contains("already owned by package 'zed'"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_gui_preflight_rejects_unmanaged_existing_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let desired = vec![GuiExposureAsset {
+            key: "app:dev.demo.app".to_string(),
+            rel_path: "launchers/demo--app.command".to_string(),
+        }];
+
+        let unmanaged_path =
+            gui_asset_path(&layout, &desired[0].rel_path).expect("must resolve gui path");
+        fs::create_dir_all(unmanaged_path.parent().expect("must have parent"))
+            .expect("must create parent");
+        fs::write(&unmanaged_path, b"#!/bin/sh\n").expect("must write unmanaged gui file");
+
+        let err = validate_gui_preflight(&layout, "demo", &desired, &HashSet::new())
+            .expect_err("must reject unmanaged existing gui file");
+        assert!(err
+            .to_string()
+            .contains("already exists and is not managed by crosspack"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn validate_gui_preflight_allows_self_owned_existing_file() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let desired = vec![GuiExposureAsset {
+            key: "app:dev.demo.app".to_string(),
+            rel_path: "launchers/demo--app.command".to_string(),
+        }];
+
+        let managed_path =
+            gui_asset_path(&layout, &desired[0].rel_path).expect("must resolve gui path");
+        fs::create_dir_all(managed_path.parent().expect("must have parent"))
+            .expect("must create parent");
+        fs::write(&managed_path, b"#!/bin/sh\n").expect("must write managed gui file");
+        write_gui_exposure_state(&layout, "demo", &desired).expect("must seed self-owned gui file");
+
+        validate_gui_preflight(&layout, "demo", &desired, &HashSet::new())
+            .expect("self-owned gui file should be allowed");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn collect_declared_gui_assets_rejects_colliding_projected_paths() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.demo/App"
+display_name = "Demo Slash"
+exec = "demo"
+
+[[artifacts.gui_apps]]
+app_id = "dev.demo?App"
+display_name = "Demo Question"
+exec = "demo"
+"#,
+        )
+        .expect("manifest should parse");
+        let artifact = manifest
+            .artifacts
+            .first()
+            .expect("manifest should include one artifact");
+
+        let err = collect_declared_gui_assets(&manifest.name, artifact)
+            .expect_err("colliding projected gui paths must be rejected");
+        assert!(
+            err.to_string()
+                .contains("duplicate gui storage path declaration"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn collect_declared_gui_assets_allows_shared_handler_path_within_single_app() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.gui_apps]]
+app_id = "dev.demo.App"
+display_name = "Demo"
+exec = "demo"
+
+[[artifacts.gui_apps.protocols]]
+scheme = "demo"
+"#,
+        )
+        .expect("manifest should parse");
+        let artifact = manifest
+            .artifacts
+            .first()
+            .expect("manifest should include one artifact");
+
+        let assets = collect_declared_gui_assets(&manifest.name, artifact)
+            .expect("single app should allow shared handler paths");
+        assert!(!assets.is_empty());
+    }
+
+    #[test]
     fn collect_replacement_receipts_matches_manifest_rules() {
         let manifest = PackageManifest::from_toml_str(
             r#"
@@ -8356,6 +8751,123 @@ old-cc = "<2.0.0"
         assert!(lines.iter().any(|line| line.contains("receipt: ")));
     }
 
+    #[test]
+    fn install_resolved_emits_warning_when_native_gui_registration_fails() {
+        let mut outcome = sample_install_outcome();
+        outcome.warnings = vec!["native registration skipped".to_string()];
+
+        let lines = format_install_outcome_lines(&outcome, OutputStyle::Plain);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "warning: native registration skipped"),
+            "install output must include native GUI warning lines"
+        );
+    }
+
+    #[test]
+    fn upgrade_removes_stale_native_gui_records() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+        let stale_path = layout.prefix().join("stale-native.desktop");
+        fs::write(&stale_path, b"stale").expect("must seed stale native file");
+
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: stale_path.display().to_string(),
+            }],
+        )
+        .expect("must seed stale native state");
+
+        let (records, warnings) =
+            sync_native_gui_registration_state_best_effort(&layout, "demo", &install_root, &[])
+                .expect("must sync native state");
+        assert!(records.is_empty());
+        assert!(
+            read_gui_native_state(&layout, "demo")
+                .expect("must read state")
+                .is_empty(),
+            "stale native state should be cleared"
+        );
+        assert!(warnings.is_empty(), "stale cleanup should be warning-free");
+    }
+
+    #[test]
+    fn upgrade_preserves_stale_native_gui_records_when_cleanup_warns() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+
+        let stale = GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "unknown-kind".to_string(),
+            path: "/tmp/demo".to_string(),
+        };
+        write_gui_native_state(&layout, "demo", std::slice::from_ref(&stale))
+            .expect("must seed stale native state");
+
+        let (_records, warnings) =
+            sync_native_gui_registration_state_best_effort(&layout, "demo", &install_root, &[])
+                .expect("must sync native state");
+        assert!(!warnings.is_empty());
+        assert_eq!(
+            read_gui_native_state(&layout, "demo").expect("must read state"),
+            vec![stale]
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_native_gui_registrations_and_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo"), b"#!/bin/sh\n").expect("must write package binary");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        let native_path = layout.prefix().join("demo-native.desktop");
+        fs::write(&native_path, b"demo").expect("must write native registration file");
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: native_path.display().to_string(),
+            }],
+        )
+        .expect("must write native state");
+
+        run_uninstall_command(&layout, "demo".to_string()).expect("must uninstall package");
+
+        assert!(!layout.gui_native_state_path("demo").exists());
+    }
+
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
         let manifest = PackageManifest::from_toml_str(&format!(
             r#"
@@ -8391,6 +8903,9 @@ sha256 = "abc"
             receipt_path: PathBuf::from("/tmp/crosspack/state/installed/ripgrep.receipt"),
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: vec!["bash:rg".to_string()],
+            exposed_gui_assets: vec!["app:dev.ripgrep.viewer".to_string()],
+            native_gui_records: vec!["app:dev.ripgrep.viewer".to_string()],
+            warnings: Vec::new(),
         }
     }
 
