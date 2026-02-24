@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/spiritledsoftware/crosspack/compare/v0.4.0...v0.4.1) (2026-02-24)
+
+
+### Bug Fixes
+
+* **cli:** allow self-update to replace current binary ([#42](https://github.com/spiritledsoftware/crosspack/issues/42)) ([ac2a598](https://github.com/spiritledsoftware/crosspack/commit/ac2a5981387c14b540f4f17ffe1b029b97709e11))
+
 ## [0.4.0](https://github.com/spiritledsoftware/crosspack/compare/v0.3.1...v0.4.0) (2026-02-24)
 
 
