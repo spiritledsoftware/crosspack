@@ -44,18 +44,35 @@ trap 'rm -rf "$workdir"' EXIT
 release_dir="$workdir/release"
 mkdir -p "$release_dir"
 
-echo "downloading SHA256SUMS.txt from ${RELEASE_REPOSITORY}@${RELEASE_TAG}"
-gh release download "$RELEASE_TAG" \
-  --repo "$RELEASE_REPOSITORY" \
-  --pattern "SHA256SUMS.txt" \
-  --dir "$release_dir" \
-  --clobber
-
 checksums_path="$release_dir/SHA256SUMS.txt"
-if [ ! -s "$checksums_path" ]; then
-  echo "failed to download release checksum file: $checksums_path" >&2
-  exit 1
-fi
+max_wait_seconds="${SYNC_RELEASE_ASSET_MAX_WAIT_SECONDS:-1200}"
+poll_interval_seconds="${SYNC_RELEASE_ASSET_POLL_INTERVAL_SECONDS:-20}"
+deadline_seconds=$((SECONDS + max_wait_seconds))
+attempt=1
+
+echo "waiting for SHA256SUMS.txt from ${RELEASE_REPOSITORY}@${RELEASE_TAG}"
+while true; do
+  rm -f "$checksums_path"
+
+  if gh release download "$RELEASE_TAG" \
+    --repo "$RELEASE_REPOSITORY" \
+    --pattern "SHA256SUMS.txt" \
+    --dir "$release_dir" \
+    --clobber >/dev/null 2>&1 && [ -s "$checksums_path" ]; then
+    echo "downloaded SHA256SUMS.txt on attempt ${attempt}"
+    break
+  fi
+
+  if (( SECONDS >= deadline_seconds )); then
+    echo "timed out waiting for SHA256SUMS.txt for ${RELEASE_TAG} after ${max_wait_seconds}s" >&2
+    gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1 || true
+    exit 1
+  fi
+
+  echo "SHA256SUMS.txt not available yet (attempt ${attempt}); retrying in ${poll_interval_seconds}s"
+  sleep "$poll_interval_seconds"
+  attempt=$((attempt + 1))
+done
 
 declare -a targets=(
   "x86_64-unknown-linux-gnu"
