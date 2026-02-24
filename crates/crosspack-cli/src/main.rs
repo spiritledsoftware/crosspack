@@ -232,6 +232,9 @@ fn main() -> Result<()> {
                     &provider_overrides,
                 )?;
                 let receipts = read_install_receipts(&layout)?;
+                for package in &resolved {
+                    validate_install_preflight_for_resolved(&layout, package, &receipts)?;
+                }
                 let planned_changes = build_planned_package_changes(&resolved, &receipts)?;
                 let preview = build_transaction_preview("install", &planned_changes);
                 for line in
@@ -882,6 +885,9 @@ fn run_upgrade_command(
                     provider_overrides,
                 )?;
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+                for package in &resolved {
+                    validate_install_preflight_for_resolved(layout, package, &receipts)?;
+                }
                 planned_changes.extend(build_planned_package_changes(&resolved, &receipts)?);
             }
             None => {
@@ -925,6 +931,9 @@ fn run_upgrade_command(
                 enforce_disjoint_multi_target_upgrade(&overlap_check)?;
 
                 for resolved in &grouped_resolved {
+                    for package in resolved {
+                        validate_install_preflight_for_resolved(layout, package, &receipts)?;
+                    }
                     planned_changes.extend(build_planned_package_changes(resolved, &receipts)?);
                 }
             }
@@ -2760,7 +2769,19 @@ fn build_transaction_preview(
     if !transitions.is_empty() {
         risk_flags.insert("version-transitions".to_string());
     }
-    if planned.len() > 1 {
+    let mut mutating_packages = BTreeSet::new();
+    for package in planned {
+        let has_add = package.old_version.is_none();
+        let has_transition = package
+            .old_version
+            .as_ref()
+            .is_some_and(|old| old != &package.new_version);
+        let has_replacement = !package.replacement_removals.is_empty();
+        if has_add || has_transition || has_replacement {
+            mutating_packages.insert(package.name.clone());
+        }
+    }
+    if mutating_packages.len() > 1 {
         risk_flags.insert("multi-package-transaction".to_string());
     }
     if risk_flags.is_empty() {
@@ -2827,17 +2848,12 @@ fn render_transaction_preview_lines(
     lines
 }
 
-fn install_resolved(
+fn validate_install_preflight_for_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
-    dependency_receipts: &[String],
-    root_names: &[String],
-    planned_dependency_overrides: &HashMap<String, Vec<String>>,
-    snapshot_id: Option<&str>,
-    force_redownload: bool,
-) -> Result<InstallOutcome> {
-    let receipts = read_install_receipts(layout)?;
-    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, &receipts)?;
+    receipts: &[InstallReceipt],
+) -> Result<()> {
+    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, receipts)?;
     let replacement_targets = replacement_receipts
         .iter()
         .map(|receipt| receipt.name.as_str())
@@ -2855,19 +2871,40 @@ fn install_resolved(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+
     validate_binary_preflight(
         layout,
         &resolved.manifest.name,
         &exposed_bins,
-        &receipts,
+        receipts,
         &replacement_targets,
     )?;
     validate_completion_preflight(
         layout,
         &resolved.manifest.name,
         &projected_completion_paths,
-        &receipts,
+        receipts,
     )?;
+
+    Ok(())
+}
+
+fn install_resolved(
+    layout: &PrefixLayout,
+    resolved: &ResolvedInstall,
+    dependency_receipts: &[String],
+    root_names: &[String],
+    planned_dependency_overrides: &HashMap<String, Vec<String>>,
+    snapshot_id: Option<&str>,
+    force_redownload: bool,
+) -> Result<InstallOutcome> {
+    let receipts = read_install_receipts(layout)?;
+    validate_install_preflight_for_resolved(layout, resolved, &receipts)?;
+
+    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, &receipts)?;
+
+    let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
+    let declared_completions = collect_declared_completions(&resolved.artifact)?;
 
     let cache_path = layout.artifact_cache_path(
         &resolved.manifest.name,
@@ -3569,9 +3606,10 @@ mod tests {
         run_repair_command, run_rollback_command, run_uninstall_command, run_update_command,
         run_upgrade_command, select_manifest_with_pin, select_metadata_backend,
         set_transaction_status, update_failure_reason_code, validate_binary_preflight,
-        validate_completion_preflight, validate_provider_overrides_used, write_completions_script,
-        Cli, CliCompletionShell, CliRegistryKind, Commands, MetadataBackend, PlannedPackageChange,
-        PlannedRemoval, ResolvedInstall, TransactionPreviewMode,
+        validate_completion_preflight, validate_install_preflight_for_resolved,
+        validate_provider_overrides_used, write_completions_script, Cli, CliCompletionShell,
+        CliRegistryKind, Commands, MetadataBackend, PlannedPackageChange, PlannedRemoval,
+        ResolvedInstall, TransactionPreviewMode,
     };
     use clap::Parser;
     use crosspack_core::{ArchiveType, PackageManifest};
@@ -5495,6 +5533,44 @@ sha256 = "def"
     }
 
     #[test]
+    fn validate_install_preflight_for_resolved_rejects_unmanaged_bin_in_dry_run() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let existing = bin_path(&layout, "rg");
+        fs::write(&existing, b"#!/bin/sh\n").expect("must write existing file");
+
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "ripgrep"
+version = "15.1.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/ripgrep-15.1.0.tar.gz"
+sha256 = "abc"
+[[artifacts.binaries]]
+name = "rg"
+path = "rg"
+"#,
+        )
+        .expect("manifest should parse");
+        let resolved = ResolvedInstall {
+            artifact: manifest.artifacts[0].clone(),
+            manifest,
+            resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+            archive_type: ArchiveType::TarGz,
+        };
+
+        let err = validate_install_preflight_for_resolved(&layout, &resolved, &[])
+            .expect_err("dry-run preflight should reject unmanaged binary conflicts");
+        assert!(err
+            .to_string()
+            .contains("already exists and is not managed by crosspack"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn validate_binary_preflight_rejects_other_package_owner() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -6632,6 +6708,36 @@ ripgrep-legacy = "*"
             first[0],
             "transaction_preview operation=install mode=dry-run"
         );
+    }
+
+    #[test]
+    fn transaction_preview_omits_multi_package_flag_when_no_mutations() {
+        let preview = build_transaction_preview(
+            "upgrade",
+            &[
+                PlannedPackageChange {
+                    name: "a".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "1.0.0".to_string(),
+                    old_version: Some("1.0.0".to_string()),
+                    replacement_removals: Vec::new(),
+                },
+                PlannedPackageChange {
+                    name: "b".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "2.0.0".to_string(),
+                    old_version: Some("2.0.0".to_string()),
+                    replacement_removals: Vec::new(),
+                },
+            ],
+        );
+
+        let lines = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        assert_eq!(
+            lines[1],
+            "transaction_summary adds=0 removals=0 replacements=0 transitions=0"
+        );
+        assert_eq!(lines[2], "risk_flags=none");
     }
 
     #[test]
