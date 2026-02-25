@@ -2605,7 +2605,8 @@ fn stage_deb_payload(artifact_path: &Path, raw_dir: &Path) -> Result<()> {
     fs::create_dir_all(raw_dir)
         .with_context(|| format!("failed to create {}", raw_dir.display()))?;
 
-    let archive_members = list_deb_archive_members(artifact_path)?;
+    let artifact_path_absolute = resolve_absolute_artifact_path(artifact_path)?;
+    let archive_members = list_deb_archive_members(&artifact_path_absolute)?;
     let data_member = select_deb_data_payload_member(&archive_members)?;
     let extract_parent = raw_dir.parent().unwrap_or(raw_dir);
     let extract_dir = extract_parent.join(format!(
@@ -2616,7 +2617,8 @@ fn stage_deb_payload(artifact_path: &Path, raw_dir: &Path) -> Result<()> {
     fs::create_dir_all(&extract_dir)
         .with_context(|| format!("failed to create {}", extract_dir.display()))?;
 
-    let mut extract_member = build_deb_member_extract_command(artifact_path, &data_member);
+    let mut extract_member =
+        build_deb_member_extract_command(&artifact_path_absolute, &data_member);
     extract_member.current_dir(&extract_dir);
     let extract_result = run_command(
         &mut extract_member,
@@ -2810,6 +2812,16 @@ fn build_exe_extract_command(artifact_path: &Path, raw_dir: &Path) -> Command {
         .arg(format!("-o{}", raw_dir.display()))
         .arg("-y");
     command
+}
+
+fn resolve_absolute_artifact_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    let cwd = std::env::current_dir()
+        .with_context(|| "failed to resolve current working directory for artifact extraction")?;
+    Ok(cwd.join(path))
 }
 
 fn build_deb_archive_member_listing_command(artifact_path: &Path) -> Command {
@@ -4670,6 +4682,19 @@ mod tests {
             args,
             vec!["t".to_string(), artifact_path.display().to_string()]
         );
+    }
+
+    #[test]
+    fn stage_deb_resolves_relative_artifact_path_to_absolute() {
+        let relative = Path::new("fixtures/demo.deb");
+        let expected = std::env::current_dir()
+            .expect("cwd should resolve")
+            .join(relative);
+
+        let resolved = resolve_absolute_artifact_path(relative)
+            .expect("relative artifact path should resolve");
+
+        assert_eq!(resolved, expected);
     }
 
     #[test]
