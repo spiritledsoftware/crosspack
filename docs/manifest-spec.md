@@ -28,23 +28,6 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `completions` (optional): list of shell completion files exposed for this artifact.
 - `gui_apps` (optional): list of GUI application integrations exposed for this artifact.
 
-### Artifact Kind Policy
-
-- Artifact ingestion is deterministic and fail-closed.
-- Crosspack does not run vendor installer UI/execution fallback flows.
-- `msi` artifacts are staged only on Windows hosts.
-- `dmg` artifacts are staged only on macOS hosts.
-- `appimage` artifacts are staged as direct payload files and require `strip_components = 0` with no `artifact_root` override.
-
-### Native GUI Registration Policy
-
-- GUI metadata may be projected into native user-scope registration locations by platform.
-- Native registration is best-effort and warning-driven (install success does not require adapter success).
-- Known current limits:
-  - Linux refresh depends on `update-desktop-database` availability.
-  - Windows protocol/file-association registration is scoped to HKCU only.
-  - macOS registration links into `~/Applications` and best-effort refreshes LaunchServices.
-
 ## Registry Metadata Signing
 
 - Registry metadata signing is strict and enabled by default.

@@ -33,9 +33,8 @@
     - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
 14. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
 15. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
-16. Register native GUI integrations (user-scope only) as best-effort adapters; failures emit warning lines and do not fail successful install.
-17. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
-18. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+16. Remove stale previously-owned binaries, completion files, and GUI assets no longer declared for that package.
+17. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
       - set `install_reason=root` for requested roots,
       - set `install_reason=dependency` for transitive-only packages,
       - preserve existing `install_reason=root` when upgrading already-rooted packages.
@@ -112,7 +111,6 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - `exposed_bin` (repeated, optional)
 - `exposed_completion` (repeated, optional)
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
-- `state/installed/<name>.gui-native` sidecar (optional): native GUI registration records (`key`, `kind`, `path`) for deterministic cleanup.
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
@@ -130,7 +128,6 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
 - Completion collision: install fails if a projected package completion file is already owned by another package or exists unmanaged in Crosspack completion storage.
 - GUI asset collision: install fails if a projected GUI ownership key is already owned by another package or a projected GUI asset path already exists unmanaged.
-- Native GUI registration failures: install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 - Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
 

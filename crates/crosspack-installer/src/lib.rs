@@ -38,13 +38,6 @@ pub struct GuiExposureAsset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuiNativeRegistrationRecord {
-    pub key: String,
-    pub kind: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionMetadata {
     pub version: u32,
     pub txid: String,
@@ -187,11 +180,6 @@ impl PrefixLayout {
 
     pub fn gui_state_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.gui"))
-    }
-
-    pub fn gui_native_state_path(&self, name: &str) -> PathBuf {
-        self.installed_state_dir()
-            .join(format!("{name}.gui-native"))
     }
 
     pub fn transactions_dir(&self) -> PathBuf {
@@ -576,13 +564,9 @@ pub fn write_gui_exposure_state(
 
     let mut payload = String::new();
     for asset in assets {
-        if asset.key.contains('\n')
-            || asset.key.contains('\t')
-            || asset.rel_path.contains('\n')
-            || asset.rel_path.contains('\t')
-        {
+        if asset.key.contains('\n') || asset.rel_path.contains('\n') {
             return Err(anyhow!(
-                "gui exposure state values must not contain tabs or newlines"
+                "gui exposure state values must not contain newlines"
             ));
         }
         payload.push_str(&format!("asset={}\t{}\n", asset.key, asset.rel_path));
@@ -648,111 +632,6 @@ pub fn clear_gui_exposure_state(layout: &PrefixLayout, package_name: &str) -> Re
     Ok(())
 }
 
-pub fn write_gui_native_state(
-    layout: &PrefixLayout,
-    package_name: &str,
-    records: &[GuiNativeRegistrationRecord],
-) -> Result<PathBuf> {
-    let path = layout.gui_native_state_path(package_name);
-    if records.is_empty() {
-        let _ = remove_file_if_exists(&path);
-        return Ok(path);
-    }
-
-    let mut payload = String::new();
-    for record in records {
-        if record.key.contains('\n') || record.kind.contains('\n') || record.path.contains('\n') {
-            return Err(anyhow!("native gui state values must not contain newlines"));
-        }
-        payload.push_str(&format!(
-            "record={}\t{}\t{}\n",
-            record.key, record.kind, record.path
-        ));
-    }
-
-    fs::write(&path, payload.as_bytes())
-        .with_context(|| format!("failed to write native gui state: {}", path.display()))?;
-    Ok(path)
-}
-
-pub fn read_gui_native_state(
-    layout: &PrefixLayout,
-    package_name: &str,
-) -> Result<Vec<GuiNativeRegistrationRecord>> {
-    let path = layout.gui_native_state_path(package_name);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read native gui state: {}", path.display()))?;
-    parse_gui_native_state(&raw)
-        .with_context(|| format!("failed to parse native gui state: {}", path.display()))
-}
-
-pub fn read_all_gui_native_states(
-    layout: &PrefixLayout,
-) -> Result<BTreeMap<String, Vec<GuiNativeRegistrationRecord>>> {
-    let dir = layout.installed_state_dir();
-    if !dir.exists() {
-        return Ok(BTreeMap::new());
-    }
-
-    let mut states = BTreeMap::new();
-    for entry in fs::read_dir(&dir)
-        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
-    {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if !path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(".gui-native"))
-        {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
-            continue;
-        };
-
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read native gui state: {}", path.display()))?;
-        let records = parse_gui_native_state(&raw)
-            .with_context(|| format!("failed to parse native gui state: {}", path.display()))?;
-        states.insert(stem.to_string(), records);
-    }
-
-    Ok(states)
-}
-
-pub fn clear_gui_native_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
-    let path = layout.gui_native_state_path(package_name);
-    remove_file_if_exists(&path)?;
-    Ok(())
-}
-
-pub fn remove_package_native_gui_registrations_best_effort(
-    layout: &PrefixLayout,
-    package_name: &str,
-) -> Result<Vec<String>> {
-    let records = read_gui_native_state(layout, package_name)?;
-    if records.is_empty() {
-        clear_gui_native_state(layout, package_name)?;
-        return Ok(Vec::new());
-    }
-
-    let warnings = remove_native_gui_registration_best_effort(&records)?;
-    if warnings.is_empty() {
-        clear_gui_native_state(layout, package_name)?;
-    } else {
-        write_gui_native_state(layout, package_name, &records)?;
-    }
-    Ok(warnings)
-}
-
 fn parse_gui_exposure_state(raw: &str) -> Result<Vec<GuiExposureAsset>> {
     let mut assets = Vec::new();
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -772,35 +651,6 @@ fn parse_gui_exposure_state(raw: &str) -> Result<Vec<GuiExposureAsset>> {
         });
     }
     Ok(assets)
-}
-
-fn parse_gui_native_state(raw: &str) -> Result<Vec<GuiNativeRegistrationRecord>> {
-    let mut records = Vec::new();
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Some(payload) = line.strip_prefix("record=") else {
-            continue;
-        };
-        let parts = payload.splitn(3, '\t').collect::<Vec<_>>();
-        if parts.len() != 3 {
-            return Err(anyhow!("invalid native gui state row format"));
-        }
-        if parts[0].trim().is_empty() {
-            return Err(anyhow!("native gui registration key must not be empty"));
-        }
-        if parts[1].trim().is_empty() {
-            return Err(anyhow!("native gui registration kind must not be empty"));
-        }
-        if parts[2].trim().is_empty() {
-            return Err(anyhow!("native gui registration path must not be empty"));
-        }
-        records.push(GuiNativeRegistrationRecord {
-            key: parts[0].to_string(),
-            kind: parts[1].to_string(),
-            path: parts[2].to_string(),
-        });
-    }
-
-    Ok(records)
 }
 
 pub fn current_unix_timestamp() -> Result<u64> {
@@ -1170,8 +1020,6 @@ fn remove_receipt_artifacts(
         remove_exposed_gui_asset(layout, asset)?;
     }
     clear_gui_exposure_state(layout, &receipt.name)?;
-    let _native_gui_warnings =
-        remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;
 
     let receipt_path = layout.receipt_path(&receipt.name);
     fs::remove_file(&receipt_path).with_context(|| {
@@ -1617,514 +1465,55 @@ pub fn remove_exposed_gui_asset(layout: &PrefixLayout, asset: &GuiExposureAsset)
     Ok(())
 }
 
-pub fn register_native_gui_app_best_effort(
-    package_name: &str,
-    app: &ArtifactGuiApp,
-    install_root: &Path,
-) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> {
-    register_native_gui_app_best_effort_with_executor(package_name, app, install_root, run_command)
-}
-
-pub fn remove_native_gui_registration_best_effort(
-    records: &[GuiNativeRegistrationRecord],
-) -> Result<Vec<String>> {
-    remove_native_gui_registration_best_effort_with_executor(records, run_command)
-}
-
-fn register_native_gui_app_best_effort_with_executor<RunCommand>(
-    package_name: &str,
-    app: &ArtifactGuiApp,
-    install_root: &Path,
-    mut run_command_executor: RunCommand,
-) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)>
-where
-    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
-{
-    let source_rel = validated_relative_binary_path(&app.exec)
-        .with_context(|| format!("gui app '{}' exec path is invalid", app.app_id))?;
-    let source_path = install_root.join(source_rel);
-    if !source_path.exists() {
-        return Err(anyhow!(
-            "declared gui app exec path '{}' was not found in install root: {}",
-            app.exec,
-            source_path.display()
-        ));
+fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        return format!("@echo off\r\n\"{}\" %*\r\n", source_path.display());
     }
 
-    let projected_assets = projected_gui_assets(package_name, app)?;
-    let mut records = Vec::new();
-    let mut warnings = Vec::new();
-
-    if cfg!(target_os = "linux") {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            warnings.push(
-                "native GUI registration warning: HOME is not set; skipped Linux desktop registration"
-                    .to_string(),
-            );
-            return Ok((records, warnings));
-        };
-
-        let applications_dir = project_linux_user_applications_dir(&home);
-        if let Err(err) = fs::create_dir_all(&applications_dir) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to create Linux user applications dir {}: {}",
-                applications_dir.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
-        let desktop_path = applications_dir.join(native_gui_launcher_filename(package_name, app));
-        let desktop_entry = render_linux_native_desktop_entry(app, &source_path);
-        if let Err(err) = fs::write(&desktop_path, desktop_entry.as_bytes()) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to write Linux desktop entry {}: {}",
-                desktop_path.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
-        for asset in &projected_assets {
-            records.push(GuiNativeRegistrationRecord {
-                key: asset.key.clone(),
-                kind: "desktop-entry".to_string(),
-                path: desktop_path.display().to_string(),
-            });
-        }
-
-        let mut refresh = Command::new("update-desktop-database");
-        refresh.arg(&applications_dir);
-        if let Err(err) = run_command_executor(
-            &mut refresh,
-            "failed to refresh Linux desktop entry database",
-        ) {
-            warnings.push(format!("native GUI registration warning: {err}"));
-        }
-
-        return Ok((records, warnings));
-    }
-
-    if cfg!(windows) {
-        let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) else {
-            warnings.push(
-                "native GUI registration warning: APPDATA is not set; skipped Windows GUI registration"
-                    .to_string(),
-            );
-            return Ok((records, warnings));
-        };
-
-        let start_menu_dir = project_windows_start_menu_programs_dir(&appdata);
-        if let Err(err) = fs::create_dir_all(&start_menu_dir) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to create Windows Start Menu programs dir {}: {}",
-                start_menu_dir.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
-        let launcher_path = start_menu_dir.join(format!(
-            "{}.cmd",
-            normalize_gui_token(&format!("{}-{}", package_name, app.app_id))
-        ));
-        let launcher = render_gui_launcher(app, &source_path);
-        if let Err(err) = fs::write(&launcher_path, launcher.as_bytes()) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to write Windows Start Menu launcher {}: {}",
-                launcher_path.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
-        for asset in projected_assets
+    #[cfg(target_os = "linux")]
+    {
+        let mut mime_entries = app
+            .file_associations
             .iter()
-            .filter(|asset| asset.key.starts_with("app:"))
-        {
-            records.push(GuiNativeRegistrationRecord {
-                key: asset.key.clone(),
-                kind: "start-menu-launcher".to_string(),
-                path: launcher_path.display().to_string(),
-            });
-        }
-
-        let open_command = format!("\"{}\" \"%1\"", source_path.display());
-        for protocol in &app.protocols {
-            let scheme = normalized_protocol_scheme(&protocol.scheme)?;
-            let key_path = format!(r"HKCU\Software\Classes\{scheme}");
-            let mut register_scheme = Command::new("reg");
-            register_scheme
-                .arg("add")
-                .arg(&key_path)
-                .arg("/ve")
-                .arg("/d")
-                .arg(format!("URL:{}", app.display_name.trim()))
-                .arg("/f");
-            if let Err(err) = run_command_executor(
-                &mut register_scheme,
-                "failed to register Windows protocol class",
-            ) {
-                warnings.push(format!("native GUI registration warning: {err}"));
-            }
-
-            let mut protocol_marker = Command::new("reg");
-            protocol_marker
-                .arg("add")
-                .arg(&key_path)
-                .arg("/v")
-                .arg("URL Protocol")
-                .arg("/d")
-                .arg("")
-                .arg("/f");
-            if let Err(err) = run_command_executor(
-                &mut protocol_marker,
-                "failed to set Windows protocol marker",
-            ) {
-                warnings.push(format!("native GUI registration warning: {err}"));
-            }
-
-            let mut open_key = Command::new("reg");
-            open_key
-                .arg("add")
-                .arg(format!(r"{key_path}\shell\open\command"))
-                .arg("/ve")
-                .arg("/d")
-                .arg(&open_command)
-                .arg("/f");
-            if let Err(err) = run_command_executor(
-                &mut open_key,
-                "failed to register Windows protocol open command",
-            ) {
-                warnings.push(format!("native GUI registration warning: {err}"));
-            }
-
-            records.push(GuiNativeRegistrationRecord {
-                key: format!("protocol:{scheme}"),
-                kind: "registry-key".to_string(),
-                path: key_path,
-            });
-        }
-
-        for association in &app.file_associations {
-            for extension in &association.extensions {
-                let normalized = normalized_extension(extension)?;
-                let ext_key = format!(r"HKCU\Software\Classes\{normalized}");
-                let class_key = format!(
-                    r"HKCU\Software\Classes\Crosspack.{}.{}.file",
-                    normalize_gui_token(package_name),
-                    normalize_gui_token(&app.app_id)
-                );
-
-                let mut map_extension = Command::new("reg");
-                map_extension
-                    .arg("add")
-                    .arg(&ext_key)
-                    .arg("/ve")
-                    .arg("/d")
-                    .arg(class_key.clone())
-                    .arg("/f");
-                if let Err(err) = run_command_executor(
-                    &mut map_extension,
-                    "failed to register Windows file extension mapping",
-                ) {
-                    warnings.push(format!("native GUI registration warning: {err}"));
-                }
-
-                let mut class_open = Command::new("reg");
-                class_open
-                    .arg("add")
-                    .arg(format!(r"{class_key}\shell\open\command"))
-                    .arg("/ve")
-                    .arg("/d")
-                    .arg(&open_command)
-                    .arg("/f");
-                if let Err(err) = run_command_executor(
-                    &mut class_open,
-                    "failed to register Windows file extension open command",
-                ) {
-                    warnings.push(format!("native GUI registration warning: {err}"));
-                }
-
-                records.push(GuiNativeRegistrationRecord {
-                    key: format!("extension:{normalized}"),
-                    kind: "registry-key".to_string(),
-                    path: ext_key,
-                });
-                records.push(GuiNativeRegistrationRecord {
-                    key: format!("mime:{}", association.mime_type.trim().to_ascii_lowercase()),
-                    kind: "registry-key".to_string(),
-                    path: class_key,
-                });
-            }
-        }
-
-        return Ok((records, warnings));
-    }
-
-    if cfg!(target_os = "macos") {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            warnings.push(
-                "native GUI registration warning: HOME is not set; skipped macOS GUI registration"
-                    .to_string(),
-            );
-            return Ok((records, warnings));
-        };
-
-        let applications_dir = project_macos_user_applications_dir(&home);
-        if let Err(err) = fs::create_dir_all(&applications_dir) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to create macOS user applications dir {}: {}",
-                applications_dir.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
-        let app_name = source_path
-            .file_name()
-            .ok_or_else(|| anyhow!("gui app '{}' has invalid executable path", app.app_id))?;
-        let link_path = applications_dir.join(app_name);
-
-        if link_path.exists() {
-            let remove_result = match fs::symlink_metadata(&link_path) {
-                Ok(metadata) => {
-                    if metadata.is_dir() {
-                        fs::remove_dir(&link_path)
-                    } else {
-                        fs::remove_file(&link_path)
-                    }
-                }
-                Err(err) => Err(err),
-            };
-            if let Err(err) = remove_result {
-                warnings.push(format!(
-                    "native GUI registration warning: failed to replace existing macOS application link {}: {}",
-                    link_path.display(),
-                    err
-                ));
-                return Ok((records, warnings));
-            }
-        }
-
-        #[cfg(unix)]
-        if let Err(err) = std::os::unix::fs::symlink(&source_path, &link_path) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to create macOS application symlink {} -> {}: {}",
-                link_path.display(),
-                source_path.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
-        for asset in &projected_assets {
-            records.push(GuiNativeRegistrationRecord {
-                key: asset.key.clone(),
-                kind: "applications-symlink".to_string(),
-                path: link_path.display().to_string(),
-            });
-        }
-
-        let mut refresh = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister");
-        refresh.arg("-f").arg(&link_path);
-        if let Err(err) = run_command_executor(
-            &mut refresh,
-            "failed to refresh macOS LaunchServices registry",
-        ) {
-            warnings.push(format!("native GUI registration warning: {err}"));
-        }
-
-        return Ok((records, warnings));
-    }
-
-    warnings.push("native GUI registration warning: host platform is not supported".to_string());
-    Ok((records, warnings))
-}
-
-fn remove_native_gui_registration_best_effort_with_executor<RunCommand>(
-    records: &[GuiNativeRegistrationRecord],
-    mut run_command_executor: RunCommand,
-) -> Result<Vec<String>>
-where
-    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
-{
-    let mut warnings = Vec::new();
-    let mut removed_files = HashSet::new();
-
-    for record in records {
-        match record.kind.as_str() {
-            "desktop-entry" | "start-menu-launcher" | "applications-symlink" => {
-                let path = PathBuf::from(&record.path);
-                if !removed_files.insert(path.clone()) {
-                    continue;
-                }
-                let remove_result = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => {
-                        if metadata.is_dir() {
-                            fs::remove_dir(&path)
-                        } else {
-                            fs::remove_file(&path)
-                        }
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(err) => Err(err),
-                };
-                if let Err(err) = remove_result {
-                    warnings.push(format!(
-                        "native GUI deregistration warning: failed to remove '{}': {}",
-                        path.display(),
-                        err
-                    ));
-                }
-            }
-            "registry-key" => {
-                if !cfg!(windows) {
-                    warnings.push(format!(
-                        "native GUI deregistration warning: skipped Windows registry cleanup '{}' on non-Windows host",
-                        record.path
-                    ));
-                    continue;
-                }
-
-                let mut command = Command::new("reg");
-                command.arg("delete").arg(&record.path).arg("/f");
-                if let Err(err) =
-                    run_command_executor(&mut command, "failed to remove Windows registry key")
-                {
-                    warnings.push(format!("native GUI deregistration warning: {err}"));
-                }
-            }
-            other => warnings.push(format!(
-                "native GUI deregistration warning: unsupported registration kind '{}' for key '{}'",
-                other, record.key
-            )),
-        }
-    }
-
-    Ok(warnings)
-}
-
-fn project_linux_user_applications_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("share").join("applications")
-}
-
-fn project_windows_start_menu_programs_dir(appdata: &Path) -> PathBuf {
-    appdata
-        .join("Microsoft")
-        .join("Windows")
-        .join("Start Menu")
-        .join("Programs")
-}
-
-fn project_macos_user_applications_dir(home: &Path) -> PathBuf {
-    home.join("Applications")
-}
-
-fn native_gui_launcher_filename(package_name: &str, app: &ArtifactGuiApp) -> String {
-    format!(
-        "{}--{}.desktop",
-        normalize_gui_token(package_name),
-        normalize_gui_token(&app.app_id)
-    )
-}
-
-fn render_linux_native_desktop_entry(app: &ArtifactGuiApp, source_path: &Path) -> String {
-    let mut mime_entries = app
-        .file_associations
-        .iter()
-        .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    mime_entries.extend(app.protocols.iter().map(|protocol| {
-        format!(
-            "x-scheme-handler/{}",
-            sanitize_desktop_list_token(&protocol.scheme)
-        )
-    }));
-
-    let mut desktop = String::new();
-    desktop.push_str("[Desktop Entry]\n");
-    desktop.push_str("Type=Application\n");
-    desktop.push_str(&format!(
-        "Name={}\n",
-        sanitize_gui_metadata_value(&app.display_name)
-    ));
-    desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
-    if let Some(icon) = &app.icon {
-        desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
-    }
-    if !app.categories.is_empty() {
-        let categories = app
-            .categories
-            .iter()
-            .map(|category| sanitize_desktop_list_token(category))
-            .filter(|category| !category.is_empty())
+            .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
+            .filter(|entry| !entry.is_empty())
             .collect::<Vec<_>>();
-        if !categories.is_empty() {
-            desktop.push_str(&format!("Categories={};\n", categories.join(";")));
+        mime_entries.extend(app.protocols.iter().map(|protocol| {
+            format!(
+                "x-scheme-handler/{}",
+                sanitize_desktop_list_token(&protocol.scheme)
+            )
+        }));
+
+        let mut desktop = String::new();
+        desktop.push_str("[Desktop Entry]\n");
+        desktop.push_str("Type=Application\n");
+        desktop.push_str(&format!(
+            "Name={}\n",
+            sanitize_gui_metadata_value(&app.display_name)
+        ));
+        desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
+        if let Some(icon) = &app.icon {
+            desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
         }
-    }
-    if !mime_entries.is_empty() {
-        desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
-    }
-    desktop
-}
-
-#[cfg(windows)]
-fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
-    format!(
-        "@echo off\r\nREM {}\r\n\"{}\" %*\r\n",
-        sanitize_gui_metadata_value(&app.display_name),
-        source_path.display()
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
-    let mut mime_entries = app
-        .file_associations
-        .iter()
-        .map(|assoc| sanitize_desktop_list_token(&assoc.mime_type))
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    mime_entries.extend(app.protocols.iter().map(|protocol| {
-        format!(
-            "x-scheme-handler/{}",
-            sanitize_desktop_list_token(&protocol.scheme)
-        )
-    }));
-
-    let mut desktop = String::new();
-    desktop.push_str("[Desktop Entry]\n");
-    desktop.push_str("Type=Application\n");
-    desktop.push_str(&format!(
-        "Name={}\n",
-        sanitize_gui_metadata_value(&app.display_name)
-    ));
-    desktop.push_str(&format!("Exec=\"{}\" %U\n", source_path.display()));
-    if let Some(icon) = &app.icon {
-        desktop.push_str(&format!("Icon={}\n", sanitize_gui_metadata_value(icon)));
-    }
-    if !app.categories.is_empty() {
-        let categories = app
-            .categories
-            .iter()
-            .map(|category| sanitize_desktop_list_token(category))
-            .filter(|category| !category.is_empty())
-            .collect::<Vec<_>>();
-        if !categories.is_empty() {
-            desktop.push_str(&format!("Categories={};\n", categories.join(";")));
+        if !app.categories.is_empty() {
+            let categories = app
+                .categories
+                .iter()
+                .map(|category| sanitize_desktop_list_token(category))
+                .filter(|category| !category.is_empty())
+                .collect::<Vec<_>>();
+            if !categories.is_empty() {
+                desktop.push_str(&format!("Categories={};\n", categories.join(";")));
+            }
         }
+        if !mime_entries.is_empty() {
+            desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
+        }
+        return desktop;
     }
-    if !mime_entries.is_empty() {
-        desktop.push_str(&format!("MimeType={};\n", mime_entries.join(";")));
-    }
-    desktop
-}
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
-fn render_gui_launcher(app: &ArtifactGuiApp, source_path: &Path) -> String {
     #[cfg(target_os = "macos")]
     {
         if source_path
@@ -2238,11 +1627,6 @@ fn sanitize_desktop_list_token(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn sanitize_desktop_list_token(value: &str) -> String {
-    sanitize_gui_metadata_value(value)
 }
 
 fn validated_relative_gui_storage_path(path: &str) -> Result<&Path> {
@@ -3354,172 +2738,6 @@ mod tests {
     }
 
     #[test]
-    fn native_gui_state_round_trip() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-
-        let records = vec![
-            GuiNativeRegistrationRecord {
-                key: "app:dev.zed.zed".to_string(),
-                kind: "desktop-entry".to_string(),
-                path: "/tmp/dev.zed.zed.desktop".to_string(),
-            },
-            GuiNativeRegistrationRecord {
-                key: "protocol:zed".to_string(),
-                kind: "protocol-handler".to_string(),
-                path: "HKCU\\Software\\Classes\\zed".to_string(),
-            },
-        ];
-
-        write_gui_native_state(&layout, "zed", &records).expect("must write native gui state");
-        let loaded = read_gui_native_state(&layout, "zed").expect("must read native gui state");
-        assert_eq!(loaded, records);
-    }
-
-    #[test]
-    fn native_gui_state_read_missing_returns_empty() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-
-        let records = read_gui_native_state(&layout, "missing").expect("must read missing state");
-        assert!(records.is_empty());
-    }
-
-    #[test]
-    fn native_gui_state_clear_removes_state_file() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-
-        write_gui_native_state(
-            &layout,
-            "zed",
-            &[GuiNativeRegistrationRecord {
-                key: "app:dev.zed.zed".to_string(),
-                kind: "desktop-entry".to_string(),
-                path: "/tmp/dev.zed.zed.desktop".to_string(),
-            }],
-        )
-        .expect("must write native gui state");
-        clear_gui_native_state(&layout, "zed").expect("must clear native gui state");
-
-        assert!(!layout.gui_native_state_path("zed").exists());
-    }
-
-    #[test]
-    fn write_gui_exposure_state_rejects_tab_delimiter_characters() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-
-        let err = write_gui_exposure_state(
-            &layout,
-            "demo",
-            &[GuiExposureAsset {
-                key: "app:demo\tbad".to_string(),
-                rel_path: "launchers/demo.command".to_string(),
-            }],
-        )
-        .expect_err("tab-delimited values should be rejected");
-        assert!(
-            err.to_string().contains("must not contain"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn register_native_gui_linux_projects_user_desktop_path() {
-        let home = Path::new("/home/tester");
-        assert_eq!(
-            project_linux_user_applications_dir(home),
-            PathBuf::from("/home/tester/.local/share/applications")
-        );
-    }
-
-    #[test]
-    fn register_native_gui_windows_projects_start_menu_path() {
-        let appdata = Path::new(r"C:\Users\tester\AppData\Roaming");
-        assert_eq!(
-            project_windows_start_menu_programs_dir(appdata),
-            PathBuf::from(r"C:\Users\tester\AppData\Roaming")
-                .join("Microsoft")
-                .join("Windows")
-                .join("Start Menu")
-                .join("Programs")
-        );
-    }
-
-    #[test]
-    fn register_native_gui_macos_projects_user_applications_path() {
-        let home = Path::new("/Users/tester");
-        assert_eq!(
-            project_macos_user_applications_dir(home),
-            PathBuf::from("/Users/tester/Applications")
-        );
-    }
-
-    #[test]
-    fn register_native_gui_returns_warnings_without_error_on_command_failure() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let install_root = layout.package_dir("demo", "1.0.0");
-        fs::create_dir_all(&install_root).expect("must create install root");
-        fs::write(install_root.join("demo"), b"#!/bin/sh\n").expect("must write executable");
-
-        let app = ArtifactGuiApp {
-            app_id: "dev.demo.App".to_string(),
-            display_name: "Demo".to_string(),
-            exec: "demo".to_string(),
-            icon: None,
-            categories: vec!["Utility".to_string()],
-            file_associations: Vec::new(),
-            protocols: vec![crosspack_core::ArtifactGuiProtocol {
-                scheme: "demo".to_string(),
-            }],
-        };
-
-        let (_records, warnings) = register_native_gui_app_best_effort_with_executor(
-            "demo",
-            &app,
-            &install_root,
-            |_command, _context| Err(anyhow!("simulated command failure")),
-        )
-        .expect("command failures should become warnings");
-
-        assert!(
-            !warnings.is_empty(),
-            "native registration failures should produce warning output"
-        );
-        assert!(
-            warnings.iter().any(|warning| {
-                warning.contains("simulated command failure")
-                    || warning.contains("native GUI registration warning")
-            }),
-            "expected command-failure or adapter warning line"
-        );
-    }
-
-    #[test]
-    fn remove_package_native_gui_registrations_preserves_state_when_cleanup_warns() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-
-        write_gui_native_state(
-            &layout,
-            "demo",
-            &[GuiNativeRegistrationRecord {
-                key: "app:demo".to_string(),
-                kind: "unknown-kind".to_string(),
-                path: "/tmp/demo".to_string(),
-            }],
-        )
-        .expect("must seed native state");
-
-        let warnings = remove_package_native_gui_registrations_best_effort(&layout, "demo")
-            .expect("must remove native registrations");
-        assert!(!warnings.is_empty());
-        assert!(layout.gui_native_state_path("demo").exists());
-    }
-
-    #[test]
     fn strip_components_behavior() {
         let p = Path::new("top/inner/bin/tool");
         assert_eq!(
@@ -3775,18 +2993,6 @@ mod tests {
             }],
         )
         .expect("must write gui state");
-        let native_launcher = layout.prefix().join("native-demo.desktop");
-        fs::write(&native_launcher, b"[Desktop Entry]\n").expect("must write native launcher");
-        write_gui_native_state(
-            &layout,
-            "demo",
-            &[GuiNativeRegistrationRecord {
-                key: "app:demo".to_string(),
-                kind: "desktop-entry".to_string(),
-                path: native_launcher.display().to_string(),
-            }],
-        )
-        .expect("must write native gui state");
 
         write_install_receipt(
             &layout,
@@ -3815,9 +3021,7 @@ mod tests {
         assert!(!package_dir.exists());
         assert!(!completion_path.exists());
         assert!(!gui_path.exists());
-        assert!(!native_launcher.exists());
         assert!(!layout.gui_state_path("demo").exists());
-        assert!(!layout.gui_native_state_path("demo").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }

@@ -26,6 +26,12 @@ use crosspack_installer::{
     update_transaction_status, write_gui_exposure_state, write_gui_native_state,
     write_install_receipt, write_pin, write_transaction_metadata, GuiExposureAsset,
     GuiNativeRegistrationRecord, InstallReason, InstallReceipt, PrefixLayout,
+    read_install_receipts, read_transaction_metadata, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_file_if_exists,
+    set_active_transaction, uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots,
+    uninstall_package, uninstall_package_with_dependency_overrides_and_ignored_roots,
+    update_transaction_status, write_gui_exposure_state, write_install_receipt, write_pin,
+    write_transaction_metadata, GuiExposureAsset, InstallReason, InstallReceipt, PrefixLayout,
     TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
@@ -2734,8 +2740,6 @@ struct InstallOutcome {
     exposed_bins: Vec<String>,
     exposed_completions: Vec<String>,
     exposed_gui_assets: Vec<String>,
-    native_gui_records: Vec<String>,
-    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -3497,13 +3501,6 @@ fn install_resolved(
     }
     write_gui_exposure_state(layout, &resolved.manifest.name, &exposed_gui_assets)?;
 
-    let (native_gui_records, native_gui_warnings) = sync_native_gui_registration_state_best_effort(
-        layout,
-        &resolved.manifest.name,
-        &install_root,
-        &declared_gui_apps,
-    )?;
-
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
         version: resolved.manifest.version.to_string(),
@@ -3542,11 +3539,6 @@ fn install_resolved(
             .iter()
             .map(|asset| asset.key.clone())
             .collect(),
-        native_gui_records: native_gui_records
-            .iter()
-            .map(|record| record.key.clone())
-            .collect(),
-        warnings: native_gui_warnings,
     })
 }
 
@@ -3611,23 +3603,6 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
                 "exposed_gui_assets: {}",
                 outcome.exposed_gui_assets.join(", ")
             ),
-        ));
-    }
-    if !outcome.native_gui_records.is_empty() {
-        lines.push(render_status_line(
-            style,
-            "step",
-            &format!(
-                "native_gui_records: {}",
-                outcome.native_gui_records.join(", ")
-            ),
-        ));
-    }
-    for warning in &outcome.warnings {
-        lines.push(render_status_line(
-            style,
-            "warn",
-            &format!("warning: {warning}"),
         ));
     }
     lines.push(render_status_line(
@@ -3712,27 +3687,8 @@ fn collect_declared_gui_assets(
     let declared_apps = collect_declared_gui_apps(artifact)?;
     let mut assets = Vec::new();
     let mut seen_keys = HashSet::new();
-    let mut seen_paths = HashMap::new();
     for app in &declared_apps {
         let projected = projected_gui_assets(package_name, app)?;
-        let projected_paths = projected
-            .iter()
-            .map(|asset| asset.rel_path.clone())
-            .collect::<HashSet<_>>();
-        for rel_path in projected_paths {
-            if let Some(existing_app_id) =
-                seen_paths.insert(rel_path.clone(), app.app_id.trim().to_ascii_lowercase())
-            {
-                return Err(anyhow!(
-                    "duplicate gui storage path declaration '{}' for package '{}' target '{}'; app '{}' collides with app '{}'",
-                    rel_path,
-                    package_name,
-                    artifact.target,
-                    app.app_id,
-                    existing_app_id
-                ));
-            }
-        }
         for asset in projected {
             if !seen_keys.insert(asset.key.clone()) {
                 return Err(anyhow!(
@@ -6579,76 +6535,6 @@ path = "rg"
     }
 
     #[test]
-    fn collect_declared_gui_assets_rejects_colliding_projected_paths() {
-        let manifest = PackageManifest::from_toml_str(
-            r#"
-name = "demo"
-version = "1.0.0"
-
-[[artifacts]]
-target = "x86_64-unknown-linux-gnu"
-url = "https://example.test/demo.tar.gz"
-sha256 = "abc123"
-
-[[artifacts.gui_apps]]
-app_id = "dev.demo/App"
-display_name = "Demo Slash"
-exec = "demo"
-
-[[artifacts.gui_apps]]
-app_id = "dev.demo?App"
-display_name = "Demo Question"
-exec = "demo"
-"#,
-        )
-        .expect("manifest should parse");
-        let artifact = manifest
-            .artifacts
-            .first()
-            .expect("manifest should include one artifact");
-
-        let err = collect_declared_gui_assets(&manifest.name, artifact)
-            .expect_err("colliding projected gui paths must be rejected");
-        assert!(
-            err.to_string()
-                .contains("duplicate gui storage path declaration"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn collect_declared_gui_assets_allows_shared_handler_path_within_single_app() {
-        let manifest = PackageManifest::from_toml_str(
-            r#"
-name = "demo"
-version = "1.0.0"
-
-[[artifacts]]
-target = "x86_64-unknown-linux-gnu"
-url = "https://example.test/demo.tar.gz"
-sha256 = "abc123"
-
-[[artifacts.gui_apps]]
-app_id = "dev.demo.App"
-display_name = "Demo"
-exec = "demo"
-
-[[artifacts.gui_apps.protocols]]
-scheme = "demo"
-"#,
-        )
-        .expect("manifest should parse");
-        let artifact = manifest
-            .artifacts
-            .first()
-            .expect("manifest should include one artifact");
-
-        let assets = collect_declared_gui_assets(&manifest.name, artifact)
-            .expect("single app should allow shared handler paths");
-        assert!(!assets.is_empty());
-    }
-
-    #[test]
     fn collect_replacement_receipts_matches_manifest_rules() {
         let manifest = PackageManifest::from_toml_str(
             r#"
@@ -8904,8 +8790,6 @@ sha256 = "abc"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: vec!["bash:rg".to_string()],
             exposed_gui_assets: vec!["app:dev.ripgrep.viewer".to_string()],
-            native_gui_records: vec!["app:dev.ripgrep.viewer".to_string()],
-            warnings: Vec::new(),
         }
     }
 
