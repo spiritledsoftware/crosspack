@@ -12,7 +12,6 @@ concurrency:
 jobs:
   release-please:
     name: release-please
-    if: "${{ !contains(github.event.head_commit.message, 'chore(lockfile): refresh Cargo.lock for release') }}"
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub App token
@@ -78,7 +77,18 @@ jobs:
             fi
           done
 
+      - name: Mark lockfile refresh commit state
+        id: lockfile-refresh
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.lockfile.outputs.lock_changed }}" = "true" ]; then
+            echo "did_refresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "did_refresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run release-please
+        if: ${{ steps.lockfile-refresh.outputs.did_refresh != 'true' }}
         id: release
         uses: googleapis/release-please-action@v4
         with:
