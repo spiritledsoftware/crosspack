@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.3](https://github.com/spiritledsoftware/crosspack/compare/v0.7.2...v0.7.3) (2026-02-25)
+
+
+### Bug Fixes
+
+* ci ([#60](https://github.com/spiritledsoftware/crosspack/issues/60)) ([8bce137](https://github.com/spiritledsoftware/crosspack/commit/8bce137b00efe1ce48b9e3840cf9cef9932f5435))
+
 ## [0.7.2](https://github.com/spiritledsoftware/crosspack/compare/v0.7.1...v0.7.2) (2026-02-25)
 
 
