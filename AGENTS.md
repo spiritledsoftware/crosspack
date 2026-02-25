@@ -71,3 +71,6 @@ scripts/validate-snapshot-flow.sh
 ## NOTES
 - There were no existing repo-local `AGENTS.md` files at generation time.
 - Build artifacts under `target/` dominate raw file counts; prefer `git ls-files` for source-aware structure analysis.
+
+## USER PREFERENCES
+- Write planning/design documents to `.agents/plans/` instead of `docs/plans/`.
