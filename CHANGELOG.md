@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.2](https://github.com/spiritledsoftware/crosspack/compare/v0.7.1...v0.7.2) (2026-02-25)
+
+
+### Bug Fixes
+
+* ci ([#59](https://github.com/spiritledsoftware/crosspack/issues/59)) ([14e6890](https://github.com/spiritledsoftware/crosspack/commit/14e68904e068b3be54bc6280ddcaaa5396290cd5))
+* **ci:** release workflows ([#57](https://github.com/spiritledsoftware/crosspack/issues/57)) ([2311e44](https://github.com/spiritledsoftware/crosspack/commit/2311e4437d81ad05a5e215be070030dc66f5f9b3))
+
+
+### Continuous Integration
+
+* prevent release-please run cancellation on lock refresh ([#56](https://github.com/spiritledsoftware/crosspack/issues/56)) ([a2ce2b7](https://github.com/spiritledsoftware/crosspack/commit/a2ce2b7005fe9a92606fe0f44e65318f92ccfcdf))
+* use app token for release workflow git operations ([#55](https://github.com/spiritledsoftware/crosspack/issues/55)) ([c76bc2e](https://github.com/spiritledsoftware/crosspack/commit/c76bc2ec0734daa7f7edd99a12b7eeb32cecf372))
+
 ## [0.7.1](https://github.com/spiritledsoftware/crosspack/compare/v0.7.0...v0.7.1) (2026-02-25)
 
 
