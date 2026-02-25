@@ -1852,8 +1852,8 @@ fn stage_artifact_payload(
 }
 
 fn stage_appimage_payload(
-    artifact_path: &Path,
-    raw_dir: &Path,
+    _artifact_path: &Path,
+    _raw_dir: &Path,
     strip_components: u32,
     artifact_root: Option<&str>,
 ) -> Result<()> {
@@ -1865,121 +1865,21 @@ fn stage_appimage_payload(
             "artifact_root is not supported for AppImage artifacts"
         ));
     }
-
-    fs::create_dir_all(raw_dir)
-        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
-    let staged = raw_dir.join("artifact.appimage");
-    fs::copy(artifact_path, &staged).with_context(|| {
-        format!(
-            "failed to stage AppImage payload from {} to {}",
-            artifact_path.display(),
-            staged.display()
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&staged)
-            .with_context(|| format!("failed to stat {}", staged.display()))?
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&staged, permissions)
-            .with_context(|| format!("failed to set executable mode on {}", staged.display()))?;
-    }
-
-    Ok(())
+    Err(anyhow!("AppImage artifact staging is not implemented yet"))
 }
 
 fn stage_msi_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
     if !cfg!(windows) {
         return Err(anyhow!("MSI artifacts are supported only on Windows hosts"));
     }
-    let mut command = build_msi_admin_extract_command(_artifact_path, _raw_dir);
-    run_command(
-        &mut command,
-        "failed to stage MSI artifact with administrative extraction",
-    )
+    Err(anyhow!("MSI artifact staging is not implemented yet"))
 }
 
 fn stage_dmg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
     if !cfg!(target_os = "macos") {
         return Err(anyhow!("DMG artifacts are supported only on macOS hosts"));
     }
-
-    let mount_point = _raw_dir.join(".crosspack-dmg-mount");
-    fs::create_dir_all(&mount_point)
-        .with_context(|| format!("failed to create {}", mount_point.display()))?;
-
-    let result = stage_dmg_payload_with_hooks(
-        _artifact_path,
-        _raw_dir,
-        &mount_point,
-        run_command,
-        copy_dir_recursive,
-    );
-
-    let _ = fs::remove_dir_all(&mount_point);
-    result
-}
-
-fn build_msi_admin_extract_command(artifact_path: &Path, raw_dir: &Path) -> Command {
-    let mut command = Command::new("msiexec");
-    command
-        .arg("/a")
-        .arg(artifact_path)
-        .arg("/qn")
-        .arg(format!("TARGETDIR={}", raw_dir.display()));
-    command
-}
-
-fn build_dmg_attach_command(artifact_path: &Path, mount_point: &Path) -> Command {
-    let mut command = Command::new("hdiutil");
-    command
-        .arg("attach")
-        .arg(artifact_path)
-        .arg("-readonly")
-        .arg("-nobrowse")
-        .arg("-mountpoint")
-        .arg(mount_point);
-    command
-}
-
-fn build_dmg_detach_command(mount_point: &Path) -> Command {
-    let mut command = Command::new("hdiutil");
-    command.arg("detach").arg(mount_point);
-    command
-}
-
-fn stage_dmg_payload_with_hooks<RunCommand, CopyPayload>(
-    artifact_path: &Path,
-    raw_dir: &Path,
-    mount_point: &Path,
-    mut run: RunCommand,
-    mut copy_payload: CopyPayload,
-) -> Result<()>
-where
-    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
-    CopyPayload: FnMut(&Path, &Path) -> Result<()>,
-{
-    let mut attach_command = build_dmg_attach_command(artifact_path, mount_point);
-    run(&mut attach_command, "failed to attach DMG artifact")?;
-
-    let copy_result = copy_payload(mount_point, raw_dir);
-
-    let mut detach_command = build_dmg_detach_command(mount_point);
-    let detach_result = run(&mut detach_command, "failed to detach DMG mount");
-
-    match (copy_result, detach_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(copy_err), Ok(())) => Err(copy_err),
-        (Ok(()), Err(detach_err)) => Err(detach_err),
-        (Err(copy_err), Err(detach_err)) => Err(anyhow!(
-            "failed to copy mounted DMG payload: {copy_err}; additionally failed to detach mount {}: {detach_err}",
-            mount_point.display()
-        )),
-    }
+    Err(anyhow!("DMG artifact staging is not implemented yet"))
 }
 
 fn extract_tar(archive_path: &Path, dst: &Path) -> Result<()> {
@@ -2830,140 +2730,6 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(layout.prefix());
-    }
-
-    #[test]
-    fn stage_appimage_copies_payload_into_raw_dir() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let artifact_path = layout.prefix().join("demo.AppImage");
-        fs::write(&artifact_path, b"appimage payload").expect("must write artifact");
-        let raw_dir = layout.prefix().join("raw");
-        fs::create_dir_all(&raw_dir).expect("must create raw dir");
-
-        stage_appimage_payload(&artifact_path, &raw_dir, 0, None)
-            .expect("must stage appimage payload");
-
-        let staged = raw_dir.join("artifact.appimage");
-        assert!(staged.exists(), "staged payload should exist");
-        assert_eq!(
-            fs::read(&staged).expect("must read staged payload"),
-            b"appimage payload"
-        );
-
-        let _ = fs::remove_dir_all(layout.prefix());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stage_appimage_sets_executable_permissions_on_unix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let artifact_path = layout.prefix().join("demo.AppImage");
-        fs::write(&artifact_path, b"appimage payload").expect("must write artifact");
-        let raw_dir = layout.prefix().join("raw");
-        fs::create_dir_all(&raw_dir).expect("must create raw dir");
-
-        stage_appimage_payload(&artifact_path, &raw_dir, 0, None)
-            .expect("must stage appimage payload");
-
-        let mode = fs::metadata(raw_dir.join("artifact.appimage"))
-            .expect("must stat staged payload")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o755);
-
-        let _ = fs::remove_dir_all(layout.prefix());
-    }
-
-    #[test]
-    fn stage_msi_builds_admin_extract_command() {
-        let artifact_path = Path::new("/tmp/demo.msi");
-        let raw_dir = Path::new("/tmp/raw");
-        let command = build_msi_admin_extract_command(artifact_path, raw_dir);
-
-        assert_eq!(command.get_program(), "msiexec");
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            args,
-            vec![
-                "/a".to_string(),
-                artifact_path.display().to_string(),
-                "/qn".to_string(),
-                format!("TARGETDIR={}", raw_dir.display())
-            ]
-        );
-    }
-
-    #[test]
-    fn stage_dmg_attach_and_detach_command_shapes_are_stable() {
-        let artifact_path = Path::new("/tmp/demo.dmg");
-        let mount_point = Path::new("/tmp/mount-point");
-
-        let attach = build_dmg_attach_command(artifact_path, mount_point);
-        assert_eq!(attach.get_program(), "hdiutil");
-        let attach_args = attach
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            attach_args,
-            vec![
-                "attach".to_string(),
-                artifact_path.display().to_string(),
-                "-readonly".to_string(),
-                "-nobrowse".to_string(),
-                "-mountpoint".to_string(),
-                mount_point.display().to_string(),
-            ]
-        );
-
-        let detach = build_dmg_detach_command(mount_point);
-        assert_eq!(detach.get_program(), "hdiutil");
-        let detach_args = detach
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            detach_args,
-            vec!["detach".to_string(), mount_point.display().to_string()]
-        );
-    }
-
-    #[test]
-    fn stage_dmg_detach_runs_on_copy_failure() {
-        let artifact_path = Path::new("/tmp/demo.dmg");
-        let raw_dir = Path::new("/tmp/raw");
-        let mount_point = Path::new("/tmp/mount-point");
-        let mut command_invocations = Vec::new();
-
-        let err = stage_dmg_payload_with_hooks(
-            artifact_path,
-            raw_dir,
-            mount_point,
-            |command, _context| {
-                let mut invocation = command.get_program().to_string_lossy().into_owned();
-                for arg in command.get_args() {
-                    invocation.push(' ');
-                    invocation.push_str(arg.to_string_lossy().as_ref());
-                }
-                command_invocations.push(invocation);
-                Ok(())
-            },
-            |_mounted, _dst| Err(anyhow!("simulated copy failure")),
-        )
-        .expect_err("copy failure should propagate");
-
-        assert!(err.to_string().contains("simulated copy failure"));
-        assert_eq!(command_invocations.len(), 2, "attach + detach must run");
-        assert!(command_invocations[0].starts_with("hdiutil attach "));
-        assert!(command_invocations[1].starts_with("hdiutil detach "));
     }
 
     #[test]
