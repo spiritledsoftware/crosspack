@@ -31,64 +31,10 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Refresh Cargo.lock
-        run: |
-          set -euo pipefail
-          cargo update --workspace
-
-      - name: Validate Cargo.lock
-        run: |
-          set -euo pipefail
-          cargo check --workspace --locked
-
-      - name: Detect lockfile changes
-        id: lockfile
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- Cargo.lock; then
-            echo "lock_changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "lock_changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Commit refreshed Cargo.lock
-        if: ${{ steps.lockfile.outputs.lock_changed == 'true' }}
-        run: |
-          set -euo pipefail
-          git config user.name "crosspack-bot"
-          git config user.email "crosspack-bot@users.noreply.github.com"
-          git add Cargo.lock
-          git commit -m "chore(lockfile): refresh Cargo.lock for release"
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              exit 0
-            fi
-
-            if [ "$attempt" -eq 3 ]; then
-              echo "failed to push lockfile refresh commit after retries" >&2
-              exit 1
-            fi
-
-            git fetch origin main
-            if ! git rebase origin/main; then
-              git rebase --abort || true
-              echo "failed to rebase lockfile refresh commit onto latest main" >&2
-              exit 1
-            fi
-          done
-
-      - name: Mark lockfile refresh commit state
-        id: lockfile-refresh
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.lockfile.outputs.lock_changed }}" = "true" ]; then
-            echo "did_refresh=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "did_refresh=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Run release-please
-        if: ${{ steps.lockfile-refresh.outputs.did_refresh != 'true' }}
         id: release
         uses: googleapis/release-please-action@v4
         with:
