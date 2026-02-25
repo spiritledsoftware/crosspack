@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-cli"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "semver",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-installer"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-registry"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-resolver"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-security"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -374,9 +374,9 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "libc"
-version = "0.2.181"
+version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "459427e2af2b9c839b132acb702a1c654d95e10f8c326bfc2ad11310e458b1c5"
+checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
 name = "memchr"
@@ -542,9 +542,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.115"
+version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e614ed320ac28113fa64972c4262d5dbc89deacdfd00c34a3e4cea073243c12"
+checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -598,9 +598,9 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.23"
+version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "537dd038a89878be9b64dd4bd1b260315c1bb94f4d784956b81e27a088d9a09e"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "utf8parse"
