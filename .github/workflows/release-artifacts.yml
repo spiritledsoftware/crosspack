@@ -15,8 +15,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-artifacts-${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  cancel-in-progress: false
+
 env:
   RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  CHECKOUT_REF: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.release_tag) }}
 
 jobs:
   build:
@@ -51,6 +56,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
