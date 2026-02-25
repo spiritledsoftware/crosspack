@@ -30,7 +30,7 @@ Default user prefixes:
 1. Search and inspect package metadata from configured verified source snapshots, or from `--registry-root` when explicitly overridden.
 2. Resolve dependencies using semver constraints.
 3. Download and verify artifacts. (implemented for direct package install)
-4. Stage/extract to versioned package paths with deterministic, extraction-only artifact-kind adapters (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `deb`, `rpm`, `msix`, `appx`) and no vendor-installer fallback.
+4. Stage/extract to versioned package paths with deterministic adapters; defaults are managed mode for `zip`, `tar.gz`, `tar.zst`, `dmg`, `appimage` and native mode for `pkg`, `exe`, `msi`, `msix`, `appx`.
 5. Expose binaries through symlinks (Unix) or shims (Windows).
 6. Expose completion and GUI application assets under the managed prefix.
 7. Record install state for upgrades and uninstalls.
@@ -61,21 +61,31 @@ Default user prefixes:
   - `--target <triple>` to override host target selection.
   - `--dry-run` to print deterministic transaction preview lines (`transaction_summary`, `risk_flags`, ordered `change_*`) without mutation.
   - `--force-redownload` to bypass artifact cache.
+- Artifact-kind mode defaults are fail-closed: managed (`zip`, `tar.gz`, `tar.zst`, `dmg`, `appimage`) and native (`pkg`, `exe`, `msi`, `msix`, `appx`).
 - Artifact-kind host constraints are fail-closed:
-  - Windows-only kinds: `exe`, `msi`, `msix`, `appx`,
-  - macOS-only kinds: `dmg`, `pkg`,
-  - Linux-only kinds: `appimage`, `deb`, `rpm`.
+  - Windows-only native kinds: `exe`, `msi`, `msix`, `appx`,
+  - macOS-only native kind: `pkg`,
+  - macOS-only managed kind: `dmg`,
+  - Linux-only managed kind: `appimage`.
+- Pre-1.0 scope reset: `deb` and `rpm` are no longer supported artifact kinds.
 - Installer/package formats are extraction-only; Crosspack does not execute vendor installer UI fallback paths.
-- Package maintainer scripts are not executed for `deb`, `rpm`, or `pkg`; script-dependent installs fail closed.
+- `pkg` maintainer scripts are not executed; script-dependent installs fail closed.
+- Mutating commands (`install`, `upgrade`, `uninstall`, `rollback`, `repair`, `self-update`) share escalation policy flags:
+  - default (interactive): prompt + non-prompt escalation allowed,
+  - `--non-interactive`: prompt escalation disabled and non-prompt escalation disabled unless `--allow-escalation` is provided,
+  - `--non-interactive --allow-escalation`: non-prompt escalation enabled,
+  - `--no-escalation`: all escalation disabled and overrides defaults,
+  - `--allow-escalation` conflicts with `--no-escalation`.
 - Output determinism contract remains fixed for machine-oriented lines (`transaction_preview`, `transaction_summary`, `risk_flags`, ordered `change_*`, and `update summary: updated=<n> up-to-date=<n> failed=<n>`).
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - `upgrade --dry-run` performs full planning and emits the same deterministic transaction preview format without mutating install state.
 - Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
+- `install` and `upgrade` persist `install_mode` in receipts (`managed` or `native`, derived from artifact-kind defaults).
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
 - `install` and `upgrade` persist GUI asset ownership in optional `<prefix>/state/installed/<name>.gui` sidecars for deterministic stale cleanup and uninstall removal.
-- `install` and `upgrade` persist native GUI registration records in optional `<prefix>/state/installed/<name>.gui-native` sidecars.
+- `install` and `upgrade` persist native uninstall action records in optional `<prefix>/state/installed/<name>.gui-native` sidecars.
 - Native GUI registration is user-scope only and best-effort: adapter failures produce warning lines and do not fail otherwise successful installs/upgrades/uninstalls.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
@@ -83,6 +93,8 @@ Default user prefixes:
   - `rollback [txid]` replays rollback for eligible failed/incomplete transactions.
   - `repair` clears stale transaction markers and reconciles interrupted state.
   - `doctor` reports prefix paths and transaction health status.
+- Rollback snapshots capture package tree, receipt, exposed binaries, exposed completions, GUI assets, and native sidecar state.
+- Rollback replay for native package journal steps runs native uninstall actions before managed snapshot restore.
 - Successful multi-package install/upgrade receipts in one transaction share a single `snapshot_id` to preserve metadata provenance.
 - `list` reads install receipts from `<prefix>/state/installed/`.
 - `completions <bash|zsh|fish|powershell>` prints shell completion scripts for the canonical `crosspack` binary name and includes a loader block for package-declared completions.

@@ -14,22 +14,16 @@
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
 3. Select artifact for each resolved package for requested target (`--target` or host triple).
-4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `deb`, `rpm`, `msix`, `appx`.
+4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`.
+   - Pre-1.0 scope reset: `deb` and `rpm` are removed from the supported artifact contract and are rejected.
 5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
 6. Download artifact if needed (or if `--force-redownload`).
 7. Verify artifact SHA-256 against manifest `sha256`.
-8. Stage artifact payload into temporary state directory with deterministic extraction-only adapters:
-   - `zip`, `tar.gz`, `tar.zst`: extract archive payload,
-    - `appimage`: copy payload as `artifact.appimage` (requires `strip_components=0` and no `artifact_root`) on Linux hosts,
-    - `exe`: extraction-only staging on Windows hosts,
-    - `msi`: administrative extraction only on Windows hosts,
-    - `msix`/`appx`: extraction-only staging on Windows hosts,
-    - `dmg`: attach/copy/detach extraction only on macOS hosts,
-    - `pkg`: extraction-only staging on macOS hosts,
-    - `deb`/`rpm`: extraction-only staging on Linux hosts.
-   - Maintainer scripts are not executed for package formats (`deb`, `rpm`, `pkg`).
-   - Vendor installer UI/interactive execution fallback is not attempted for any installer/package format.
+8. Stage artifact payload into temporary state directory with deterministic adapters:
+   - managed mode adapters: `zip`, `tar.gz`, `tar.zst` (archive extraction), `dmg` (attach/copy/detach extraction on macOS), `appimage` (copy payload as `artifact.appimage` on Linux; requires `strip_components=0` and no `artifact_root`),
+   - native mode defaults: `pkg` on macOS, `exe`/`msi`/`msix`/`appx` on Windows,
+   - native mode still uses deterministic non-UI adapter execution; vendor installer fallback is not attempted.
 9. Apply `strip_components` during staging copy where supported.
 10. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
 11. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
@@ -42,10 +36,11 @@
 16. Register native GUI integrations (user-scope only) as best-effort adapters; failures emit warning lines and do not fail successful install.
 17. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
 18. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+      - persist `install_mode=managed|native` from artifact-kind defaults,
       - set `install_reason=root` for requested roots,
       - set `install_reason=dependency` for transitive-only packages,
       - preserve existing `install_reason=root` when upgrading already-rooted packages.
-18. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
+19. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
 `crosspack install --dry-run` executes the same planning and emits deterministic, script-friendly preview lines:
 - `transaction_preview operation=... mode=dry-run`
@@ -60,39 +55,33 @@ For non-dry-run lifecycle output, Crosspack auto-selects output mode:
 
 Machine-oriented dry-run preview lines remain unchanged regardless of output mode.
 
+## Interaction and Escalation Policy Flags
+
+Mutating commands (`install`, `upgrade`, `uninstall`, `rollback`, `repair`, `self-update`) share escalation policy flags:
+
+- default interactive behavior (no flags): prompt and non-prompt escalation paths are both allowed,
+- `--non-interactive`: prompt escalation is disabled; non-prompt escalation is also disabled unless `--allow-escalation` is set,
+- `--non-interactive --allow-escalation`: only non-prompt escalation paths are allowed,
+- `--no-escalation`: disables all escalation paths and overrides the interactive default,
+- `--allow-escalation` conflicts with `--no-escalation`.
+
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 `crosspack upgrade --dry-run` emits the same preview format and performs planning without mutation.
 
 ## Transaction Phases and Recovery (current v0.3)
 
-Crosspack executes install/upgrade mutations under a transaction state machine with persisted status markers:
+Crosspack executes install/upgrade/uninstall mutations under a transaction state machine with persisted status markers:
 
 1. `planning`: resolve graph, artifact selection, and preflight checks.
 2. `applying`: stage/extract/apply package and binary mutations.
 3. `rolling_back` (only on failure/interruption): reverse applied steps to restore a consistent prefix.
 4. `completed` or terminal failure marker after rollback attempt.
 
-Operator commands:
-- `rollback [txid]`: replay rollback for eligible interrupted/failed transactions.
-- `repair`: clear stale markers and reconcile recoverable interrupted state.
-- `doctor`: surface transaction health and prefix diagnostics.
+Rollback snapshot/replay contract (current behavior):
 
-## Planned Dependency Policy Extensions (non-GA)
-
-The following install-flow extensions are planned in `docs/dependency-policy-spec.md` and are not GA behavior yet:
-
-- provider capability selection (`provides`) with deterministic tie-breaks,
-- conflict gating (`conflicts`) during resolution/apply preflight,
-- replacement semantics (`replaces`) with ownership-aware binary handoff.
-
-## Transaction Phases and Recovery (current v0.3)
-
-Crosspack executes install/upgrade mutations under a transaction state machine with persisted status markers:
-
-1. `planning`: resolve graph, artifact selection, and preflight checks.
-2. `applying`: stage/extract/apply package and binary mutations.
-3. `rolling_back` (only on failure/interruption): reverse applied steps to restore a consistent prefix.
-4. `completed` or terminal failure marker after rollback attempt.
+- per-package snapshots include package tree, receipt, exposed binaries, exposed package completions, exposed GUI assets, and optional native sidecar state,
+- rollback replays compensating package steps in reverse journal order, including native step names (`install_native_package:<name>`, `upgrade_native_package:<name>`),
+- native uninstall actions are replayed before managed snapshot restore for native package steps.
 
 Operator commands:
 - `rollback [txid]`: replay rollback for eligible interrupted/failed transactions.
@@ -117,8 +106,9 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - `cache_path` (optional)
 - `exposed_bin` (repeated, optional)
 - `exposed_completion` (repeated, optional)
+- `install_mode` (`managed` or `native`; legacy receipts default to `managed`)
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
-- `state/installed/<name>.gui-native` sidecar (optional): native GUI registration records (`key`, `kind`, `path`) for deterministic cleanup.
+- `state/installed/<name>.gui-native` sidecar (optional): native uninstall action records (`key`, `kind`, `path`) for deterministic uninstall/rollback cleanup.
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
@@ -128,10 +118,10 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 
 - Checksum mismatch: cached artifact is removed and install fails.
 - Registry key/signature validation failure: install/upgrade and other metadata-dependent operations fail closed.
-- Unsupported archive type: install fails with actionable message.
-- Unsupported constrained kind host (Windows-only: `exe`, `msi`, `msix`, `appx`; macOS-only: `dmg`, `pkg`; Linux-only: `appimage`, `deb`, `rpm`): install fails with actionable message.
-- Installer/package staging failures (`exe`, `msi`, `msix`, `appx`, `dmg`, `pkg`, `appimage`, `deb`, `rpm`): install fails closed; Crosspack does not execute vendor installers as fallback.
-- Package maintainer scripts are not executed (`deb`, `rpm`, `pkg`); script-dependent installs fail closed.
+- Unsupported archive type (including removed `deb`/`rpm` kinds): install fails with actionable message.
+- Unsupported constrained kind host (Windows-only native: `exe`, `msi`, `msix`, `appx`; macOS-only native: `pkg`; macOS-only managed: `dmg`; Linux-only managed: `appimage`): install fails with actionable message.
+- Installer/package staging failures (`exe`, `msi`, `msix`, `appx`, `pkg`, `dmg`, `appimage`): install fails closed; Crosspack does not execute vendor installers as fallback.
+- Package maintainer scripts are not executed for `pkg`; script-dependent installs fail closed.
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
@@ -150,10 +140,10 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 3. If target package is still reachable from any remaining root, block uninstall and report sorted blocking roots.
 4. Otherwise remove the requested package and prune orphaned dependency closure no longer reachable from any remaining root.
 5. For all removed packages:
-   - remove package directories, exposed binaries, and exposed package completion files,
-   - remove native GUI registrations using `.gui-native` state records (best-effort warnings),
-   - remove GUI sidecars (`.gui` and `.gui-native`),
-   - remove receipt files,
+   - if `install_mode=native`, run native uninstall actions from `.gui-native` sidecar before managed cleanup,
+   - remove package directories, exposed binaries, exposed package completion files, and GUI assets,
+   - for managed installs, remove native GUI registrations best-effort using `.gui-native` state records,
+   - remove GUI sidecars (`.gui` and `.gui-native`) and receipt files,
    - collect cache paths from receipts.
 6. Remove cache files that are no longer referenced by any remaining receipt.
 7. Return deterministic uninstall result including status, pruned dependency names, and blocking roots (if blocked).

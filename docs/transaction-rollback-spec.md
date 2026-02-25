@@ -4,6 +4,25 @@ This document defines v0.5 transactional behavior for Crosspack installs, upgrad
 
 **Status:** roadmap draft (non-GA). This document is a design target and does not change shipped GA guarantees until implementation is merged and released.
 
+## Current v0.3 Recovery Contract (shipped)
+
+Current shipped behavior already includes deterministic rollback snapshot/replay for package-level mutating steps.
+
+Snapshot payload captured per package:
+
+- package tree under `<prefix>/pkgs/<name>/...`
+- install receipt backup for `<prefix>/state/installed/<name>.receipt`
+- exposed binary entries owned by the package
+- exposed package completion files
+- exposed GUI assets and GUI ownership state
+- native sidecar state (`<prefix>/state/installed/<name>.gui-native`)
+
+Replay behavior:
+
+- rollback/repair replays completed package mutating journal steps in reverse sequence (`install_package:*`, `install_native_package:*`, `upgrade_package:*`, `upgrade_native_package:*`, `uninstall_target:*`, `prune_dependency:*`),
+- for native package replay, native uninstall actions run before managed snapshot restore,
+- managed restore then rehydrates package tree, receipt, binaries, completions, GUI assets/state, and native sidecar state from snapshot payload.
+
 ## Scope
 
 This spec covers:
@@ -122,10 +141,12 @@ Required rollback properties:
 
 Rollback payload examples:
 
+- Pre-mutation package directory snapshot.
 - Pre-mutation receipt backup.
-- Previous binary links/shims manifest.
-- Previous package directory location.
-- Previous cache reference state.
+- Previous binary links/shims snapshot entries.
+- Previous package completion files.
+- Previous GUI assets and GUI ownership state.
+- Previous native sidecar state for native uninstall replay.
 
 ## Crash Recovery
 
@@ -241,6 +262,8 @@ Errors must include txid and step information when relevant.
 - `rollback` command parsing and state-output tests.
 - `doctor` transaction health output tests.
 - `repair` command behavior tests.
+- Rollback snapshot capture tests for completions/GUI/native sidecar payload.
+- Rollback replay ordering tests for native uninstall before managed restore.
 
 ### `crosspack-resolver`
 
@@ -254,6 +277,6 @@ Errors must include txid and step information when relevant.
 
 ## Documentation Updates Required
 
-- `docs/install-flow.md`: add transaction phases and rollback behavior.
-- `docs/architecture.md`: add transaction coordinator responsibilities.
-- `docs/manifest-spec.md`: clarify artifact signature policy interaction.
+- `docs/install-flow.md`: keep native/managed installer-kind contract, escalation policy semantics, and rollback snapshot coverage in sync.
+- `docs/architecture.md`: keep transaction coordinator and rollback replay ordering responsibilities in sync.
+- `docs/manifest-spec.md`: keep supported artifact-kind contract (`deb`/`rpm` removed) and mode defaults in sync.

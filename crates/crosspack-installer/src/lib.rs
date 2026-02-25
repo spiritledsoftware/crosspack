@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -26,6 +26,7 @@ pub struct InstallReceipt {
     pub exposed_bins: Vec<String>,
     pub exposed_completions: Vec<String>,
     pub snapshot_id: Option<String>,
+    pub install_mode: InstallMode,
     pub install_reason: InstallReason,
     pub install_status: String,
     pub installed_at_unix: u64,
@@ -42,6 +43,38 @@ pub struct GuiNativeRegistrationRecord {
     pub key: String,
     pub kind: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeUninstallAction {
+    pub key: String,
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSidecarState {
+    pub uninstall_actions: Vec<NativeUninstallAction>,
+}
+
+impl From<GuiNativeRegistrationRecord> for NativeUninstallAction {
+    fn from(value: GuiNativeRegistrationRecord) -> Self {
+        Self {
+            key: value.key,
+            kind: value.kind,
+            path: value.path,
+        }
+    }
+}
+
+impl From<NativeUninstallAction> for GuiNativeRegistrationRecord {
+    fn from(value: NativeUninstallAction) -> Self {
+        Self {
+            key: value.key,
+            kind: value.kind,
+            path: value.path,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +99,56 @@ pub struct TransactionJournalEntry {
 pub enum InstallReason {
     Root,
     Dependency,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallMode {
+    Managed,
+    Native,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallInteractionPolicy {
+    pub allow_prompt_escalation: bool,
+    pub allow_non_prompt_escalation: bool,
+}
+
+impl Default for InstallInteractionPolicy {
+    fn default() -> Self {
+        Self {
+            allow_prompt_escalation: true,
+            allow_non_prompt_escalation: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactInstallOptions<'a> {
+    pub strip_components: u32,
+    pub artifact_root: Option<&'a str>,
+    pub install_mode: InstallMode,
+    pub interaction_policy: InstallInteractionPolicy,
+}
+
+impl InstallMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::Native => "native",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "managed" => Ok(Self::Managed),
+            "native" => Ok(Self::Native),
+            _ => Err(anyhow!("invalid install_mode: {value}")),
+        }
+    }
+
+    fn parse_receipt_token(value: &str) -> Self {
+        Self::parse(value).unwrap_or(Self::Managed)
+    }
 }
 
 impl InstallReason {
@@ -444,8 +527,7 @@ pub fn install_from_artifact(
     version: &str,
     archive_path: &Path,
     archive_type: ArchiveType,
-    strip_components: u32,
-    artifact_root: Option<&str>,
+    options: ArtifactInstallOptions<'_>,
 ) -> Result<PathBuf> {
     let install_tmp = make_tmp_dir(layout, "install")?;
     let raw_dir = install_tmp.join("raw");
@@ -459,11 +541,13 @@ pub fn install_from_artifact(
         archive_path,
         &raw_dir,
         archive_type,
-        strip_components,
-        artifact_root,
+        options.strip_components,
+        options.artifact_root,
+        options.install_mode,
+        options.interaction_policy,
     )?;
 
-    if let Some(root) = artifact_root {
+    if let Some(root) = options.artifact_root {
         let root_path = raw_dir.join(root);
         if !root_path.exists() {
             return Err(anyhow!(
@@ -474,7 +558,7 @@ pub fn install_from_artifact(
         }
     }
 
-    copy_with_strip(&raw_dir, &staged_dir, strip_components as usize)?;
+    copy_with_strip(&raw_dir, &staged_dir, options.strip_components as usize)?;
 
     let dst = layout.package_dir(name, version);
     if dst.exists() {
@@ -516,6 +600,7 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
     if let Some(snapshot_id) = &receipt.snapshot_id {
         payload.push_str(&format!("snapshot_id={}\n", snapshot_id));
     }
+    payload.push_str(&format!("install_mode={}\n", receipt.install_mode.as_str()));
     payload.push_str(&format!(
         "install_reason={}\n",
         receipt.install_reason.as_str()
@@ -648,51 +733,64 @@ pub fn clear_gui_exposure_state(layout: &PrefixLayout, package_name: &str) -> Re
     Ok(())
 }
 
-pub fn write_gui_native_state(
+const NATIVE_SIDECAR_VERSION: u32 = 1;
+
+pub fn write_native_sidecar_state(
     layout: &PrefixLayout,
     package_name: &str,
-    records: &[GuiNativeRegistrationRecord],
+    state: &NativeSidecarState,
 ) -> Result<PathBuf> {
     let path = layout.gui_native_state_path(package_name);
-    if records.is_empty() {
+    if state.uninstall_actions.is_empty() {
         let _ = remove_file_if_exists(&path);
         return Ok(path);
     }
 
     let mut payload = String::new();
-    for record in records {
-        if record.key.contains('\n') || record.kind.contains('\n') || record.path.contains('\n') {
-            return Err(anyhow!("native gui state values must not contain newlines"));
+    payload.push_str(&format!("version={}\n", NATIVE_SIDECAR_VERSION));
+    for action in &state.uninstall_actions {
+        if action.key.contains('\n')
+            || action.key.contains('\t')
+            || action.kind.contains('\n')
+            || action.kind.contains('\t')
+            || action.path.contains('\n')
+            || action.path.contains('\t')
+        {
+            return Err(anyhow!(
+                "native uninstall action values must not contain tabs or newlines"
+            ));
         }
         payload.push_str(&format!(
-            "record={}\t{}\t{}\n",
-            record.key, record.kind, record.path
+            "uninstall_action={}\t{}\t{}\n",
+            action.key, action.kind, action.path
         ));
     }
 
     fs::write(&path, payload.as_bytes())
-        .with_context(|| format!("failed to write native gui state: {}", path.display()))?;
+        .with_context(|| format!("failed to write native sidecar state: {}", path.display()))?;
     Ok(path)
 }
 
-pub fn read_gui_native_state(
+pub fn read_native_sidecar_state(
     layout: &PrefixLayout,
     package_name: &str,
-) -> Result<Vec<GuiNativeRegistrationRecord>> {
+) -> Result<NativeSidecarState> {
     let path = layout.gui_native_state_path(package_name);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(NativeSidecarState {
+            uninstall_actions: Vec::new(),
+        });
     }
 
     let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read native gui state: {}", path.display()))?;
-    parse_gui_native_state(&raw)
-        .with_context(|| format!("failed to parse native gui state: {}", path.display()))
+        .with_context(|| format!("failed to read native sidecar state: {}", path.display()))?;
+    parse_native_sidecar_state(&raw)
+        .with_context(|| format!("failed to parse native sidecar state: {}", path.display()))
 }
 
-pub fn read_all_gui_native_states(
+pub fn read_all_native_sidecar_states(
     layout: &PrefixLayout,
-) -> Result<BTreeMap<String, Vec<GuiNativeRegistrationRecord>>> {
+) -> Result<BTreeMap<String, NativeSidecarState>> {
     let dir = layout.installed_state_dir();
     if !dir.exists() {
         return Ok(BTreeMap::new());
@@ -719,19 +817,66 @@ pub fn read_all_gui_native_states(
         };
 
         let raw = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read native gui state: {}", path.display()))?;
-        let records = parse_gui_native_state(&raw)
-            .with_context(|| format!("failed to parse native gui state: {}", path.display()))?;
-        states.insert(stem.to_string(), records);
+            .with_context(|| format!("failed to read native sidecar state: {}", path.display()))?;
+        let state = parse_native_sidecar_state(&raw)
+            .with_context(|| format!("failed to parse native sidecar state: {}", path.display()))?;
+        states.insert(stem.to_string(), state);
     }
 
     Ok(states)
 }
 
-pub fn clear_gui_native_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+pub fn clear_native_sidecar_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
     let path = layout.gui_native_state_path(package_name);
     remove_file_if_exists(&path)?;
     Ok(())
+}
+
+pub fn write_gui_native_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    records: &[GuiNativeRegistrationRecord],
+) -> Result<PathBuf> {
+    let state = NativeSidecarState {
+        uninstall_actions: records
+            .iter()
+            .cloned()
+            .map(NativeUninstallAction::from)
+            .collect(),
+    };
+    write_native_sidecar_state(layout, package_name, &state)
+}
+
+pub fn read_gui_native_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<GuiNativeRegistrationRecord>> {
+    let state = read_native_sidecar_state(layout, package_name)?;
+    Ok(state
+        .uninstall_actions
+        .into_iter()
+        .map(GuiNativeRegistrationRecord::from)
+        .collect())
+}
+
+pub fn read_all_gui_native_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<GuiNativeRegistrationRecord>>> {
+    let native_states = read_all_native_sidecar_states(layout)?;
+    let mut gui_states = BTreeMap::new();
+    for (package_name, state) in native_states {
+        let records = state
+            .uninstall_actions
+            .into_iter()
+            .map(GuiNativeRegistrationRecord::from)
+            .collect::<Vec<_>>();
+        gui_states.insert(package_name, records);
+    }
+    Ok(gui_states)
+}
+
+pub fn clear_gui_native_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    clear_native_sidecar_state(layout, package_name)
 }
 
 pub fn remove_package_native_gui_registrations_best_effort(
@@ -774,33 +919,62 @@ fn parse_gui_exposure_state(raw: &str) -> Result<Vec<GuiExposureAsset>> {
     Ok(assets)
 }
 
-fn parse_gui_native_state(raw: &str) -> Result<Vec<GuiNativeRegistrationRecord>> {
-    let mut records = Vec::new();
+fn parse_native_sidecar_state(raw: &str) -> Result<NativeSidecarState> {
+    let mut version = None;
+    let mut uninstall_actions = Vec::new();
+
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Some(payload) = line.strip_prefix("record=") else {
-            continue;
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("invalid native sidecar row format: {line}"));
         };
-        let parts = payload.splitn(3, '\t').collect::<Vec<_>>();
-        if parts.len() != 3 {
-            return Err(anyhow!("invalid native gui state row format"));
+        if key.trim().is_empty() {
+            return Err(anyhow!("native sidecar row key must not be empty"));
         }
-        if parts[0].trim().is_empty() {
-            return Err(anyhow!("native gui registration key must not be empty"));
+
+        match key {
+            "version" => {
+                let parsed = value
+                    .parse::<u32>()
+                    .context("native sidecar version must be u32")?;
+                version = Some(parsed);
+            }
+            "uninstall_action" | "record" => {
+                uninstall_actions.push(parse_native_uninstall_action(value)?);
+            }
+            _ => {}
         }
-        if parts[1].trim().is_empty() {
-            return Err(anyhow!("native gui registration kind must not be empty"));
-        }
-        if parts[2].trim().is_empty() {
-            return Err(anyhow!("native gui registration path must not be empty"));
-        }
-        records.push(GuiNativeRegistrationRecord {
-            key: parts[0].to_string(),
-            kind: parts[1].to_string(),
-            path: parts[2].to_string(),
-        });
     }
 
-    Ok(records)
+    if let Some(found_version) = version {
+        if found_version != NATIVE_SIDECAR_VERSION {
+            return Err(anyhow!(
+                "unsupported native sidecar version: {found_version}"
+            ));
+        }
+    }
+
+    Ok(NativeSidecarState { uninstall_actions })
+}
+
+fn parse_native_uninstall_action(value: &str) -> Result<NativeUninstallAction> {
+    let parts = value.split('\t').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(anyhow!("invalid native uninstall action row format"));
+    }
+    if parts[0].trim().is_empty() {
+        return Err(anyhow!("native uninstall action key must not be empty"));
+    }
+    if parts[1].trim().is_empty() {
+        return Err(anyhow!("native uninstall action kind must not be empty"));
+    }
+    if parts[2].trim().is_empty() {
+        return Err(anyhow!("native uninstall action path must not be empty"));
+    }
+    Ok(NativeUninstallAction {
+        key: parts[0].to_string(),
+        kind: parts[1].to_string(),
+        path: parts[2].to_string(),
+    })
 }
 
 pub fn current_unix_timestamp() -> Result<u64> {
@@ -1102,6 +1276,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut exposed_bins = Vec::new();
     let mut exposed_completions = Vec::new();
     let mut snapshot_id = None;
+    let mut install_mode = None;
     let mut install_reason = None;
     let mut install_status = None;
     let mut installed_at_unix = None;
@@ -1121,6 +1296,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
             "exposed_bin" => exposed_bins.push(v.to_string()),
             "exposed_completion" => exposed_completions.push(v.to_string()),
             "snapshot_id" => snapshot_id = Some(v.to_string()),
+            "install_mode" => install_mode = Some(InstallMode::parse_receipt_token(v)),
             "install_reason" => install_reason = Some(InstallReason::parse(v)?),
             "install_status" => install_status = Some(v.to_string()),
             "installed_at_unix" => {
@@ -1141,6 +1317,7 @@ fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         exposed_bins,
         exposed_completions,
         snapshot_id,
+        install_mode: install_mode.unwrap_or(InstallMode::Managed),
         install_reason: install_reason.unwrap_or(InstallReason::Root),
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
         installed_at_unix: installed_at_unix.context("missing installed_at_unix")?,
@@ -1151,6 +1328,11 @@ fn remove_receipt_artifacts(
     layout: &PrefixLayout,
     receipt: &InstallReceipt,
 ) -> Result<UninstallStatus> {
+    if receipt.install_mode == InstallMode::Native {
+        run_native_uninstall_actions(layout, &receipt.name)?;
+        clear_native_sidecar_state(layout, &receipt.name)?;
+    }
+
     let package_dir = layout.package_dir(&receipt.name, &receipt.version);
     let package_existed = package_dir.exists();
     if package_existed {
@@ -1170,8 +1352,10 @@ fn remove_receipt_artifacts(
         remove_exposed_gui_asset(layout, asset)?;
     }
     clear_gui_exposure_state(layout, &receipt.name)?;
-    let _native_gui_warnings =
-        remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;
+    if receipt.install_mode != InstallMode::Native {
+        let _native_gui_warnings =
+            remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;
+    }
 
     let receipt_path = layout.receipt_path(&receipt.name);
     fs::remove_file(&receipt_path).with_context(|| {
@@ -1186,6 +1370,99 @@ fn remove_receipt_artifacts(
     } else {
         UninstallStatus::RepairedStaleState
     })
+}
+
+pub fn run_package_native_uninstall_actions(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<()> {
+    run_native_uninstall_actions(layout, package_name)
+}
+
+fn run_native_uninstall_actions(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    let sidecar_state = read_native_sidecar_state(layout, package_name)?;
+    for action in &sidecar_state.uninstall_actions {
+        execute_native_uninstall_action(action).with_context(|| {
+            format!(
+                "native uninstall action failed (key='{}', kind='{}', path='{}')",
+                action.key, action.kind, action.path
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn execute_native_uninstall_action(action: &NativeUninstallAction) -> Result<()> {
+    match action.kind.as_str() {
+        "desktop-entry" | "start-menu-launcher" | "applications-symlink" => {
+            remove_native_uninstall_path(Path::new(&action.path))
+        }
+        "registry-key" => remove_native_registry_key(&action.path),
+        other => Err(anyhow!(
+            "unsupported native uninstall action kind '{other}'"
+        )),
+    }
+}
+
+fn remove_native_uninstall_path(path: &Path) -> Result<()> {
+    let remove_result = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                fs::remove_dir(path)
+            } else {
+                fs::remove_file(path)
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to inspect native uninstall path: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    match remove_result {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("failed to remove native uninstall path: {}", path.display())),
+    }
+}
+
+fn remove_native_registry_key(path: &str) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(anyhow!(
+            "native uninstall action kind 'registry-key' is supported only on Windows hosts"
+        ));
+    }
+
+    if !windows_registry_key_exists(path)? {
+        return Ok(());
+    }
+
+    let mut command = Command::new("reg");
+    command.arg("delete").arg(path).arg("/f");
+    match run_command(&mut command, "failed to remove Windows registry key") {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if !windows_registry_key_exists(path)? {
+                return Ok(());
+            }
+            Err(err)
+        }
+    }
+}
+
+fn windows_registry_key_exists(path: &str) -> Result<bool> {
+    let output = Command::new("reg")
+        .arg("query")
+        .arg(path)
+        .status()
+        .with_context(|| format!("failed to query Windows registry key: {path}"))?;
+    Ok(output.success())
 }
 
 fn dependency_map(receipts: &HashMap<String, InstallReceipt>) -> HashMap<String, BTreeSet<String>> {
@@ -2450,7 +2727,20 @@ fn stage_artifact_payload(
     artifact_type: ArchiveType,
     strip_components: u32,
     artifact_root: Option<&str>,
+    install_mode: InstallMode,
+    interaction_policy: InstallInteractionPolicy,
 ) -> Result<()> {
+    if install_mode == InstallMode::Native
+        && is_native_default_archive_type(artifact_type)
+        && !interaction_policy.allow_prompt_escalation
+        && !interaction_policy.allow_non_prompt_escalation
+    {
+        return Err(anyhow!(
+            "native installer mode requires escalation but policy forbids it for archive type '{}'",
+            artifact_type.as_str()
+        ));
+    }
+
     match artifact_type {
         ArchiveType::Zip => extract_zip(artifact_path, raw_dir),
         ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(artifact_path, raw_dir),
@@ -2461,11 +2751,20 @@ fn stage_artifact_payload(
         ArchiveType::Dmg => stage_dmg_payload(artifact_path, raw_dir),
         ArchiveType::Exe => stage_exe_payload(artifact_path, raw_dir),
         ArchiveType::Pkg => stage_pkg_payload(artifact_path, raw_dir),
-        ArchiveType::Deb => stage_deb_payload(artifact_path, raw_dir),
-        ArchiveType::Rpm => stage_rpm_payload(artifact_path, raw_dir),
         ArchiveType::Msix => stage_msix_payload(artifact_path, raw_dir),
         ArchiveType::Appx => stage_appx_payload(artifact_path, raw_dir),
     }
+}
+
+fn is_native_default_archive_type(artifact_type: ArchiveType) -> bool {
+    matches!(
+        artifact_type,
+        ArchiveType::Msi
+            | ArchiveType::Exe
+            | ArchiveType::Pkg
+            | ArchiveType::Msix
+            | ArchiveType::Appx
+    )
 }
 
 fn stage_appimage_payload(
@@ -2597,99 +2896,6 @@ fn stage_pkg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
     )
 }
 
-fn stage_deb_payload(artifact_path: &Path, raw_dir: &Path) -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        return Err(anyhow!("DEB artifacts are supported only on Linux hosts"));
-    }
-
-    fs::create_dir_all(raw_dir)
-        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
-
-    let artifact_path_absolute = resolve_absolute_artifact_path(artifact_path)?;
-    let archive_members = list_deb_archive_members(&artifact_path_absolute)?;
-    let data_member = select_deb_data_payload_member(&archive_members)?;
-    let extract_parent = raw_dir.parent().unwrap_or(raw_dir);
-    let extract_dir = extract_parent.join(format!(
-        ".crosspack-deb-extract-{}-{}",
-        std::process::id(),
-        current_unix_timestamp()?
-    ));
-    fs::create_dir_all(&extract_dir)
-        .with_context(|| format!("failed to create {}", extract_dir.display()))?;
-
-    let mut extract_member =
-        build_deb_member_extract_command(&artifact_path_absolute, &data_member);
-    extract_member.current_dir(&extract_dir);
-    let extract_result = run_command(
-        &mut extract_member,
-        "failed to extract DEB data member from archive",
-    )
-    .map_err(|err| {
-        if error_chain_has_not_found(&err) {
-            return anyhow!(
-                "failed to extract DEB data member from archive: required extraction tool 'ar' was not found on PATH; install binutils (or equivalent package providing 'ar') and ensure 'ar' is available, then retry. artifact={} raw_dir={} extraction_dir={} extraction_command={:?}: {err}",
-                artifact_path.display(),
-                raw_dir.display(),
-                extract_dir.display(),
-                extract_member
-            );
-        }
-        err
-    });
-
-    let data_archive_path = extract_dir.join(&data_member);
-    let unpack_result = extract_result.and_then(|_| {
-        if !data_archive_path.exists() {
-            return Err(anyhow!(
-                "DEB data member '{}' was not extracted to {}; verify archive readability and retry",
-                data_member,
-                data_archive_path.display()
-            ));
-        }
-        let mut unpack_command = build_deb_data_extract_command(&data_archive_path, raw_dir);
-        run_command(&mut unpack_command, "failed to unpack DEB data payload").map_err(|err| {
-            if error_chain_has_not_found(&err) {
-                return anyhow!(
-                    "failed to unpack DEB data payload: required extraction tool 'tar' was not found on PATH; install tar and ensure 'tar' is available, then retry. artifact={} raw_dir={} data_archive={} extraction_command={:?}: {err}",
-                    artifact_path.display(),
-                    raw_dir.display(),
-                    data_archive_path.display(),
-                    unpack_command
-                );
-            }
-            err
-        })
-    });
-
-    let cleanup_result = match fs::remove_dir_all(&extract_dir) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| {
-            format!(
-                "failed to cleanup DEB extraction dir: {}",
-                extract_dir.display()
-            )
-        }),
-    };
-
-    match (unpack_result, cleanup_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(stage_err), Ok(())) => Err(stage_err),
-        (Ok(()), Err(cleanup_err)) => Err(cleanup_err),
-        (Err(stage_err), Err(cleanup_err)) => Err(anyhow!(
-            "{stage_err}; additionally failed to cleanup DEB extraction dir {}: {cleanup_err}",
-            extract_dir.display()
-        )),
-    }
-}
-
-fn stage_rpm_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        return Err(anyhow!("RPM artifacts are supported only on Linux hosts"));
-    }
-    stage_rpm_payload_with_runner(_artifact_path, _raw_dir, run_rpm_extract_pipeline)
-}
-
 fn stage_msix_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
     if !cfg!(windows) {
         return Err(anyhow!(
@@ -2812,198 +3018,6 @@ fn build_exe_extract_command(artifact_path: &Path, raw_dir: &Path) -> Command {
         .arg(format!("-o{}", raw_dir.display()))
         .arg("-y");
     command
-}
-
-fn resolve_absolute_artifact_path(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-
-    let cwd = std::env::current_dir()
-        .with_context(|| "failed to resolve current working directory for artifact extraction")?;
-    Ok(cwd.join(path))
-}
-
-fn build_deb_archive_member_listing_command(artifact_path: &Path) -> Command {
-    let mut command = Command::new("ar");
-    command.arg("t").arg(artifact_path);
-    command
-}
-
-fn build_deb_member_extract_command(artifact_path: &Path, data_member: &str) -> Command {
-    let mut command = Command::new("ar");
-    command.arg("x").arg(artifact_path).arg(data_member);
-    command
-}
-
-fn build_deb_data_extract_command(data_archive_path: &Path, raw_dir: &Path) -> Command {
-    let mut command = Command::new("tar");
-    command
-        .arg("-xf")
-        .arg(data_archive_path)
-        .arg("-C")
-        .arg(raw_dir);
-    command
-}
-
-fn build_rpm2cpio_command(artifact_path: &Path) -> Command {
-    let mut command = Command::new("rpm2cpio");
-    command.arg(artifact_path);
-    command
-}
-
-fn build_cpio_extract_command(raw_dir: &Path) -> Command {
-    let mut command = Command::new("cpio");
-    command
-        .arg("-idmu")
-        .arg("--no-absolute-filenames")
-        .arg("--quiet")
-        .current_dir(raw_dir);
-    command
-}
-
-fn stage_rpm_payload_with_runner<RunPipeline>(
-    artifact_path: &Path,
-    raw_dir: &Path,
-    mut run_pipeline: RunPipeline,
-) -> Result<()>
-where
-    RunPipeline: FnMut(&mut Command, &mut Command) -> Result<()>,
-{
-    fs::create_dir_all(raw_dir)
-        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
-
-    let mut rpm2cpio_command = build_rpm2cpio_command(artifact_path);
-    let mut cpio_extract_command = build_cpio_extract_command(raw_dir);
-    run_pipeline(&mut rpm2cpio_command, &mut cpio_extract_command).map_err(|err| {
-        if error_chain_has_not_found(&err) {
-            return anyhow!(
-                "failed to stage RPM artifact via deterministic extraction: required extraction tools were not found on PATH; ensure both 'rpm2cpio' and 'cpio' are installed and available, then retry. artifact={} raw_dir={} rpm2cpio_command={:?} cpio_command={:?}: {err}",
-                artifact_path.display(),
-                raw_dir.display(),
-                rpm2cpio_command,
-                cpio_extract_command
-            );
-        }
-        anyhow!(
-            "failed to stage RPM artifact via deterministic extraction: artifact={} raw_dir={} rpm2cpio_command={:?} cpio_command={:?}: {err}",
-            artifact_path.display(),
-            raw_dir.display(),
-            rpm2cpio_command,
-            cpio_extract_command
-        )
-    })
-}
-
-fn run_rpm_extract_pipeline(
-    rpm2cpio_command: &mut Command,
-    cpio_extract_command: &mut Command,
-) -> Result<()> {
-    rpm2cpio_command.stdout(Stdio::piped());
-    let mut rpm2cpio_child = rpm2cpio_command
-        .spawn()
-        .with_context(|| "failed to convert RPM payload with rpm2cpio: command failed to start")?;
-    let rpm2cpio_stdout = rpm2cpio_child
-        .stdout
-        .take()
-        .context("failed to convert RPM payload with rpm2cpio: missing stdout pipe")?;
-
-    cpio_extract_command.stdin(Stdio::from(rpm2cpio_stdout));
-    let cpio_output = match cpio_extract_command.output() {
-        Ok(output) => output,
-        Err(err) => {
-            let _ = rpm2cpio_child.kill();
-            let _ = rpm2cpio_child.wait();
-            return Err(err).with_context(|| {
-                "failed to extract RPM payload with cpio: command failed to start"
-            });
-        }
-    };
-    let rpm2cpio_output = rpm2cpio_child.wait_with_output().with_context(|| {
-        "failed to convert RPM payload with rpm2cpio: command failed while waiting for completion"
-    })?;
-
-    if !rpm2cpio_output.status.success() {
-        return Err(anyhow!(
-            "failed to convert RPM payload with rpm2cpio: status={} stdout='{}' stderr='{}'",
-            rpm2cpio_output.status,
-            String::from_utf8_lossy(&rpm2cpio_output.stdout).trim(),
-            String::from_utf8_lossy(&rpm2cpio_output.stderr).trim()
-        ));
-    }
-    if !cpio_output.status.success() {
-        return Err(anyhow!(
-            "failed to extract RPM payload with cpio: status={} stdout='{}' stderr='{}'",
-            cpio_output.status,
-            String::from_utf8_lossy(&cpio_output.stdout).trim(),
-            String::from_utf8_lossy(&cpio_output.stderr).trim()
-        ));
-    }
-
-    Ok(())
-}
-
-fn list_deb_archive_members(artifact_path: &Path) -> Result<Vec<String>> {
-    let mut command = build_deb_archive_member_listing_command(artifact_path);
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(anyhow!(
-                "failed to list DEB archive members: required extraction tool 'ar' was not found on PATH; install binutils (or equivalent package providing 'ar') and ensure 'ar' is available, then retry. artifact={} listing_command={:?}",
-                artifact_path.display(),
-                command
-            ));
-        }
-        Err(err) => {
-            return Err(err)
-                .with_context(|| "failed to list DEB archive members: command failed to start");
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(anyhow!(
-            "failed to list DEB archive members: status={} stdout='{}' stderr='{}'",
-            output.status,
-            stdout.trim(),
-            stderr.trim()
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-fn select_deb_data_payload_member(members: &[String]) -> Result<String> {
-    const PREFERENCE_ORDER: [&str; 5] = [
-        "data.tar.zst",
-        "data.tar.xz",
-        "data.tar.gz",
-        "data.tar.bz2",
-        "data.tar",
-    ];
-
-    for member in PREFERENCE_ORDER {
-        if members
-            .iter()
-            .any(|archive_member| archive_member == member)
-        {
-            return Ok(member.to_string());
-        }
-    }
-
-    let found_members = if members.is_empty() {
-        "(none)".to_string()
-    } else {
-        members.join(", ")
-    };
-    Err(anyhow!(
-        "DEB payload archive missing data member; expected one of data.tar.zst > data.tar.xz > data.tar.gz > data.tar.bz2 > data.tar; found members: {found_members}"
-    ))
 }
 
 fn build_msix_unpack_command(artifact_path: &Path, raw_dir: &Path) -> Command {
@@ -3604,6 +3618,53 @@ mod tests {
     }
 
     #[test]
+    fn receipt_round_trip_with_install_mode_native() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "zed".to_string(),
+                version: "0.150.0".to_string(),
+                dependencies: vec!["ripgrep@14.0.0".to_string()],
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: Some("https://example.test/zed.tar.zst".to_string()),
+                artifact_sha256: Some("abc123".to_string()),
+                cache_path: Some("/tmp/zed.tar.zst".to_string()),
+                exposed_bins: vec!["zed".to_string()],
+                exposed_completions: Vec::new(),
+                snapshot_id: Some("git:deadbeef".to_string()),
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 123,
+            },
+        )
+        .expect("must write receipt");
+
+        let receipts = read_install_receipts(&layout).expect("must read receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].install_mode, InstallMode::Native);
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn receipt_defaults_install_mode_managed_for_legacy() {
+        let raw = "name=fd\nversion=10.2.0\ninstalled_at_unix=123\n";
+        let receipt = parse_receipt(raw).expect("must parse");
+        assert_eq!(receipt.install_mode, InstallMode::Managed);
+    }
+
+    #[test]
+    fn receipt_unknown_install_mode_falls_back_to_managed() {
+        let raw = "name=fd\nversion=10.2.0\ninstall_mode=native-v2\ninstalled_at_unix=123\n";
+        let receipt = parse_receipt(raw).expect("must parse unknown install mode tokens");
+        assert_eq!(receipt.install_mode, InstallMode::Managed);
+    }
+
+    #[test]
     fn transaction_paths_match_spec_layout() {
         let layout = test_layout();
         assert_eq!(
@@ -3992,6 +4053,90 @@ mod tests {
     }
 
     #[test]
+    fn native_state_round_trip_for_uninstall_actions() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let state = NativeSidecarState {
+            uninstall_actions: vec![
+                NativeUninstallAction {
+                    key: "app:dev.zed.zed".to_string(),
+                    kind: "desktop-entry".to_string(),
+                    path: "/tmp/dev.zed.zed.desktop".to_string(),
+                },
+                NativeUninstallAction {
+                    key: "protocol:zed".to_string(),
+                    kind: "registry-key".to_string(),
+                    path: "HKCU\\Software\\Classes\\zed".to_string(),
+                },
+            ],
+        };
+
+        write_native_sidecar_state(&layout, "zed", &state)
+            .expect("must write native uninstall sidecar state");
+        let loaded =
+            read_native_sidecar_state(&layout, "zed").expect("must read native sidecar state");
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn native_sidecar_legacy_record_rows_are_still_read() {
+        let raw = "version=1\nrecord=app:dev.zed.zed\tdesktop-entry\t/tmp/dev.zed.zed.desktop\nrecord=protocol:zed\tregistry-key\tHKCU\\Software\\Classes\\zed\n";
+        let state = parse_native_sidecar_state(raw).expect("must parse legacy record rows");
+
+        assert_eq!(
+            state.uninstall_actions,
+            vec![
+                NativeUninstallAction {
+                    key: "app:dev.zed.zed".to_string(),
+                    kind: "desktop-entry".to_string(),
+                    path: "/tmp/dev.zed.zed.desktop".to_string(),
+                },
+                NativeUninstallAction {
+                    key: "protocol:zed".to_string(),
+                    kind: "registry-key".to_string(),
+                    path: "HKCU\\Software\\Classes\\zed".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn native_sidecar_unsupported_version_rejects() {
+        let raw = "version=42\nuninstall_action=app:dev.zed.zed\tdesktop-entry\t/tmp/dev.zed.zed.desktop\n";
+        let err = parse_native_sidecar_state(raw).expect_err("unsupported version must fail");
+        assert!(
+            err.to_string()
+                .contains("unsupported native sidecar version: 42"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn native_sidecar_malformed_uninstall_action_row_rejects() {
+        let raw = "version=1\nuninstall_action=app:dev.zed.zed\tdesktop-entry\n";
+        let err = parse_native_sidecar_state(raw)
+            .expect_err("malformed uninstall_action row should fail parsing");
+        assert!(
+            err.to_string()
+                .contains("invalid native uninstall action row format"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn native_sidecar_malformed_line_without_equals_rejects() {
+        let raw = "version=1\nuninstall_action\tapp:dev.zed.zed\tdesktop-entry\t/tmp/dev.zed.zed.desktop\n";
+        let err = parse_native_sidecar_state(raw)
+            .expect_err("suspicious malformed sidecar line should fail parsing");
+        assert!(
+            err.to_string()
+                .contains("invalid native sidecar row format"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn native_gui_state_read_missing_returns_empty() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -4144,6 +4289,40 @@ mod tests {
         assert!(strip_rel_components(p, 4).is_none());
     }
 
+    #[test]
+    fn install_from_artifact_rejects_native_installer_when_escalation_policy_forbids_it() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.exe");
+        fs::write(&artifact_path, b"dummy exe").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Exe,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy {
+                    allow_prompt_escalation: false,
+                    allow_non_prompt_escalation: false,
+                },
+            },
+        )
+        .expect_err("native installer should be blocked when escalation is disallowed");
+
+        assert!(
+            err.to_string()
+                .contains("native installer mode requires escalation but policy forbids it"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn install_from_artifact_rejects_msi_on_non_windows_host() {
@@ -4158,8 +4337,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Msi,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("msi should be rejected on non-Windows host");
         assert!(
@@ -4185,8 +4368,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Dmg,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Managed,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("dmg should be rejected on non-macOS host");
         assert!(
@@ -4212,8 +4399,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Exe,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("exe should be rejected on non-Windows host");
         assert!(
@@ -4239,8 +4430,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Pkg,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("pkg should be rejected on non-macOS host");
         assert!(
@@ -4252,58 +4447,24 @@ mod tests {
         let _ = fs::remove_dir_all(layout.prefix());
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn install_from_artifact_rejects_deb_on_non_linux_host() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let artifact_path = layout.prefix().join("demo.deb");
-        fs::write(&artifact_path, b"dummy deb").expect("must write artifact");
-
-        let err = install_from_artifact(
-            &layout,
-            "demo",
-            "1.0.0",
-            &artifact_path,
-            ArchiveType::Deb,
-            0,
-            None,
-        )
-        .expect_err("deb should be rejected on non-Linux host");
+    fn installer_dispatch_does_not_support_deb_or_rpm_archive_types() {
         assert!(
-            err.to_string()
-                .contains("DEB artifacts are supported only on Linux hosts"),
-            "unexpected error: {err}"
+            ArchiveType::parse("deb").is_none(),
+            "DEB should be unsupported in installer dispatch"
         );
-
-        let _ = fs::remove_dir_all(layout.prefix());
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn install_from_artifact_rejects_rpm_on_non_linux_host() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let artifact_path = layout.prefix().join("demo.rpm");
-        fs::write(&artifact_path, b"dummy rpm").expect("must write artifact");
-
-        let err = install_from_artifact(
-            &layout,
-            "demo",
-            "1.0.0",
-            &artifact_path,
-            ArchiveType::Rpm,
-            0,
-            None,
-        )
-        .expect_err("rpm should be rejected on non-Linux host");
         assert!(
-            err.to_string()
-                .contains("RPM artifacts are supported only on Linux hosts"),
-            "unexpected error: {err}"
+            ArchiveType::parse("rpm").is_none(),
+            "RPM should be unsupported in installer dispatch"
         );
-
-        let _ = fs::remove_dir_all(layout.prefix());
+        assert!(
+            ArchiveType::infer_from_url("https://example.test/demo.deb").is_none(),
+            "DEB URL inference should be unsupported in installer dispatch"
+        );
+        assert!(
+            ArchiveType::infer_from_url("https://example.test/demo.rpm").is_none(),
+            "RPM URL inference should be unsupported in installer dispatch"
+        );
     }
 
     #[cfg(not(windows))]
@@ -4320,8 +4481,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Msix,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("msix should be rejected on non-Windows host");
         assert!(
@@ -4347,8 +4512,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Appx,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("appx should be rejected on non-Windows host");
         assert!(
@@ -4374,8 +4543,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Exe,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("exe staging should fail deterministic extraction on Windows host");
         assert!(
@@ -4401,67 +4574,17 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Pkg,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("pkg staging should fail deterministic extraction on macOS host");
         assert!(
             err.to_string()
                 .contains("failed to stage PKG artifact via deterministic extraction"),
-            "unexpected error: {err}"
-        );
-
-        let _ = fs::remove_dir_all(layout.prefix());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn install_from_artifact_reports_deb_extraction_failure_on_linux_host() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let artifact_path = layout.prefix().join("demo.deb");
-        fs::write(&artifact_path, b"dummy deb").expect("must write artifact");
-
-        let err = install_from_artifact(
-            &layout,
-            "demo",
-            "1.0.0",
-            &artifact_path,
-            ArchiveType::Deb,
-            0,
-            None,
-        )
-        .expect_err("deb staging should fail deterministic extraction on Linux host");
-        assert!(
-            err.to_string()
-                .contains("failed to list DEB archive members"),
-            "unexpected error: {err}"
-        );
-
-        let _ = fs::remove_dir_all(layout.prefix());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn install_from_artifact_reports_rpm_extraction_failure_on_linux_host() {
-        let layout = test_layout();
-        layout.ensure_base_dirs().expect("must create dirs");
-        let artifact_path = layout.prefix().join("demo.rpm");
-        fs::write(&artifact_path, b"dummy rpm").expect("must write artifact");
-
-        let err = install_from_artifact(
-            &layout,
-            "demo",
-            "1.0.0",
-            &artifact_path,
-            ArchiveType::Rpm,
-            0,
-            None,
-        )
-        .expect_err("rpm staging should fail deterministic extraction on Linux host");
-        assert!(
-            err.to_string()
-                .contains("failed to stage RPM artifact via deterministic extraction"),
             "unexpected error: {err}"
         );
 
@@ -4482,8 +4605,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Msix,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("msix staging should fail deterministic extraction on Windows host");
         assert!(
@@ -4509,8 +4636,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::Appx,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Native,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("appx staging should fail deterministic extraction on Windows host");
         assert!(
@@ -4536,8 +4667,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::AppImage,
-            1,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 1,
+                artifact_root: None,
+                install_mode: InstallMode::Managed,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("appimage strip_components should be rejected");
         assert!(
@@ -4563,8 +4698,12 @@ mod tests {
             "1.0.0",
             &artifact_path,
             ArchiveType::AppImage,
-            0,
-            None,
+            ArtifactInstallOptions {
+                strip_components: 0,
+                artifact_root: None,
+                install_mode: InstallMode::Managed,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("appimage installs should be rejected on non-Linux hosts");
         assert!(
@@ -4665,157 +4804,6 @@ mod tests {
                 format!("-o{}", raw_dir.display()),
                 "-y".to_string(),
             ]
-        );
-    }
-
-    #[test]
-    fn stage_deb_builds_archive_member_listing_command_shape() {
-        let artifact_path = Path::new("/tmp/demo.deb");
-        let command = build_deb_archive_member_listing_command(artifact_path);
-
-        assert_eq!(command.get_program(), "ar");
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            args,
-            vec!["t".to_string(), artifact_path.display().to_string()]
-        );
-    }
-
-    #[test]
-    fn stage_deb_resolves_relative_artifact_path_to_absolute() {
-        let relative = Path::new("fixtures/demo.deb");
-        let expected = std::env::current_dir()
-            .expect("cwd should resolve")
-            .join(relative);
-
-        let resolved = resolve_absolute_artifact_path(relative)
-            .expect("relative artifact path should resolve");
-
-        assert_eq!(resolved, expected);
-    }
-
-    #[test]
-    fn stage_deb_selects_data_payload_member_deterministically() {
-        let members = vec![
-            "control.tar.xz".to_string(),
-            "data.tar.gz".to_string(),
-            "data.tar.xz".to_string(),
-            "debian-binary".to_string(),
-        ];
-
-        let selected =
-            select_deb_data_payload_member(&members).expect("must select preferred data member");
-
-        assert_eq!(selected, "data.tar.xz");
-    }
-
-    #[test]
-    fn stage_deb_rejects_missing_data_member() {
-        let members = vec!["debian-binary".to_string(), "control.tar.xz".to_string()];
-
-        let err = select_deb_data_payload_member(&members)
-            .expect_err("missing data payload member should fail");
-        let message = err.to_string();
-        assert!(
-            message.contains("DEB payload archive missing data member"),
-            "unexpected error: {message}"
-        );
-        assert!(
-            message.contains("data.tar.zst > data.tar.xz > data.tar.gz > data.tar.bz2 > data.tar"),
-            "unexpected error: {message}"
-        );
-    }
-
-    #[test]
-    fn stage_deb_builds_data_extract_command_shape() {
-        let data_archive_path = Path::new("/tmp/.crosspack-deb-extract/data.tar.xz");
-        let raw_dir = Path::new("/tmp/raw");
-        let command = build_deb_data_extract_command(data_archive_path, raw_dir);
-
-        assert_eq!(command.get_program(), "tar");
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            args,
-            vec![
-                "-xf".to_string(),
-                data_archive_path.display().to_string(),
-                "-C".to_string(),
-                raw_dir.display().to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn stage_rpm_builds_rpm2cpio_command_shape() {
-        let artifact_path = Path::new("/tmp/demo.rpm");
-        let command = build_rpm2cpio_command(artifact_path);
-
-        assert_eq!(command.get_program(), "rpm2cpio");
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(args, vec![artifact_path.display().to_string()]);
-    }
-
-    #[test]
-    fn stage_rpm_builds_cpio_extract_command_shape() {
-        let raw_dir = Path::new("/tmp/raw");
-        let command = build_cpio_extract_command(raw_dir);
-
-        assert_eq!(command.get_program(), "cpio");
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            args,
-            vec![
-                "-idmu".to_string(),
-                "--no-absolute-filenames".to_string(),
-                "--quiet".to_string(),
-            ]
-        );
-        assert_eq!(
-            command
-                .get_current_dir()
-                .expect("cpio extraction command should set current_dir"),
-            raw_dir
-        );
-    }
-
-    #[test]
-    fn stage_rpm_returns_actionable_error_on_extract_failure() {
-        let artifact_path = Path::new("/tmp/demo.rpm");
-        let raw_dir = Path::new("/tmp/raw");
-        let err = stage_rpm_payload_with_runner(artifact_path, raw_dir, |_rpm2cpio, _cpio| {
-            Err(anyhow!(io::Error::new(
-                io::ErrorKind::NotFound,
-                "simulated missing rpm2cpio"
-            )))
-        })
-        .expect_err("missing extraction tool should be surfaced with guidance");
-
-        let message = err.to_string();
-        assert!(
-            message.contains("failed to stage RPM artifact via deterministic extraction"),
-            "unexpected error: {message}"
-        );
-        assert!(
-            message.contains("required extraction tools were not found on PATH"),
-            "unexpected error: {message}"
-        );
-        assert!(
-            message.contains(
-                "ensure both 'rpm2cpio' and 'cpio' are installed and available, then retry"
-            ),
-            "unexpected error: {message}"
         );
     }
 
@@ -5441,6 +5429,7 @@ mod tests {
                 exposed_bins: Vec::new(),
                 exposed_completions: vec![completion_rel_path],
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -5458,6 +5447,191 @@ mod tests {
         assert!(!native_launcher.exists());
         assert!(!layout.gui_state_path("demo").exists());
         assert!(!layout.gui_native_state_path("demo").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_runs_native_uninstall_before_managed_cleanup() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        write_native_sidecar_state(
+            &layout,
+            "demo",
+            &NativeSidecarState {
+                uninstall_actions: vec![NativeUninstallAction {
+                    key: "app:demo".to_string(),
+                    kind: "applications-symlink".to_string(),
+                    path: package_dir.display().to_string(),
+                }],
+            },
+        )
+        .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let err = uninstall_package(&layout, "demo")
+            .expect_err("native uninstall action should run before managed cleanup");
+        assert!(
+            err.to_string().contains("native uninstall action failed"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            package_dir.exists(),
+            "managed cleanup should not remove package dir after native action failure"
+        );
+        assert!(
+            layout.receipt_path("demo").exists(),
+            "managed cleanup should not remove receipt after native action failure"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_treats_not_found_as_idempotent_success() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        let missing_native_path = layout.prefix().join("already-removed.desktop");
+        write_native_sidecar_state(
+            &layout,
+            "demo",
+            &NativeSidecarState {
+                uninstall_actions: vec![NativeUninstallAction {
+                    key: "app:demo".to_string(),
+                    kind: "desktop-entry".to_string(),
+                    path: missing_native_path.display().to_string(),
+                }],
+            },
+        )
+        .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let result = uninstall_package(&layout, "demo")
+            .expect("missing native uninstall action target should be idempotent success");
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!package_dir.exists());
+        assert!(!layout.receipt_path("demo").exists());
+        assert!(
+            !layout.gui_native_state_path("demo").exists(),
+            "managed cleanup should clear sidecar state"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_failure_reports_action_context() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        let action = NativeUninstallAction {
+            key: "protocol:demo".to_string(),
+            kind: "unsupported-kind".to_string(),
+            path: "/tmp/demo-protocol".to_string(),
+        };
+        write_native_sidecar_state(
+            &layout,
+            "demo",
+            &NativeSidecarState {
+                uninstall_actions: vec![action.clone()],
+            },
+        )
+        .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let err = uninstall_package(&layout, "demo")
+            .expect_err("unsupported native uninstall action kind should fail uninstall");
+        let message = err.to_string();
+        assert!(
+            message.contains("native uninstall action failed"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(&action.key),
+            "error should include action key: {message}"
+        );
+        assert!(
+            message.contains(&action.kind),
+            "error should include action kind: {message}"
+        );
+        assert!(
+            message.contains(&action.path),
+            "error should include action path: {message}"
+        );
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
@@ -5492,6 +5666,7 @@ mod tests {
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -5856,6 +6031,7 @@ mod tests {
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,

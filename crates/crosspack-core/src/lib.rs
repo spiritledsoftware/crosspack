@@ -14,8 +14,6 @@ pub enum ArchiveType {
     AppImage,
     Exe,
     Pkg,
-    Deb,
-    Rpm,
     Msix,
     Appx,
 }
@@ -31,8 +29,6 @@ impl ArchiveType {
             Self::AppImage => "appimage",
             Self::Exe => "exe",
             Self::Pkg => "pkg",
-            Self::Deb => "deb",
-            Self::Rpm => "rpm",
             Self::Msix => "msix",
             Self::Appx => "appx",
         }
@@ -48,8 +44,6 @@ impl ArchiveType {
             Self::AppImage => "appimage",
             Self::Exe => "exe",
             Self::Pkg => "pkg",
-            Self::Deb => "deb",
-            Self::Rpm => "rpm",
             Self::Msix => "msix",
             Self::Appx => "appx",
         }
@@ -65,8 +59,6 @@ impl ArchiveType {
             "appimage" => Some(Self::AppImage),
             "exe" => Some(Self::Exe),
             "pkg" => Some(Self::Pkg),
-            "deb" => Some(Self::Deb),
-            "rpm" => Some(Self::Rpm),
             "msix" => Some(Self::Msix),
             "appx" => Some(Self::Appx),
             _ => None,
@@ -98,12 +90,6 @@ impl ArchiveType {
         }
         if lower.ends_with(".pkg") {
             return Some(Self::Pkg);
-        }
-        if lower.ends_with(".deb") {
-            return Some(Self::Deb);
-        }
-        if lower.ends_with(".rpm") {
-            return Some(Self::Rpm);
         }
         if lower.ends_with(".msix") {
             return Some(Self::Msix);
@@ -196,7 +182,7 @@ impl Artifact {
         if let Some(archive) = &self.archive {
             return ArchiveType::parse(archive).ok_or_else(|| {
                 anyhow!(
-                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage, exe, pkg, deb, rpm, msix, appx",
+                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage, exe, pkg, msix, appx",
                     self.target
                 )
             });
@@ -300,7 +286,7 @@ fn validate_protocol_scheme(scheme: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn all_archive_types() -> [ArchiveType; 12] {
+    fn all_archive_types() -> [ArchiveType; 10] {
         [
             ArchiveType::Zip,
             ArchiveType::TarGz,
@@ -310,8 +296,6 @@ mod tests {
             ArchiveType::AppImage,
             ArchiveType::Exe,
             ArchiveType::Pkg,
-            ArchiveType::Deb,
-            ArchiveType::Rpm,
             ArchiveType::Msix,
             ArchiveType::Appx,
         ]
@@ -580,7 +564,7 @@ ripgrep = "*"
     }
 
     #[test]
-    fn archive_type_parse_supports_exe_pkg_deb_rpm_msix_appx() {
+    fn archive_type_parse_supports_exe_pkg_msix_appx() {
         assert_eq!(
             ArchiveType::parse("exe").map(|kind| kind.as_str()),
             Some("exe")
@@ -590,14 +574,6 @@ ripgrep = "*"
             Some("pkg")
         );
         assert_eq!(
-            ArchiveType::parse("deb").map(|kind| kind.as_str()),
-            Some("deb")
-        );
-        assert_eq!(
-            ArchiveType::parse("rpm").map(|kind| kind.as_str()),
-            Some("rpm")
-        );
-        assert_eq!(
             ArchiveType::parse("msix").map(|kind| kind.as_str()),
             Some("msix")
         );
@@ -605,6 +581,12 @@ ripgrep = "*"
             ArchiveType::parse("appx").map(|kind| kind.as_str()),
             Some("appx")
         );
+    }
+
+    #[test]
+    fn archive_type_parse_rejects_deb_rpm() {
+        assert_eq!(ArchiveType::parse("deb"), None);
+        assert_eq!(ArchiveType::parse("rpm"), None);
     }
 
     #[test]
@@ -654,7 +636,7 @@ ripgrep = "*"
     }
 
     #[test]
-    fn archive_type_infer_from_url_supports_exe_pkg_deb_rpm_msix_appx() {
+    fn archive_type_infer_from_url_supports_exe_pkg_msix_appx() {
         assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg.exe").map(|kind| kind.as_str()),
             Some("exe")
@@ -664,14 +646,6 @@ ripgrep = "*"
             Some("pkg")
         );
         assert_eq!(
-            ArchiveType::infer_from_url("https://example.test/pkg.deb").map(|kind| kind.as_str()),
-            Some("deb")
-        );
-        assert_eq!(
-            ArchiveType::infer_from_url("https://example.test/pkg.rpm").map(|kind| kind.as_str()),
-            Some("rpm")
-        );
-        assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg.msix").map(|kind| kind.as_str()),
             Some("msix")
         );
@@ -679,6 +653,42 @@ ripgrep = "*"
             ArchiveType::infer_from_url("https://example.test/pkg.appx").map(|kind| kind.as_str()),
             Some("appx")
         );
+    }
+
+    #[test]
+    fn archive_type_infer_from_url_rejects_deb_rpm() {
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.deb"),
+            None
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.rpm"),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_type_error_message_excludes_deb_rpm() {
+        let artifact = Artifact {
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            url: "https://example.test/pkg.unknown".to_string(),
+            sha256: "abc123".to_string(),
+            size: None,
+            signature: None,
+            archive: Some("unknown".to_string()),
+            strip_components: None,
+            artifact_root: None,
+            binaries: vec![],
+            completions: vec![],
+            gui_apps: vec![],
+        };
+
+        let err = artifact
+            .archive_type()
+            .expect_err("unknown archive type should fail");
+        let msg = err.to_string();
+        assert!(!msg.contains("deb"), "error should not mention deb: {msg}");
+        assert!(!msg.contains("rpm"), "error should not mention rpm: {msg}");
     }
 
     #[test]

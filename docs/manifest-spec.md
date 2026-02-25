@@ -21,7 +21,7 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
 - `signature` (optional in v0.1): artifact-level detached signature reference.
-- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `deb`, `rpm`, `msix`, `appx`). If omitted, inferred from URL suffix.
+- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
@@ -31,12 +31,18 @@ Each package version is represented by a TOML manifest stored in the registry in
 ### Artifact Kind Policy
 
 - Artifact ingestion is deterministic and fail-closed.
-- Installer/package formats are extraction-only; Crosspack does not run vendor installer UI/execution fallback flows.
-- Windows-only kinds: `exe`, `msi`, `msix`, `appx`.
-- macOS-only kinds: `dmg`, `pkg`.
-- Linux-only kinds: `appimage`, `deb`, `rpm`.
+- Pre-1.0 scope reset: `deb` and `rpm` are removed from the supported artifact-kind contract.
+- Install mode defaults by artifact kind:
+  - managed: `zip`, `tar.gz`, `tar.zst`, `dmg`, `appimage`.
+  - native: `pkg`, `exe`, `msi`, `msix`, `appx`.
+- Host constraints are fail-closed:
+  - Windows-only native kinds: `exe`, `msi`, `msix`, `appx`.
+  - macOS-only native kind: `pkg`.
+  - macOS-only managed kind: `dmg`.
+  - Linux-only managed kind: `appimage`.
+- Installer/package formats are deterministic and extraction-oriented; Crosspack does not run vendor installer UI/execution fallback flows.
 - `appimage` artifacts are staged as direct payload files and require `strip_components = 0` with no `artifact_root` override.
-- Package maintainer scripts are not executed for `deb`, `rpm`, or `pkg`; script-dependent installs fail closed.
+- `pkg` maintainer scripts are not executed; script-dependent installs fail closed.
 
 ### Native GUI Registration Policy
 
