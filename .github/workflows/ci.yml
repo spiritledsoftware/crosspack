@@ -5,14 +5,18 @@ on:
     branches:
       - main
     paths-ignore:
+      - .agents/**
+      - .opencode/**
       - docs/**
-      - '**/*.md'
+      - "**/*.md"
       - .gitignore
       - LICENSE*
   pull_request:
     paths-ignore:
+      - .agents/**
+      - .opencode/**
       - docs/**
-      - '**/*.md'
+      - "**/*.md"
       - .gitignore
       - LICENSE*
 
