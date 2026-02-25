@@ -12,11 +12,12 @@ permissions:
 
 concurrency:
   group: release-please-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release-please:
     name: release-please
+    if: "${{ !contains(github.event.head_commit.message, 'chore(lockfile): refresh Cargo.lock for release') }}"
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub App token
@@ -67,10 +68,25 @@ jobs:
           git config user.email "crosspack-bot@users.noreply.github.com"
           git add Cargo.lock
           git commit -m "chore(lockfile): refresh Cargo.lock for release"
-          git push origin main
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "failed to push lockfile refresh commit after retries" >&2
+              exit 1
+            fi
+
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "failed to rebase lockfile refresh commit onto latest main" >&2
+              exit 1
+            fi
+          done
 
       - name: Run release-please
-        if: "${{ !contains(github.event.head_commit.message, 'chore(lockfile): refresh Cargo.lock for release') }}"
         id: release
         uses: googleapis/release-please-action@v4
         with:
