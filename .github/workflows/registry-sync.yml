@@ -11,9 +11,6 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
-
 jobs:
   sync-crosspack-version:
     name: sync-crosspack-version
@@ -21,8 +18,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Create GitHub App token for registry repository
+        if: steps.meta.outputs.skip == 'false'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CROSSPACK_BOT_APP_ID }}
+          private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ${{ github.event.repository.name }}
+            ${{ vars.CROSSPACK_REGISTRY_REPOSITORY_NAME || 'crosspack-registry' }}
+
       - name: Checkout crosspack repository
         uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Resolve release tag
         id: meta
@@ -49,17 +60,6 @@ jobs:
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub App token for registry repository
-        if: steps.meta.outputs.skip == 'false'
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.CROSSPACK_BOT_APP_ID }}
-          private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ vars.CROSSPACK_REGISTRY_REPOSITORY_NAME || 'crosspack-registry' }}
-          permission-contents: write
 
       - name: Sync registry metadata
         if: steps.meta.outputs.skip == 'false'
