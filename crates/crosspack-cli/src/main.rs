@@ -8,7 +8,7 @@ use std::process::Command;
 use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use crosspack_core::{
     ArchiveType, Artifact, ArtifactCompletionShell, ArtifactGuiApp, PackageManifest,
@@ -21,12 +21,14 @@ use crosspack_installer::{
     read_gui_native_state, read_install_receipts, read_transaction_metadata,
     register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
     remove_exposed_gui_asset, remove_file_if_exists, remove_native_gui_registration_best_effort,
-    set_active_transaction, uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots,
-    uninstall_package, uninstall_package_with_dependency_overrides_and_ignored_roots,
-    update_transaction_status, write_gui_exposure_state, write_gui_native_state,
-    write_install_receipt, write_pin, write_transaction_metadata, GuiExposureAsset,
-    GuiNativeRegistrationRecord, InstallReason, InstallReceipt, PrefixLayout,
-    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    run_package_native_uninstall_actions, set_active_transaction,
+    uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
+    uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
+    write_gui_exposure_state, write_gui_native_state, write_install_receipt, write_pin,
+    write_transaction_metadata, ArtifactInstallOptions, GuiExposureAsset,
+    GuiNativeRegistrationRecord, InstallInteractionPolicy, InstallMode, InstallReason,
+    InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
+    UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -60,6 +62,77 @@ const SEARCH_METADATA_GUIDANCE: &str =
 enum OutputStyle {
     Plain,
     Rich,
+}
+
+#[derive(Args, Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct EscalationArgs {
+    #[arg(long)]
+    non_interactive: bool,
+    #[arg(long, conflicts_with = "no_escalation")]
+    allow_escalation: bool,
+    #[arg(long, conflicts_with = "allow_escalation")]
+    no_escalation: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct EscalationPolicy {
+    allow_prompt_escalation: bool,
+    allow_non_prompt_escalation: bool,
+}
+
+fn resolve_escalation_policy(args: EscalationArgs) -> EscalationPolicy {
+    if args.no_escalation {
+        return EscalationPolicy {
+            allow_prompt_escalation: false,
+            allow_non_prompt_escalation: false,
+        };
+    }
+
+    if args.non_interactive {
+        return EscalationPolicy {
+            allow_prompt_escalation: false,
+            allow_non_prompt_escalation: args.allow_escalation,
+        };
+    }
+
+    EscalationPolicy {
+        allow_prompt_escalation: true,
+        allow_non_prompt_escalation: true,
+    }
+}
+
+fn install_interaction_policy(escalation_policy: EscalationPolicy) -> InstallInteractionPolicy {
+    InstallInteractionPolicy {
+        allow_prompt_escalation: escalation_policy.allow_prompt_escalation,
+        allow_non_prompt_escalation: escalation_policy.allow_non_prompt_escalation,
+    }
+}
+
+fn install_mode_for_archive_type(archive_type: ArchiveType) -> InstallMode {
+    match archive_type {
+        ArchiveType::Zip
+        | ArchiveType::TarGz
+        | ArchiveType::TarZst
+        | ArchiveType::Dmg
+        | ArchiveType::AppImage => InstallMode::Managed,
+        ArchiveType::Msi
+        | ArchiveType::Exe
+        | ArchiveType::Pkg
+        | ArchiveType::Msix
+        | ArchiveType::Appx => InstallMode::Native,
+    }
+}
+
+fn build_artifact_install_options<'a>(
+    resolved: &'a ResolvedInstall,
+    interaction_policy: InstallInteractionPolicy,
+) -> ArtifactInstallOptions<'a> {
+    ArtifactInstallOptions {
+        strip_components: resolved.artifact.strip_components.unwrap_or(0),
+        artifact_root: resolved.artifact.artifact_root.as_deref(),
+        install_mode: install_mode_for_archive_type(resolved.archive_type),
+        interaction_policy,
+    }
 }
 
 fn resolve_output_style(stdout_is_tty: bool, _stderr_is_tty: bool) -> OutputStyle {
@@ -132,6 +205,8 @@ enum Commands {
         force_redownload: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
+        #[command(flatten)]
+        escalation: EscalationArgs,
     },
     Upgrade {
         spec: Option<String>,
@@ -139,13 +214,22 @@ enum Commands {
         dry_run: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
+        #[command(flatten)]
+        escalation: EscalationArgs,
     },
     Rollback {
         txid: Option<String>,
+        #[command(flatten)]
+        escalation: EscalationArgs,
     },
-    Repair,
+    Repair {
+        #[command(flatten)]
+        escalation: EscalationArgs,
+    },
     Uninstall {
         name: String,
+        #[command(flatten)]
+        escalation: EscalationArgs,
     },
     List,
     Pin {
@@ -164,6 +248,8 @@ enum Commands {
         dry_run: bool,
         #[arg(long)]
         force_redownload: bool,
+        #[command(flatten)]
+        escalation: EscalationArgs,
     },
     Doctor,
     Version,
@@ -283,9 +369,12 @@ fn main() -> Result<()> {
             dry_run,
             force_redownload,
             provider,
+            escalation,
         } => {
             let (name, requirement) = parse_spec(&spec)?;
             let provider_overrides = parse_provider_overrides(&provider)?;
+            let escalation_policy = resolve_escalation_policy(escalation);
+            let interaction_policy = install_interaction_policy(escalation_policy);
             let output_style = current_output_style();
 
             let prefix = default_user_prefix()?;
@@ -370,7 +459,11 @@ fn main() -> Result<()> {
                         &tx.txid,
                         &TransactionJournalEntry {
                             seq: journal_seq,
-                            step: format!("install_package:{}", package.manifest.name),
+                            step: package_apply_step_name(
+                                "install",
+                                &package.manifest.name,
+                                install_mode_for_archive_type(package.archive_type),
+                            ),
                             state: "done".to_string(),
                             path: Some(package.manifest.name.clone()),
                         },
@@ -384,8 +477,11 @@ fn main() -> Result<()> {
                         &dependencies,
                         &root_names,
                         &planned_dependency_overrides,
-                        snapshot_id.as_deref(),
-                        force_redownload,
+                        InstallResolvedOptions {
+                            snapshot_id: snapshot_id.as_deref(),
+                            force_redownload,
+                            interaction_policy,
+                        },
                     )?;
                     print_install_outcome(&outcome, output_style);
                 }
@@ -411,8 +507,11 @@ fn main() -> Result<()> {
             spec,
             dry_run,
             provider,
+            escalation,
         } => {
             let provider_overrides = parse_provider_overrides(&provider)?;
+            let escalation_policy = resolve_escalation_policy(escalation);
+            let interaction_policy = install_interaction_policy(escalation_policy);
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             run_upgrade_command(
@@ -421,19 +520,23 @@ fn main() -> Result<()> {
                 spec,
                 dry_run,
                 &provider_overrides,
+                interaction_policy,
             )?;
         }
-        Commands::Rollback { txid } => {
+        Commands::Rollback { txid, escalation } => {
+            let _escalation_policy = resolve_escalation_policy(escalation);
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             run_rollback_command(&layout, txid)?;
         }
-        Commands::Repair => {
+        Commands::Repair { escalation } => {
+            let _escalation_policy = resolve_escalation_policy(escalation);
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             run_repair_command(&layout)?;
         }
-        Commands::Uninstall { name } => {
+        Commands::Uninstall { name, escalation } => {
+            let _escalation_policy = resolve_escalation_policy(escalation);
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             run_uninstall_command(&layout, name)?;
@@ -513,6 +616,7 @@ fn main() -> Result<()> {
         Commands::SelfUpdate {
             dry_run,
             force_redownload,
+            escalation,
         } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -521,6 +625,7 @@ fn main() -> Result<()> {
                 cli.registry_root.as_deref(),
                 dry_run,
                 force_redownload,
+                escalation,
             )?;
         }
         Commands::Doctor => {
@@ -1106,6 +1211,7 @@ fn run_upgrade_command(
     spec: Option<String>,
     dry_run: bool,
     provider_overrides: &BTreeMap<String, String>,
+    interaction_policy: InstallInteractionPolicy,
 ) -> Result<()> {
     let output_style = current_output_style();
     ensure_upgrade_command_ready(layout)?;
@@ -1289,7 +1395,11 @@ fn run_upgrade_command(
                         &tx.txid,
                         &TransactionJournalEntry {
                             seq: journal_seq,
-                            step: format!("upgrade_package:{}", package.manifest.name),
+                            step: package_apply_step_name(
+                                "upgrade",
+                                &package.manifest.name,
+                                install_mode_for_archive_type(package.archive_type),
+                            ),
                             state: "done".to_string(),
                             path: Some(package.manifest.name.clone()),
                         },
@@ -1303,8 +1413,11 @@ fn run_upgrade_command(
                         &dependencies,
                         &root_names,
                         &planned_dependency_overrides,
-                        snapshot_id.as_deref(),
-                        false,
+                        InstallResolvedOptions {
+                            snapshot_id: snapshot_id.as_deref(),
+                            force_redownload: false,
+                            interaction_policy,
+                        },
                     )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         println!(
@@ -1435,7 +1548,11 @@ fn run_upgrade_command(
                             &tx.txid,
                             &TransactionJournalEntry {
                                 seq: journal_seq,
-                                step: format!("upgrade_package:{}", package.manifest.name),
+                                step: package_apply_step_name(
+                                    "upgrade",
+                                    &package.manifest.name,
+                                    install_mode_for_archive_type(package.archive_type),
+                                ),
                                 state: "done".to_string(),
                                 path: Some(package.manifest.name.clone()),
                             },
@@ -1449,8 +1566,11 @@ fn run_upgrade_command(
                             &dependencies,
                             &plan.root_names,
                             &planned_dependency_overrides,
-                            snapshot_id.as_deref(),
-                            false,
+                            InstallResolvedOptions {
+                                snapshot_id: snapshot_id.as_deref(),
+                                force_redownload: false,
+                                interaction_policy,
+                            },
                         )?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
@@ -1641,13 +1761,26 @@ fn read_transaction_journal_records(
 
 fn rollback_package_from_step(step: &str) -> Option<&str> {
     step.strip_prefix("install_package:")
+        .or_else(|| step.strip_prefix("install_native_package:"))
         .or_else(|| step.strip_prefix("upgrade_package:"))
+        .or_else(|| step.strip_prefix("upgrade_native_package:"))
         .or_else(|| step.strip_prefix("uninstall_target:"))
         .or_else(|| step.strip_prefix("prune_dependency:"))
 }
 
 fn backup_package_from_step(step: &str) -> Option<&str> {
     step.strip_prefix("backup_package_state:")
+}
+
+fn package_apply_step_name(
+    operation: &str,
+    package_name: &str,
+    install_mode: InstallMode,
+) -> String {
+    match install_mode {
+        InstallMode::Managed => format!("{operation}_package:{package_name}"),
+        InstallMode::Native => format!("{operation}_native_package:{package_name}"),
+    }
 }
 
 fn snapshot_manifest_path(snapshot_root: &Path) -> PathBuf {
@@ -1668,6 +1801,26 @@ fn snapshot_bin_path(snapshot_root: &Path, bin_name: &str) -> PathBuf {
     snapshot_root.join("bins").join(bin_name)
 }
 
+fn snapshot_completions_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("completions")
+}
+
+fn snapshot_completion_path(snapshot_root: &Path, completion_storage_rel_path: &str) -> PathBuf {
+    snapshot_completions_root(snapshot_root).join(completion_storage_rel_path)
+}
+
+fn snapshot_gui_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("gui")
+}
+
+fn snapshot_gui_asset_path(snapshot_root: &Path, gui_storage_rel_path: &str) -> PathBuf {
+    snapshot_gui_root(snapshot_root).join(gui_storage_rel_path)
+}
+
+fn snapshot_native_sidecar_path(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("native").join("sidecar.state")
+}
+
 fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifest> {
     let path = snapshot_manifest_path(snapshot_root);
     let raw = match std::fs::read_to_string(&path) {
@@ -1677,6 +1830,9 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
                 package_exists: false,
                 receipt_exists: false,
                 bins: Vec::new(),
+                completions: Vec::new(),
+                gui_assets: Vec::new(),
+                native_sidecar_exists: false,
             });
         }
         Err(err) => {
@@ -1689,6 +1845,9 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
         package_exists: false,
         receipt_exists: false,
         bins: Vec::new(),
+        completions: Vec::new(),
+        gui_assets: Vec::new(),
+        native_sidecar_exists: false,
     };
 
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -1698,6 +1857,18 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
             manifest.receipt_exists = value == "1";
         } else if let Some(bin_name) = line.strip_prefix("bin=") {
             manifest.bins.push(bin_name.to_string());
+        } else if let Some(completion) = line.strip_prefix("completion=") {
+            manifest.completions.push(completion.to_string());
+        } else if let Some(gui_asset) = line.strip_prefix("gui_asset=") {
+            let Some((key, rel_path)) = gui_asset.split_once('\t') else {
+                return Err(anyhow!("invalid snapshot manifest gui_asset row"));
+            };
+            manifest.gui_assets.push(GuiExposureAsset {
+                key: key.to_string(),
+                rel_path: rel_path.to_string(),
+            });
+        } else if let Some(value) = line.strip_prefix("native_sidecar_exists=") {
+            manifest.native_sidecar_exists = value == "1";
         }
     }
 
@@ -1718,6 +1889,20 @@ fn write_snapshot_manifest(snapshot_root: &Path, manifest: &PackageSnapshotManif
     for bin in &manifest.bins {
         lines.push(format!("bin={bin}"));
     }
+    for completion in &manifest.completions {
+        lines.push(format!("completion={completion}"));
+    }
+    for asset in &manifest.gui_assets {
+        lines.push(format!("gui_asset={}\t{}", asset.key, asset.rel_path));
+    }
+    lines.push(format!(
+        "native_sidecar_exists={}",
+        if manifest.native_sidecar_exists {
+            "1"
+        } else {
+            "0"
+        }
+    ));
     std::fs::write(&path, lines.join("\n"))
         .with_context(|| format!("failed writing snapshot manifest: {}", path.display()))
 }
@@ -1801,11 +1986,36 @@ fn capture_package_state_snapshot(
             snapshot_root.join("bins").display()
         )
     })?;
+    std::fs::create_dir_all(snapshot_completions_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot completions dir: {}",
+            snapshot_completions_root(&snapshot_root).display()
+        )
+    })?;
+    std::fs::create_dir_all(snapshot_gui_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot gui dir: {}",
+            snapshot_gui_root(&snapshot_root).display()
+        )
+    })?;
+    let snapshot_native_dir = snapshot_native_sidecar_path(&snapshot_root)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("failed resolving rollback snapshot native state directory"))?;
+    std::fs::create_dir_all(&snapshot_native_dir).with_context(|| {
+        format!(
+            "failed creating rollback snapshot native state dir: {}",
+            snapshot_native_dir.display()
+        )
+    })?;
 
     let mut manifest = PackageSnapshotManifest {
         package_exists: false,
         receipt_exists: false,
         bins: Vec::new(),
+        completions: Vec::new(),
+        gui_assets: Vec::new(),
+        native_sidecar_exists: false,
     };
 
     let package_root = layout.pkgs_dir().join(package_name);
@@ -1845,7 +2055,44 @@ fn capture_package_state_snapshot(
                         })?;
                 }
             }
+
+            manifest.completions = receipt.exposed_completions.clone();
+            for completion in &manifest.completions {
+                let source = exposed_completion_path(layout, completion)?;
+                if source.exists() {
+                    copy_tree(
+                        &source,
+                        &snapshot_completion_path(&snapshot_root, completion),
+                    )?;
+                }
+            }
         }
+    }
+
+    manifest.gui_assets = read_gui_exposure_state(layout, package_name)?;
+    for gui_asset in &manifest.gui_assets {
+        let source = gui_asset_path(layout, &gui_asset.rel_path)?;
+        if source.exists() {
+            copy_tree(
+                &source,
+                &snapshot_gui_asset_path(&snapshot_root, &gui_asset.rel_path),
+            )?;
+        }
+    }
+
+    let native_sidecar_path = layout.gui_native_state_path(package_name);
+    if native_sidecar_path.exists() {
+        manifest.native_sidecar_exists = true;
+        std::fs::copy(
+            &native_sidecar_path,
+            snapshot_native_sidecar_path(&snapshot_root),
+        )
+        .with_context(|| {
+            format!(
+                "failed copying native sidecar snapshot {}",
+                snapshot_native_sidecar_path(&snapshot_root).display()
+            )
+        })?;
     }
 
     write_snapshot_manifest(&snapshot_root, &manifest)?;
@@ -1946,11 +2193,24 @@ fn restore_package_state_snapshot(
     snapshot_root: Option<&Path>,
 ) -> Result<()> {
     let package_root = layout.pkgs_dir().join(package_name);
-    remove_binary_entries_for_package_root(layout, &package_root)?;
-
     let existing_receipt = read_install_receipts(layout)?
         .into_iter()
         .find(|receipt| receipt.name == package_name);
+    let native_records = read_gui_native_state(layout, package_name)?;
+    let has_native_sidecar = !native_records.is_empty();
+    let existing_receipt_mode = existing_receipt
+        .as_ref()
+        .map(|receipt| receipt.install_mode)
+        .unwrap_or(InstallMode::Managed);
+    let should_run_native_cleanup = existing_receipt_mode == InstallMode::Native
+        || (existing_receipt.is_none() && has_native_sidecar);
+
+    if should_run_native_cleanup {
+        run_package_native_uninstall_actions(layout, package_name)?;
+    }
+
+    remove_binary_entries_for_package_root(layout, &package_root)?;
+
     let existing_bins = existing_receipt
         .as_ref()
         .map(|receipt| receipt.exposed_bins.clone())
@@ -1958,6 +2218,25 @@ fn restore_package_state_snapshot(
     for bin_name in existing_bins {
         remove_exposed_binary(layout, &bin_name)?;
     }
+
+    let existing_completions = existing_receipt
+        .as_ref()
+        .map(|receipt| receipt.exposed_completions.clone())
+        .unwrap_or_default();
+    for completion in existing_completions {
+        remove_exposed_completion(layout, &completion)?;
+    }
+
+    let existing_gui_assets = read_gui_exposure_state(layout, package_name)?;
+    for gui_asset in &existing_gui_assets {
+        remove_exposed_gui_asset(layout, gui_asset)?;
+    }
+    write_gui_exposure_state(layout, package_name, &[])?;
+
+    if !should_run_native_cleanup && !native_records.is_empty() {
+        let _native_warnings = remove_native_gui_registration_best_effort(&native_records)?;
+    }
+    write_gui_native_state(layout, package_name, &[])?;
 
     if package_root.exists() {
         std::fs::remove_dir_all(&package_root).with_context(|| {
@@ -1971,12 +2250,20 @@ fn restore_package_state_snapshot(
         return Ok(());
     };
 
-    let manifest = read_snapshot_manifest(snapshot_root)?;
-    if manifest.package_exists && snapshot_package_root(snapshot_root).exists() {
+    let PackageSnapshotManifest {
+        package_exists,
+        receipt_exists,
+        bins,
+        completions,
+        gui_assets,
+        native_sidecar_exists,
+    } = read_snapshot_manifest(snapshot_root)?;
+
+    if package_exists && snapshot_package_root(snapshot_root).exists() {
         copy_tree(&snapshot_package_root(snapshot_root), &package_root)?;
     }
 
-    if manifest.receipt_exists {
+    if receipt_exists {
         let src = snapshot_receipt_path(snapshot_root, package_name);
         if src.exists() {
             if let Some(parent) = layout.receipt_path(package_name).parent() {
@@ -1992,7 +2279,7 @@ fn restore_package_state_snapshot(
         }
     }
 
-    for bin_name in manifest.bins {
+    for bin_name in bins {
         let dst = bin_path(layout, &bin_name);
         remove_file_if_exists(&dst)?;
         let src = snapshot_bin_path(snapshot_root, &bin_name);
@@ -2005,6 +2292,55 @@ fn restore_package_state_snapshot(
                 format!(
                     "failed restoring binary '{}' from {}",
                     bin_name,
+                    src.display()
+                )
+            })?;
+        }
+    }
+
+    for completion in completions {
+        let dst = exposed_completion_path(layout, &completion)?;
+        remove_file_if_exists(&dst)?;
+        let src = snapshot_completion_path(snapshot_root, &completion);
+        if src.exists() {
+            copy_tree(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring completion '{}' from {}",
+                    completion,
+                    src.display()
+                )
+            })?;
+        }
+    }
+
+    for gui_asset in &gui_assets {
+        let dst = gui_asset_path(layout, &gui_asset.rel_path)?;
+        remove_file_if_exists(&dst)?;
+        let src = snapshot_gui_asset_path(snapshot_root, &gui_asset.rel_path);
+        if src.exists() {
+            copy_tree(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring gui asset '{}' from {}",
+                    gui_asset.key,
+                    src.display()
+                )
+            })?;
+        }
+    }
+    write_gui_exposure_state(layout, package_name, &gui_assets)?;
+
+    if native_sidecar_exists {
+        let dst = layout.gui_native_state_path(package_name);
+        let src = snapshot_native_sidecar_path(snapshot_root);
+        remove_file_if_exists(&dst)?;
+        if src.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::copy(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring native sidecar state from {}",
                     src.display()
                 )
             })?;
@@ -2383,7 +2719,9 @@ fn run_self_update_command(
     registry_root: Option<&Path>,
     dry_run: bool,
     force_redownload: bool,
+    escalation: EscalationArgs,
 ) -> Result<()> {
+    let _escalation_policy = resolve_escalation_policy(escalation);
     let output_style = current_output_style();
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "self-update")?;
@@ -2402,7 +2740,7 @@ fn run_self_update_command(
         run_update_command(&store, &[])?;
     }
 
-    let args = build_self_update_install_args(registry_root, dry_run, force_redownload);
+    let args = build_self_update_install_args(registry_root, dry_run, force_redownload, escalation);
     println!(
         "{}",
         render_status_line(
@@ -2418,6 +2756,7 @@ fn build_self_update_install_args(
     registry_root: Option<&Path>,
     dry_run: bool,
     force_redownload: bool,
+    escalation: EscalationArgs,
 ) -> Vec<OsString> {
     let mut args = Vec::new();
     if let Some(root) = registry_root {
@@ -2433,6 +2772,15 @@ fn build_self_update_install_args(
     }
     if force_redownload {
         args.push(OsString::from("--force-redownload"));
+    }
+    if escalation.non_interactive {
+        args.push(OsString::from("--non-interactive"));
+    }
+    if escalation.allow_escalation {
+        args.push(OsString::from("--allow-escalation"));
+    }
+    if escalation.no_escalation {
+        args.push(OsString::from("--no-escalation"));
     }
 
     args
@@ -2824,6 +3172,9 @@ struct PackageSnapshotManifest {
     package_exists: bool,
     receipt_exists: bool,
     bins: Vec<String>,
+    completions: Vec<String>,
+    gui_assets: Vec<GuiExposureAsset>,
+    native_sidecar_exists: bool,
 }
 
 fn begin_transaction(
@@ -3390,14 +3741,20 @@ fn sync_native_gui_registration_state_best_effort(
     Ok((current_records, warnings))
 }
 
+#[derive(Clone, Copy)]
+struct InstallResolvedOptions<'a> {
+    snapshot_id: Option<&'a str>,
+    force_redownload: bool,
+    interaction_policy: InstallInteractionPolicy,
+}
+
 fn install_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
     dependency_receipts: &[String],
     root_names: &[String],
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
-    snapshot_id: Option<&str>,
-    force_redownload: bool,
+    options: InstallResolvedOptions<'_>,
 ) -> Result<InstallOutcome> {
     let receipts = read_install_receipts(layout)?;
     validate_install_preflight_for_resolved(layout, resolved, &receipts)?;
@@ -3414,7 +3771,11 @@ fn install_resolved(
         &resolved.resolved_target,
         resolved.archive_type,
     );
-    let download_status = download_artifact(&resolved.artifact.url, &cache_path, force_redownload)?;
+    let download_status = download_artifact(
+        &resolved.artifact.url,
+        &cache_path,
+        options.force_redownload,
+    )?;
 
     let checksum_ok = verify_sha256_file(&cache_path, &resolved.artifact.sha256)?;
     if !checksum_ok {
@@ -3426,14 +3787,15 @@ fn install_resolved(
         ));
     }
 
+    let install_options = build_artifact_install_options(resolved, options.interaction_policy);
+    let selected_install_mode = install_options.install_mode;
     let install_root = install_from_artifact(
         layout,
         &resolved.manifest.name,
         &resolved.manifest.version.to_string(),
         &cache_path,
         resolved.archive_type,
-        resolved.artifact.strip_components.unwrap_or(0),
-        resolved.artifact.artifact_root.as_deref(),
+        install_options,
     )?;
 
     if let Err(err) =
@@ -3514,7 +3876,8 @@ fn install_resolved(
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
         exposed_completions: exposed_completions.clone(),
-        snapshot_id: snapshot_id.map(ToOwned::to_owned),
+        snapshot_id: options.snapshot_id.map(ToOwned::to_owned),
+        install_mode: selected_install_mode,
         install_reason: determine_install_reason(
             &resolved.manifest.name,
             root_names,
@@ -4352,6 +4715,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     #[test]
     fn begin_transaction_writes_planning_metadata_and_active_marker() {
         let layout = test_layout();
@@ -4486,8 +4851,15 @@ mod tests {
         set_active_transaction(&layout, "tx-blocked-upgrade-dispatch")
             .expect("must write active marker");
 
-        let err = run_upgrade_command(&layout, None, None, false, &BTreeMap::new())
-            .expect_err("active transaction should block upgrade command");
+        let err = run_upgrade_command(
+            &layout,
+            None,
+            None,
+            false,
+            &BTreeMap::new(),
+            InstallInteractionPolicy::default(),
+        )
+        .expect_err("active transaction should block upgrade command");
         assert!(
             err.to_string().contains(
                 "cannot upgrade (reason=active_transaction command=upgrade): transaction tx-blocked-upgrade-dispatch requires repair (reason=failed)"
@@ -4771,6 +5143,104 @@ mod tests {
     }
 
     #[test]
+    fn capture_snapshot_includes_completions_gui_and_native_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_name = "demo";
+        let package_version = "1.0.0";
+        let package_root = layout.package_dir(package_name, package_version);
+        std::fs::create_dir_all(&package_root).expect("must create package root");
+        std::fs::write(package_root.join("demo"), "#!/bin/sh\n").expect("must write package bin");
+
+        let completion_rel_path = "packages/bash/demo--demo".to_string();
+        let completion_path = exposed_completion_path(&layout, &completion_rel_path)
+            .expect("must resolve completion path");
+        std::fs::create_dir_all(
+            completion_path
+                .parent()
+                .expect("must have completion parent"),
+        )
+        .expect("must create completion parent");
+        std::fs::write(&completion_path, "complete -F _demo demo\n")
+            .expect("must write completion fixture");
+
+        let gui_asset = GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "launchers/demo.desktop".to_string(),
+        };
+        let gui_path =
+            gui_asset_path(&layout, &gui_asset.rel_path).expect("must resolve gui asset path");
+        std::fs::create_dir_all(gui_path.parent().expect("must have gui parent"))
+            .expect("must create gui parent");
+        std::fs::write(&gui_path, "[Desktop Entry]\nName=Demo\n")
+            .expect("must write gui asset fixture");
+        write_gui_exposure_state(&layout, package_name, std::slice::from_ref(&gui_asset))
+            .expect("must write gui exposure state");
+
+        let native_record = GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: layout
+                .prefix()
+                .join("native-demo.desktop")
+                .display()
+                .to_string(),
+        };
+        write_gui_native_state(&layout, package_name, std::slice::from_ref(&native_record))
+            .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: package_name.to_string(),
+                version: package_version.to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: vec!["demo".to_string()],
+                exposed_completions: vec![completion_rel_path.clone()],
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write install receipt");
+        std::fs::write(bin_path(&layout, "demo"), "old-bin").expect("must write exposed binary");
+
+        let snapshot_root = capture_package_state_snapshot(&layout, "tx-capture", package_name)
+            .expect("must capture snapshot");
+        let manifest = read_snapshot_manifest(&snapshot_root).expect("must read snapshot manifest");
+
+        assert!(manifest.package_exists);
+        assert!(manifest.receipt_exists);
+        assert_eq!(manifest.bins, vec!["demo".to_string()]);
+        assert_eq!(manifest.completions, vec![completion_rel_path.clone()]);
+        assert_eq!(manifest.gui_assets, vec![gui_asset.clone()]);
+        assert!(manifest.native_sidecar_exists);
+
+        assert!(snapshot_bin_path(&snapshot_root, "demo").exists());
+        assert!(
+            snapshot_completion_path(&snapshot_root, &completion_rel_path).exists(),
+            "completion file should be captured"
+        );
+        assert!(
+            snapshot_gui_asset_path(&snapshot_root, &gui_asset.rel_path).exists(),
+            "gui asset file should be captured"
+        );
+        assert!(
+            snapshot_native_sidecar_path(&snapshot_root).exists(),
+            "native sidecar state file should be captured"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn run_rollback_command_replays_compensating_steps_and_restores_filesystem_state() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -4808,6 +5278,7 @@ mod tests {
             exposed_bins: vec!["demo".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -4889,6 +5360,7 @@ mod tests {
             exposed_bins: vec!["demo".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 2,
@@ -4948,6 +5420,228 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(bin_path(&layout, "demo")).expect("must read restored binary"),
             "old-bin"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn rollback_replays_native_uninstall_before_managed_restore() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-native-order";
+        let package_name = "demo";
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_266,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must set active marker");
+
+        let old_package_root = layout.pkgs_dir().join(package_name).join("1.0.0");
+        std::fs::create_dir_all(&old_package_root).expect("must create old package root");
+        let restored_marker = old_package_root.join("restored.txt");
+        std::fs::write(&restored_marker, "restored").expect("must write old package marker");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: package_name.to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must seed old receipt");
+
+        let snapshot_root = capture_package_state_snapshot(&layout, txid, package_name)
+            .expect("must capture snapshot");
+
+        std::fs::remove_dir_all(layout.pkgs_dir().join(package_name))
+            .expect("must remove old package state");
+        let current_package_root = layout.pkgs_dir().join(package_name).join("2.0.0");
+        std::fs::create_dir_all(&current_package_root).expect("must create current package root");
+        std::fs::write(current_package_root.join("current.txt"), "current")
+            .expect("must write current package marker");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: package_name.to_string(),
+                version: "2.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 2,
+            },
+        )
+        .expect("must seed current native receipt");
+
+        let native_live_side_effect = layout.prefix().join("native-live.desktop");
+        std::fs::write(&native_live_side_effect, "native").expect("must write native side effect");
+        write_gui_native_state(
+            &layout,
+            package_name,
+            &[
+                GuiNativeRegistrationRecord {
+                    key: "app:demo-live".to_string(),
+                    kind: "desktop-entry".to_string(),
+                    path: native_live_side_effect.display().to_string(),
+                },
+                GuiNativeRegistrationRecord {
+                    key: "app:demo-restored".to_string(),
+                    kind: "desktop-entry".to_string(),
+                    path: restored_marker.display().to_string(),
+                },
+            ],
+        )
+        .expect("must seed native sidecar state");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("install_native_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append native mutating step");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback should replay native step and restore state");
+
+        assert!(
+            !native_live_side_effect.exists(),
+            "native uninstall side effects should be reversed"
+        );
+        assert!(
+            restored_marker.exists(),
+            "native uninstall must run before managed restore operations"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn rollback_native_cleanup_uses_sidecar_when_receipt_missing() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-native-no-receipt";
+        let package_name = "demo";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_269,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must set active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(txid)
+            .join("rollback")
+            .join(package_name);
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+
+        write_gui_native_state(
+            &layout,
+            package_name,
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "unsupported-kind".to_string(),
+                path: "/tmp/native-demo".to_string(),
+            }],
+        )
+        .expect("must seed native sidecar state");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("install_native_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append native mutating step");
+
+        let err = run_rollback_command(&layout, Some(txid.to_string()))
+            .expect_err("native sidecar cleanup should run even without receipt");
+        let message = err.to_string();
+        assert!(
+            message.contains("rollback failed tx-native-no-receipt"),
+            "unexpected error: {message}"
+        );
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read rollback metadata")
+            .expect("metadata should still exist");
+        assert_eq!(
+            updated.status, "failed",
+            "native rollback failure should preserve repairable failed state"
+        );
+        assert!(
+            layout.gui_native_state_path(package_name).exists(),
+            "sidecar should remain for repair when native cleanup fails"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -5045,6 +5739,124 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(layout.prefix());
         }
+    }
+
+    #[test]
+    fn repair_handles_interrupted_native_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-repair-native";
+        let package_name = "native-demo";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: "applying".to_string(),
+            started_at_unix: 1_771_001_268,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must set active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(txid)
+            .join("rollback")
+            .join(package_name);
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+
+        let current_root = layout.pkgs_dir().join(package_name).join("9.9.9");
+        std::fs::create_dir_all(&current_root).expect("must create interrupted package root");
+        std::fs::write(current_root.join("partial.txt"), "interrupted")
+            .expect("must write interrupted package marker");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: package_name.to_string(),
+                version: "9.9.9".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must seed interrupted native receipt");
+
+        let native_side_effect = layout.prefix().join("native-repair.desktop");
+        std::fs::write(&native_side_effect, "native").expect("must seed native side effect");
+        write_gui_native_state(
+            &layout,
+            package_name,
+            &[GuiNativeRegistrationRecord {
+                key: "app:native-demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: native_side_effect.display().to_string(),
+            }],
+        )
+        .expect("must seed native sidecar state");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("install_native_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append native mutating step");
+
+        run_repair_command(&layout).expect("repair should rollback interrupted native transaction");
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should exist");
+        assert_eq!(updated.status, "rolled_back");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active marker")
+                .is_none(),
+            "repair should clear active marker"
+        );
+        assert!(
+            !layout.pkgs_dir().join(package_name).exists(),
+            "repair should remove interrupted package tree"
+        );
+        assert!(
+            !native_side_effect.exists(),
+            "repair should replay native uninstall side effects"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
@@ -6307,6 +7119,7 @@ path = "rg"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6367,6 +7180,7 @@ path = "rg"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6423,6 +7237,7 @@ path = "rg"
             exposed_bins: vec!["zoxide".to_string()],
             exposed_completions: vec![desired.clone()],
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6487,6 +7302,7 @@ path = "rg"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: vec![desired.clone()],
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6673,6 +7489,7 @@ ripgrep-legacy = "<2.0.0"
                 exposed_bins: vec!["rg".to_string()],
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -6688,6 +7505,7 @@ ripgrep-legacy = "<2.0.0"
                 exposed_bins: vec!["other".to_string()],
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -6724,6 +7542,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6752,6 +7571,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["app".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6767,6 +7587,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6805,6 +7626,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["app".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6820,6 +7642,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["legacy-a".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6835,6 +7658,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["legacy-b".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6880,6 +7704,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["legacy-a".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6895,6 +7720,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["legacy-b".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6934,6 +7760,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["app".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6949,6 +7776,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -6989,6 +7817,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7020,6 +7849,7 @@ ripgrep-legacy = "*"
             exposed_bins: Vec::new(),
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7043,6 +7873,7 @@ ripgrep-legacy = "*"
             exposed_bins: Vec::new(),
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7076,6 +7907,7 @@ ripgrep-legacy = "*"
             exposed_bins: Vec::new(),
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7098,6 +7930,7 @@ ripgrep-legacy = "*"
             exposed_bins: Vec::new(),
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7120,6 +7953,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7135,6 +7969,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7157,6 +7992,7 @@ ripgrep-legacy = "*"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Root,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7180,6 +8016,7 @@ ripgrep-legacy = "*"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -7195,6 +8032,7 @@ ripgrep-legacy = "*"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -7219,6 +8057,7 @@ ripgrep-legacy = "*"
             exposed_bins: Vec::new(),
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7242,6 +8081,7 @@ ripgrep-legacy = "*"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -7257,6 +8097,7 @@ ripgrep-legacy = "*"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -7285,6 +8126,7 @@ ripgrep-legacy = "*"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -7300,6 +8142,7 @@ ripgrep-legacy = "*"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Dependency,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -7326,6 +8169,7 @@ ripgrep-legacy = "*"
             exposed_bins: Vec::new(),
             exposed_completions: Vec::new(),
             snapshot_id: None,
+            install_mode: InstallMode::Managed,
             install_reason: InstallReason::Dependency,
             install_status: "installed".to_string(),
             installed_at_unix: 1,
@@ -7403,6 +8247,119 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn install_defaults_to_auto_escalation_when_interactive() {
+        let cli =
+            Cli::try_parse_from(["crosspack", "install", "ripgrep"]).expect("command must parse");
+
+        match cli.command {
+            Commands::Install { escalation, .. } => {
+                let policy = resolve_escalation_policy(escalation);
+                assert!(policy.allow_prompt_escalation);
+                assert!(policy.allow_non_prompt_escalation);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_interactive_disables_prompt_escalation() {
+        let policy = resolve_escalation_policy(EscalationArgs {
+            non_interactive: true,
+            allow_escalation: false,
+            no_escalation: false,
+        });
+
+        assert!(!policy.allow_prompt_escalation);
+        assert!(!policy.allow_non_prompt_escalation);
+    }
+
+    #[test]
+    fn non_interactive_allow_escalation_enables_non_prompt_paths() {
+        let policy = resolve_escalation_policy(EscalationArgs {
+            non_interactive: true,
+            allow_escalation: true,
+            no_escalation: false,
+        });
+
+        assert!(!policy.allow_prompt_escalation);
+        assert!(policy.allow_non_prompt_escalation);
+    }
+
+    #[test]
+    fn no_escalation_overrides_interactive_default() {
+        let policy = resolve_escalation_policy(EscalationArgs {
+            non_interactive: false,
+            allow_escalation: false,
+            no_escalation: true,
+        });
+
+        assert!(!policy.allow_prompt_escalation);
+        assert!(!policy.allow_non_prompt_escalation);
+    }
+
+    #[test]
+    fn install_mode_for_archive_type_defaults_native_for_installer_artifacts() {
+        for archive_type in [
+            ArchiveType::Msi,
+            ArchiveType::Exe,
+            ArchiveType::Pkg,
+            ArchiveType::Msix,
+            ArchiveType::Appx,
+        ] {
+            assert_eq!(
+                install_mode_for_archive_type(archive_type),
+                InstallMode::Native
+            );
+        }
+    }
+
+    #[test]
+    fn install_mode_for_archive_type_defaults_managed_for_archive_payloads() {
+        for archive_type in [
+            ArchiveType::Zip,
+            ArchiveType::TarGz,
+            ArchiveType::TarZst,
+            ArchiveType::Dmg,
+            ArchiveType::AppImage,
+        ] {
+            assert_eq!(
+                install_mode_for_archive_type(archive_type),
+                InstallMode::Managed
+            );
+        }
+    }
+
+    #[test]
+    fn install_interaction_policy_matches_escalation_policy_flags() {
+        let interaction_policy = install_interaction_policy(EscalationPolicy {
+            allow_prompt_escalation: false,
+            allow_non_prompt_escalation: true,
+        });
+
+        assert!(!interaction_policy.allow_prompt_escalation);
+        assert!(interaction_policy.allow_non_prompt_escalation);
+    }
+
+    #[test]
+    fn build_artifact_install_options_carries_mode_and_interaction_policy() {
+        let mut resolved = resolved_install("demo", "1.0.0");
+        resolved.archive_type = ArchiveType::Exe;
+        resolved.artifact.strip_components = Some(2);
+        resolved.artifact.artifact_root = Some("payload".to_string());
+
+        let interaction_policy = install_interaction_policy(EscalationPolicy {
+            allow_prompt_escalation: false,
+            allow_non_prompt_escalation: true,
+        });
+        let options = build_artifact_install_options(&resolved, interaction_policy);
+
+        assert_eq!(options.strip_components, 2);
+        assert_eq!(options.artifact_root, Some("payload"));
+        assert_eq!(options.install_mode, InstallMode::Native);
+        assert_eq!(options.interaction_policy, interaction_policy);
+    }
+
+    #[test]
     fn cli_parses_install_with_repeatable_provider_overrides() {
         let cli = Cli::try_parse_from([
             "crosspack",
@@ -7417,10 +8374,16 @@ ripgrep-legacy = "*"
 
         match cli.command {
             Commands::Install {
-                dry_run, provider, ..
+                dry_run,
+                provider,
+                escalation,
+                ..
             } => {
                 assert!(!dry_run);
                 assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+                assert!(!escalation.non_interactive);
+                assert!(!escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -7428,15 +8391,43 @@ ripgrep-legacy = "*"
 
     #[test]
     fn cli_parses_install_with_dry_run_flag() {
-        let cli = Cli::try_parse_from(["crosspack", "install", "ripgrep", "--dry-run"])
-            .expect("command must parse");
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "install",
+            "ripgrep",
+            "--dry-run",
+            "--non-interactive",
+            "--allow-escalation",
+        ])
+        .expect("command must parse");
 
         match cli.command {
-            Commands::Install { dry_run, .. } => {
+            Commands::Install {
+                dry_run,
+                escalation,
+                ..
+            } => {
                 assert!(dry_run);
+                assert!(escalation.non_interactive);
+                assert!(escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_rejects_install_with_conflicting_escalation_flags() {
+        let err = Cli::try_parse_from([
+            "crosspack",
+            "install",
+            "ripgrep",
+            "--allow-escalation",
+            "--no-escalation",
+        ])
+        .expect_err("conflicting escalation flags must fail");
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -7454,10 +8445,16 @@ ripgrep-legacy = "*"
 
         match cli.command {
             Commands::Upgrade {
-                dry_run, provider, ..
+                dry_run,
+                provider,
+                escalation,
+                ..
             } => {
                 assert!(!dry_run);
                 assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+                assert!(!escalation.non_interactive);
+                assert!(!escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -7465,12 +8462,90 @@ ripgrep-legacy = "*"
 
     #[test]
     fn cli_parses_upgrade_with_dry_run_flag() {
-        let cli = Cli::try_parse_from(["crosspack", "upgrade", "ripgrep", "--dry-run"])
-            .expect("command must parse");
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "upgrade",
+            "ripgrep",
+            "--dry-run",
+            "--non-interactive",
+            "--allow-escalation",
+        ])
+        .expect("command must parse");
 
         match cli.command {
-            Commands::Upgrade { dry_run, .. } => {
+            Commands::Upgrade {
+                dry_run,
+                escalation,
+                ..
+            } => {
                 assert!(dry_run);
+                assert!(escalation.non_interactive);
+                assert!(escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_uninstall_with_escalation_flags() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "uninstall",
+            "ripgrep",
+            "--non-interactive",
+            "--allow-escalation",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Uninstall { name, escalation } => {
+                assert_eq!(name, "ripgrep");
+                assert!(escalation.non_interactive);
+                assert!(escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_rollback_with_escalation_flags() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "rollback",
+            "tx-123",
+            "--non-interactive",
+            "--allow-escalation",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Rollback { txid, escalation } => {
+                assert_eq!(txid.as_deref(), Some("tx-123"));
+                assert!(escalation.non_interactive);
+                assert!(escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_repair_with_escalation_flags() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "repair",
+            "--non-interactive",
+            "--allow-escalation",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Repair { escalation } => {
+                assert!(escalation.non_interactive);
+                assert!(escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -7532,6 +8607,8 @@ ripgrep-legacy = "*"
             "self-update",
             "--dry-run",
             "--force-redownload",
+            "--non-interactive",
+            "--allow-escalation",
         ])
         .expect("command must parse");
 
@@ -7539,9 +8616,13 @@ ripgrep-legacy = "*"
             Commands::SelfUpdate {
                 dry_run,
                 force_redownload,
+                escalation,
             } => {
                 assert!(dry_run);
                 assert!(force_redownload);
+                assert!(escalation.non_interactive);
+                assert!(escalation.allow_escalation);
+                assert!(!escalation.no_escalation);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -7556,7 +8637,16 @@ ripgrep-legacy = "*"
     #[test]
     fn build_self_update_install_args_includes_registry_root_and_flags() {
         let registry_root = PathBuf::from("/tmp/registry");
-        let args = build_self_update_install_args(Some(registry_root.as_path()), true, true);
+        let args = build_self_update_install_args(
+            Some(registry_root.as_path()),
+            true,
+            true,
+            EscalationArgs {
+                non_interactive: true,
+                allow_escalation: true,
+                no_escalation: false,
+            },
+        );
         let rendered = args
             .iter()
             .map(|value| value.to_string_lossy().to_string())
@@ -7570,13 +8660,15 @@ ripgrep-legacy = "*"
                 "crosspack",
                 "--dry-run",
                 "--force-redownload",
+                "--non-interactive",
+                "--allow-escalation",
             ]
         );
     }
 
     #[test]
     fn build_self_update_install_args_omits_optional_values() {
-        let args = build_self_update_install_args(None, false, false);
+        let args = build_self_update_install_args(None, false, false, EscalationArgs::default());
         let rendered = args
             .iter()
             .map(|value| value.to_string_lossy().to_string())
@@ -8765,6 +9857,74 @@ old-cc = "<2.0.0"
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn install_reports_actionable_error_for_unsupported_exe_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut resolved = resolved_install("demo-exe", "1.0.0");
+        resolved.archive_type = ArchiveType::Exe;
+        resolved.artifact.url = "https://example.test/demo-exe-1.0.0.exe".to_string();
+        resolved.artifact.sha256 = EMPTY_SHA256.to_string();
+
+        seed_cached_artifact(&layout, &resolved, b"");
+
+        let err = install_resolved(
+            &layout,
+            &resolved,
+            &[],
+            &[],
+            &HashMap::new(),
+            InstallResolvedOptions {
+                snapshot_id: None,
+                force_redownload: false,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
+        )
+        .expect_err("unsupported EXE host should fail deterministically");
+
+        assert!(
+            err.to_string()
+                .contains("EXE artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_reports_actionable_error_for_unsupported_pkg_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut resolved = resolved_install("demo-pkg", "1.0.0");
+        resolved.archive_type = ArchiveType::Pkg;
+        resolved.artifact.url = "https://example.test/demo-pkg-1.0.0.pkg".to_string();
+        resolved.artifact.sha256 = EMPTY_SHA256.to_string();
+
+        seed_cached_artifact(&layout, &resolved, b"");
+
+        let err = install_resolved(
+            &layout,
+            &resolved,
+            &[],
+            &[],
+            &HashMap::new(),
+            InstallResolvedOptions {
+                snapshot_id: None,
+                force_redownload: false,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
+        )
+        .expect_err("unsupported PKG host should fail deterministically");
+
+        assert!(
+            err.to_string()
+                .contains("PKG artifacts are supported only on macOS hosts"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn upgrade_removes_stale_native_gui_records() {
         let layout = test_layout();
@@ -8844,6 +10004,7 @@ old-cc = "<2.0.0"
                 exposed_bins: Vec::new(),
                 exposed_completions: Vec::new(),
                 snapshot_id: None,
+                install_mode: InstallMode::Managed,
                 install_reason: InstallReason::Root,
                 install_status: "installed".to_string(),
                 installed_at_unix: 1,
@@ -8888,6 +10049,18 @@ sha256 = "abc"
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarZst,
         }
+    }
+
+    fn seed_cached_artifact(layout: &PrefixLayout, resolved: &ResolvedInstall, payload: &[u8]) {
+        let cache_path = layout.artifact_cache_path(
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &resolved.resolved_target,
+            resolved.archive_type,
+        );
+        std::fs::create_dir_all(cache_path.parent().expect("cache path must have parent"))
+            .expect("must create cache dir");
+        std::fs::write(cache_path, payload).expect("must seed cached artifact");
     }
 
     fn sample_install_outcome() -> super::InstallOutcome {

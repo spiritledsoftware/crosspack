@@ -21,7 +21,7 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
 - `signature` (optional in v0.1): artifact-level detached signature reference.
-- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`). If omitted, inferred from URL suffix.
+- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
@@ -31,10 +31,18 @@ Each package version is represented by a TOML manifest stored in the registry in
 ### Artifact Kind Policy
 
 - Artifact ingestion is deterministic and fail-closed.
-- Crosspack does not run vendor installer UI/execution fallback flows.
-- `msi` artifacts are staged only on Windows hosts.
-- `dmg` artifacts are staged only on macOS hosts.
+- Pre-1.0 scope reset: `deb` and `rpm` are removed from the supported artifact-kind contract.
+- Install mode defaults by artifact kind:
+  - managed: `zip`, `tar.gz`, `tar.zst`, `dmg`, `appimage`.
+  - native: `pkg`, `exe`, `msi`, `msix`, `appx`.
+- Host constraints are fail-closed:
+  - Windows-only native kinds: `exe`, `msi`, `msix`, `appx`.
+  - macOS-only native kind: `pkg`.
+  - macOS-only managed kind: `dmg`.
+  - Linux-only managed kind: `appimage`.
+- Installer/package formats are deterministic and extraction-oriented; Crosspack does not run vendor installer UI/execution fallback flows.
 - `appimage` artifacts are staged as direct payload files and require `strip_components = 0` with no `artifact_root` override.
+- `pkg` maintainer scripts are not executed; script-dependent installs fail closed.
 
 ### Native GUI Registration Policy
 

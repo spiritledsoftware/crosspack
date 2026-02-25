@@ -12,6 +12,10 @@ pub enum ArchiveType {
     Msi,
     Dmg,
     AppImage,
+    Exe,
+    Pkg,
+    Msix,
+    Appx,
 }
 
 impl ArchiveType {
@@ -23,6 +27,10 @@ impl ArchiveType {
             Self::Msi => "msi",
             Self::Dmg => "dmg",
             Self::AppImage => "appimage",
+            Self::Exe => "exe",
+            Self::Pkg => "pkg",
+            Self::Msix => "msix",
+            Self::Appx => "appx",
         }
     }
 
@@ -34,6 +42,10 @@ impl ArchiveType {
             Self::Msi => "msi",
             Self::Dmg => "dmg",
             Self::AppImage => "appimage",
+            Self::Exe => "exe",
+            Self::Pkg => "pkg",
+            Self::Msix => "msix",
+            Self::Appx => "appx",
         }
     }
 
@@ -45,6 +57,10 @@ impl ArchiveType {
             "msi" => Some(Self::Msi),
             "dmg" => Some(Self::Dmg),
             "appimage" => Some(Self::AppImage),
+            "exe" => Some(Self::Exe),
+            "pkg" => Some(Self::Pkg),
+            "msix" => Some(Self::Msix),
+            "appx" => Some(Self::Appx),
             _ => None,
         }
     }
@@ -68,6 +84,18 @@ impl ArchiveType {
         }
         if lower.ends_with(".appimage") {
             return Some(Self::AppImage);
+        }
+        if lower.ends_with(".exe") {
+            return Some(Self::Exe);
+        }
+        if lower.ends_with(".pkg") {
+            return Some(Self::Pkg);
+        }
+        if lower.ends_with(".msix") {
+            return Some(Self::Msix);
+        }
+        if lower.ends_with(".appx") {
+            return Some(Self::Appx);
         }
         None
     }
@@ -154,7 +182,7 @@ impl Artifact {
         if let Some(archive) = &self.archive {
             return ArchiveType::parse(archive).ok_or_else(|| {
                 anyhow!(
-                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage",
+                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage, exe, pkg, msix, appx",
                     self.target
                 )
             });
@@ -257,6 +285,21 @@ fn validate_protocol_scheme(scheme: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn all_archive_types() -> [ArchiveType; 10] {
+        [
+            ArchiveType::Zip,
+            ArchiveType::TarGz,
+            ArchiveType::TarZst,
+            ArchiveType::Msi,
+            ArchiveType::Dmg,
+            ArchiveType::AppImage,
+            ArchiveType::Exe,
+            ArchiveType::Pkg,
+            ArchiveType::Msix,
+            ArchiveType::Appx,
+        ]
+    }
 
     #[test]
     fn parse_manifest() {
@@ -514,14 +557,36 @@ ripgrep = "*"
         assert_eq!(ArchiveType::parse("zip"), Some(ArchiveType::Zip));
         assert_eq!(ArchiveType::parse("tgz"), Some(ArchiveType::TarGz));
         assert_eq!(ArchiveType::parse("tar.zst"), Some(ArchiveType::TarZst));
+        assert_eq!(ArchiveType::parse("msi"), Some(ArchiveType::Msi));
+        assert_eq!(ArchiveType::parse("dmg"), Some(ArchiveType::Dmg));
+        assert_eq!(ArchiveType::parse("appimage"), Some(ArchiveType::AppImage));
         assert_eq!(ArchiveType::parse("rar"), None);
     }
 
     #[test]
-    fn archive_type_parse_supports_msi_dmg_appimage() {
-        assert_eq!(ArchiveType::parse("msi"), Some(ArchiveType::Msi));
-        assert_eq!(ArchiveType::parse("dmg"), Some(ArchiveType::Dmg));
-        assert_eq!(ArchiveType::parse("appimage"), Some(ArchiveType::AppImage));
+    fn archive_type_parse_supports_exe_pkg_msix_appx() {
+        assert_eq!(
+            ArchiveType::parse("exe").map(|kind| kind.as_str()),
+            Some("exe")
+        );
+        assert_eq!(
+            ArchiveType::parse("pkg").map(|kind| kind.as_str()),
+            Some("pkg")
+        );
+        assert_eq!(
+            ArchiveType::parse("msix").map(|kind| kind.as_str()),
+            Some("msix")
+        );
+        assert_eq!(
+            ArchiveType::parse("appx").map(|kind| kind.as_str()),
+            Some("appx")
+        );
+    }
+
+    #[test]
+    fn archive_type_parse_rejects_deb_rpm() {
+        assert_eq!(ArchiveType::parse("deb"), None);
+        assert_eq!(ArchiveType::parse("rpm"), None);
     }
 
     #[test]
@@ -539,14 +604,6 @@ ripgrep = "*"
             Some(ArchiveType::Zip)
         );
         assert_eq!(
-            ArchiveType::infer_from_url("https://example.test/pkg"),
-            None
-        );
-    }
-
-    #[test]
-    fn archive_type_infer_from_url_supports_msi_dmg_appimage() {
-        assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg.msi"),
             Some(ArchiveType::Msi)
         );
@@ -558,30 +615,107 @@ ripgrep = "*"
             ArchiveType::infer_from_url("https://example.test/pkg.appimage"),
             Some(ArchiveType::AppImage)
         );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg"),
+            None
+        );
     }
 
     #[test]
-    fn manifest_allows_gui_package_with_installer_artifact_kind() {
+    fn archive_type_as_str_parse_round_trip_for_all_variants() {
+        for kind in all_archive_types() {
+            assert_eq!(ArchiveType::parse(kind.as_str()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn archive_type_cache_extension_consistent_with_as_str() {
+        for kind in all_archive_types() {
+            assert_eq!(kind.cache_extension(), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn archive_type_infer_from_url_supports_exe_pkg_msix_appx() {
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.exe").map(|kind| kind.as_str()),
+            Some("exe")
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.pkg").map(|kind| kind.as_str()),
+            Some("pkg")
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.msix").map(|kind| kind.as_str()),
+            Some("msix")
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.appx").map(|kind| kind.as_str()),
+            Some("appx")
+        );
+    }
+
+    #[test]
+    fn archive_type_infer_from_url_rejects_deb_rpm() {
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.deb"),
+            None
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.rpm"),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_type_error_message_excludes_deb_rpm() {
+        let artifact = Artifact {
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            url: "https://example.test/pkg.unknown".to_string(),
+            sha256: "abc123".to_string(),
+            size: None,
+            signature: None,
+            archive: Some("unknown".to_string()),
+            strip_components: None,
+            artifact_root: None,
+            binaries: vec![],
+            completions: vec![],
+            gui_apps: vec![],
+        };
+
+        let err = artifact
+            .archive_type()
+            .expect_err("unknown archive type should fail");
+        let msg = err.to_string();
+        assert!(!msg.contains("deb"), "error should not mention deb: {msg}");
+        assert!(!msg.contains("rpm"), "error should not mention rpm: {msg}");
+    }
+
+    #[test]
+    fn manifest_allows_gui_package_with_exe_installer_artifact_kind() {
         let content = r#"
 name = "zed"
 version = "0.190.5"
 
 [[artifacts]]
 target = "x86_64-unknown-linux-gnu"
-url = "https://example.test/zed-x86_64.AppImage"
-archive = "appimage"
+url = "https://example.test/zed-installer.exe"
+archive = "exe"
 sha256 = "abc123"
 
 [[artifacts.gui_apps]]
 app_id = "dev.zed.Zed"
 display_name = "Zed"
-exec = "artifact.appimage"
+exec = "zed.exe"
 "#;
 
         let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
         assert_eq!(
-            parsed.artifacts[0].archive_type().expect("archive type"),
-            ArchiveType::AppImage
+            parsed.artifacts[0]
+                .archive_type()
+                .expect("archive type")
+                .as_str(),
+            "exe"
         );
     }
 }

@@ -46,6 +46,7 @@ Crosspack is a Rust workspace for a native cross-platform package manager. The C
 - `crosspack` and `cpk` binaries both map to the same `crates/crosspack-cli/src/main.rs` entrypoint.
 - Output mode is contract-sensitive: interactive terminals get rich status; non-interactive output remains deterministic plain text.
 - Specs marked v0.4/v0.5 are roadmap design docs unless behavior is explicitly shipped in current code/tests.
+- Native package-manager wrapping is out of scope: do not wrap distro package manager commands; Linux support targets cross-distro/self-contained artifacts rather than distro-specific package formats.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - Do not claim roadmap specs as GA behavior in CLI/docs.
