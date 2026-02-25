@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1](https://github.com/spiritledsoftware/crosspack/compare/v0.7.0...v0.7.1) (2026-02-25)
+
+
+### Documentation
+
+* **agents:** add plans, update plans location preference ([#52](https://github.com/spiritledsoftware/crosspack/issues/52)) ([3822bcf](https://github.com/spiritledsoftware/crosspack/commit/3822bcf24b92adef2b047ad6f395ac9e49e32416))
+
+
+### Continuous Integration
+
+* refresh Cargo.lock in release workflow ([#54](https://github.com/spiritledsoftware/crosspack/issues/54)) ([fdf08d7](https://github.com/spiritledsoftware/crosspack/commit/fdf08d759f4a4596cb1ab73b5fc0f41cad33ada1))
+
 ## [0.7.0](https://github.com/spiritledsoftware/crosspack/compare/v0.6.0...v0.7.0) (2026-02-25)
 
 
