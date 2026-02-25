@@ -12,9 +12,6 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-
 concurrency:
   group: release-artifacts-${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
   cancel-in-progress: false
@@ -146,7 +143,6 @@ jobs:
           private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permission-contents: write
 
       - name: Create GitHub release and upload assets
         uses: softprops/action-gh-release@v2

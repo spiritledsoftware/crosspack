@@ -5,9 +5,6 @@ on:
     branches:
       - "release/**"
 
-permissions:
-  contents: write
-
 concurrency:
   group: prerelease-artifacts-${{ github.ref }}
   cancel-in-progress: false
@@ -165,7 +162,6 @@ jobs:
           private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permission-contents: write
 
       - name: Create prerelease and upload assets
         uses: softprops/action-gh-release@v2
