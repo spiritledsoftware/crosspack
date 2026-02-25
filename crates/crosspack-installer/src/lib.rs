@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -2459,6 +2459,12 @@ fn stage_artifact_payload(
         }
         ArchiveType::Msi => stage_msi_payload(artifact_path, raw_dir),
         ArchiveType::Dmg => stage_dmg_payload(artifact_path, raw_dir),
+        ArchiveType::Exe => stage_exe_payload(artifact_path, raw_dir),
+        ArchiveType::Pkg => stage_pkg_payload(artifact_path, raw_dir),
+        ArchiveType::Deb => stage_deb_payload(artifact_path, raw_dir),
+        ArchiveType::Rpm => stage_rpm_payload(artifact_path, raw_dir),
+        ArchiveType::Msix => stage_msix_payload(artifact_path, raw_dir),
+        ArchiveType::Appx => stage_appx_payload(artifact_path, raw_dir),
     }
 }
 
@@ -2468,6 +2474,12 @@ fn stage_appimage_payload(
     strip_components: u32,
     artifact_root: Option<&str>,
 ) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        return Err(anyhow!(
+            "AppImage artifacts are supported only on Linux hosts"
+        ));
+    }
+
     if strip_components != 0 {
         return Err(anyhow!("strip_components must be 0 for AppImage artifacts"));
     }
@@ -2514,6 +2526,251 @@ fn stage_msi_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
     )
 }
 
+fn stage_exe_payload(artifact_path: &Path, raw_dir: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(anyhow!("EXE artifacts are supported only on Windows hosts"));
+    }
+    stage_exe_payload_with_runner(artifact_path, raw_dir, run_command)
+}
+
+fn stage_exe_payload_with_runner<RunCommand>(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    mut run: RunCommand,
+) -> Result<()>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    let mut command = build_exe_extract_command(artifact_path, raw_dir);
+    run(
+        &mut command,
+        "failed to stage EXE artifact via deterministic extraction",
+    )
+    .map_err(|err| {
+        if error_chain_has_not_found(&err) {
+            return anyhow!(
+                "failed to stage EXE artifact via deterministic extraction: required extraction tool '7z' was not found on PATH; install 7-Zip CLI and ensure '7z' is available, then retry. artifact={} raw_dir={} extraction_command={:?}",
+                artifact_path.display(),
+                raw_dir.display(),
+                command
+            );
+        }
+        anyhow!(
+            "failed to stage EXE artifact via deterministic extraction: artifact={} raw_dir={} extraction_command={:?}: {err}",
+            artifact_path.display(),
+            raw_dir.display(),
+            command
+        )
+    })
+}
+
+fn error_chain_has_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io_err| io_err.kind() == io::ErrorKind::NotFound)
+    })
+}
+
+fn stage_pkg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err(anyhow!("PKG artifacts are supported only on macOS hosts"));
+    }
+    let expanded_dir = _raw_dir.join(".crosspack-pkg-expanded");
+    stage_pkg_payload_with_hooks(_artifact_path, _raw_dir, &expanded_dir, run_command).map_err(
+        |err| {
+            if error_chain_has_not_found(&err) {
+                return anyhow!(
+                    "failed to stage PKG artifact via deterministic extraction: required macOS tool was not found on PATH; ensure 'pkgutil' and 'ditto' are available, then retry. artifact={} raw_dir={} expanded_dir={}: {err}",
+                    _artifact_path.display(),
+                    _raw_dir.display(),
+                    expanded_dir.display()
+                );
+            }
+            anyhow!(
+                "failed to stage PKG artifact via deterministic extraction: artifact={} raw_dir={} expanded_dir={}: {err}",
+                _artifact_path.display(),
+                _raw_dir.display(),
+                expanded_dir.display()
+            )
+        },
+    )
+}
+
+fn stage_deb_payload(artifact_path: &Path, raw_dir: &Path) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        return Err(anyhow!("DEB artifacts are supported only on Linux hosts"));
+    }
+
+    fs::create_dir_all(raw_dir)
+        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
+
+    let archive_members = list_deb_archive_members(artifact_path)?;
+    let data_member = select_deb_data_payload_member(&archive_members)?;
+    let extract_parent = raw_dir.parent().unwrap_or(raw_dir);
+    let extract_dir = extract_parent.join(format!(
+        ".crosspack-deb-extract-{}-{}",
+        std::process::id(),
+        current_unix_timestamp()?
+    ));
+    fs::create_dir_all(&extract_dir)
+        .with_context(|| format!("failed to create {}", extract_dir.display()))?;
+
+    let mut extract_member = build_deb_member_extract_command(artifact_path, &data_member);
+    extract_member.current_dir(&extract_dir);
+    let extract_result = run_command(
+        &mut extract_member,
+        "failed to extract DEB data member from archive",
+    )
+    .map_err(|err| {
+        if error_chain_has_not_found(&err) {
+            return anyhow!(
+                "failed to extract DEB data member from archive: required extraction tool 'ar' was not found on PATH; install binutils (or equivalent package providing 'ar') and ensure 'ar' is available, then retry. artifact={} raw_dir={} extraction_dir={} extraction_command={:?}: {err}",
+                artifact_path.display(),
+                raw_dir.display(),
+                extract_dir.display(),
+                extract_member
+            );
+        }
+        err
+    });
+
+    let data_archive_path = extract_dir.join(&data_member);
+    let unpack_result = extract_result.and_then(|_| {
+        if !data_archive_path.exists() {
+            return Err(anyhow!(
+                "DEB data member '{}' was not extracted to {}; verify archive readability and retry",
+                data_member,
+                data_archive_path.display()
+            ));
+        }
+        let mut unpack_command = build_deb_data_extract_command(&data_archive_path, raw_dir);
+        run_command(&mut unpack_command, "failed to unpack DEB data payload").map_err(|err| {
+            if error_chain_has_not_found(&err) {
+                return anyhow!(
+                    "failed to unpack DEB data payload: required extraction tool 'tar' was not found on PATH; install tar and ensure 'tar' is available, then retry. artifact={} raw_dir={} data_archive={} extraction_command={:?}: {err}",
+                    artifact_path.display(),
+                    raw_dir.display(),
+                    data_archive_path.display(),
+                    unpack_command
+                );
+            }
+            err
+        })
+    });
+
+    let cleanup_result = match fs::remove_dir_all(&extract_dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to cleanup DEB extraction dir: {}",
+                extract_dir.display()
+            )
+        }),
+    };
+
+    match (unpack_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(stage_err), Ok(())) => Err(stage_err),
+        (Ok(()), Err(cleanup_err)) => Err(cleanup_err),
+        (Err(stage_err), Err(cleanup_err)) => Err(anyhow!(
+            "{stage_err}; additionally failed to cleanup DEB extraction dir {}: {cleanup_err}",
+            extract_dir.display()
+        )),
+    }
+}
+
+fn stage_rpm_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        return Err(anyhow!("RPM artifacts are supported only on Linux hosts"));
+    }
+    stage_rpm_payload_with_runner(_artifact_path, _raw_dir, run_rpm_extract_pipeline)
+}
+
+fn stage_msix_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(anyhow!(
+            "MSIX artifacts are supported only on Windows hosts"
+        ));
+    }
+    stage_msix_payload_with_runner(_artifact_path, _raw_dir, run_command)
+}
+
+fn stage_appx_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Err(anyhow!(
+            "APPX artifacts are supported only on Windows hosts"
+        ));
+    }
+    stage_appx_payload_with_runner(_artifact_path, _raw_dir, run_command)
+}
+
+fn stage_msix_payload_with_runner<RunCommand>(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    run: RunCommand,
+) -> Result<()>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    stage_windows_unpack_payload_with_runner(
+        "MSIX",
+        artifact_path,
+        raw_dir,
+        build_msix_unpack_command,
+        run,
+    )
+}
+
+fn stage_appx_payload_with_runner<RunCommand>(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    run: RunCommand,
+) -> Result<()>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    stage_windows_unpack_payload_with_runner(
+        "APPX",
+        artifact_path,
+        raw_dir,
+        build_appx_unpack_command,
+        run,
+    )
+}
+
+fn stage_windows_unpack_payload_with_runner<BuildCommand, RunCommand>(
+    artifact_kind: &str,
+    artifact_path: &Path,
+    raw_dir: &Path,
+    mut build_command: BuildCommand,
+    mut run: RunCommand,
+) -> Result<()>
+where
+    BuildCommand: FnMut(&Path, &Path) -> Command,
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    let context = format!("failed to stage {artifact_kind} artifact via deterministic extraction");
+    let mut command = build_command(artifact_path, raw_dir);
+    run(&mut command, &context).map_err(|err| {
+        if error_chain_has_not_found(&err) {
+            return anyhow!(
+                "{context}: required extraction tool 'makeappx' was not found on PATH; install Windows SDK App Certification Kit tools and ensure 'makeappx' is available, then retry. artifact={} raw_dir={} extraction_command={:?}",
+                artifact_path.display(),
+                raw_dir.display(),
+                command
+            );
+        }
+        anyhow!(
+            "{context}: artifact={} raw_dir={} extraction_command={:?}: {err}",
+            artifact_path.display(),
+            raw_dir.display(),
+            command
+        )
+    })
+}
+
 fn stage_dmg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
     if !cfg!(target_os = "macos") {
         return Err(anyhow!("DMG artifacts are supported only on macOS hosts"));
@@ -2545,6 +2802,214 @@ fn build_msi_admin_extract_command(artifact_path: &Path, raw_dir: &Path) -> Comm
     command
 }
 
+fn build_exe_extract_command(artifact_path: &Path, raw_dir: &Path) -> Command {
+    let mut command = Command::new("7z");
+    command
+        .arg("x")
+        .arg(artifact_path)
+        .arg(format!("-o{}", raw_dir.display()))
+        .arg("-y");
+    command
+}
+
+fn build_deb_archive_member_listing_command(artifact_path: &Path) -> Command {
+    let mut command = Command::new("ar");
+    command.arg("t").arg(artifact_path);
+    command
+}
+
+fn build_deb_member_extract_command(artifact_path: &Path, data_member: &str) -> Command {
+    let mut command = Command::new("ar");
+    command.arg("x").arg(artifact_path).arg(data_member);
+    command
+}
+
+fn build_deb_data_extract_command(data_archive_path: &Path, raw_dir: &Path) -> Command {
+    let mut command = Command::new("tar");
+    command
+        .arg("-xf")
+        .arg(data_archive_path)
+        .arg("-C")
+        .arg(raw_dir);
+    command
+}
+
+fn build_rpm2cpio_command(artifact_path: &Path) -> Command {
+    let mut command = Command::new("rpm2cpio");
+    command.arg(artifact_path);
+    command
+}
+
+fn build_cpio_extract_command(raw_dir: &Path) -> Command {
+    let mut command = Command::new("cpio");
+    command
+        .arg("-idmu")
+        .arg("--no-absolute-filenames")
+        .arg("--quiet")
+        .current_dir(raw_dir);
+    command
+}
+
+fn stage_rpm_payload_with_runner<RunPipeline>(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    mut run_pipeline: RunPipeline,
+) -> Result<()>
+where
+    RunPipeline: FnMut(&mut Command, &mut Command) -> Result<()>,
+{
+    fs::create_dir_all(raw_dir)
+        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
+
+    let mut rpm2cpio_command = build_rpm2cpio_command(artifact_path);
+    let mut cpio_extract_command = build_cpio_extract_command(raw_dir);
+    run_pipeline(&mut rpm2cpio_command, &mut cpio_extract_command).map_err(|err| {
+        if error_chain_has_not_found(&err) {
+            return anyhow!(
+                "failed to stage RPM artifact via deterministic extraction: required extraction tools were not found on PATH; ensure both 'rpm2cpio' and 'cpio' are installed and available, then retry. artifact={} raw_dir={} rpm2cpio_command={:?} cpio_command={:?}: {err}",
+                artifact_path.display(),
+                raw_dir.display(),
+                rpm2cpio_command,
+                cpio_extract_command
+            );
+        }
+        anyhow!(
+            "failed to stage RPM artifact via deterministic extraction: artifact={} raw_dir={} rpm2cpio_command={:?} cpio_command={:?}: {err}",
+            artifact_path.display(),
+            raw_dir.display(),
+            rpm2cpio_command,
+            cpio_extract_command
+        )
+    })
+}
+
+fn run_rpm_extract_pipeline(
+    rpm2cpio_command: &mut Command,
+    cpio_extract_command: &mut Command,
+) -> Result<()> {
+    rpm2cpio_command.stdout(Stdio::piped());
+    let mut rpm2cpio_child = rpm2cpio_command
+        .spawn()
+        .with_context(|| "failed to convert RPM payload with rpm2cpio: command failed to start")?;
+    let rpm2cpio_stdout = rpm2cpio_child
+        .stdout
+        .take()
+        .context("failed to convert RPM payload with rpm2cpio: missing stdout pipe")?;
+
+    cpio_extract_command.stdin(Stdio::from(rpm2cpio_stdout));
+    let cpio_output = match cpio_extract_command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            let _ = rpm2cpio_child.kill();
+            let _ = rpm2cpio_child.wait();
+            return Err(err).with_context(|| {
+                "failed to extract RPM payload with cpio: command failed to start"
+            });
+        }
+    };
+    let rpm2cpio_output = rpm2cpio_child.wait_with_output().with_context(|| {
+        "failed to convert RPM payload with rpm2cpio: command failed while waiting for completion"
+    })?;
+
+    if !rpm2cpio_output.status.success() {
+        return Err(anyhow!(
+            "failed to convert RPM payload with rpm2cpio: status={} stdout='{}' stderr='{}'",
+            rpm2cpio_output.status,
+            String::from_utf8_lossy(&rpm2cpio_output.stdout).trim(),
+            String::from_utf8_lossy(&rpm2cpio_output.stderr).trim()
+        ));
+    }
+    if !cpio_output.status.success() {
+        return Err(anyhow!(
+            "failed to extract RPM payload with cpio: status={} stdout='{}' stderr='{}'",
+            cpio_output.status,
+            String::from_utf8_lossy(&cpio_output.stdout).trim(),
+            String::from_utf8_lossy(&cpio_output.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
+fn list_deb_archive_members(artifact_path: &Path) -> Result<Vec<String>> {
+    let mut command = build_deb_archive_member_listing_command(artifact_path);
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(anyhow!(
+                "failed to list DEB archive members: required extraction tool 'ar' was not found on PATH; install binutils (or equivalent package providing 'ar') and ensure 'ar' is available, then retry. artifact={} listing_command={:?}",
+                artifact_path.display(),
+                command
+            ));
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| "failed to list DEB archive members: command failed to start");
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow!(
+            "failed to list DEB archive members: status={} stdout='{}' stderr='{}'",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn select_deb_data_payload_member(members: &[String]) -> Result<String> {
+    const PREFERENCE_ORDER: [&str; 5] = [
+        "data.tar.zst",
+        "data.tar.xz",
+        "data.tar.gz",
+        "data.tar.bz2",
+        "data.tar",
+    ];
+
+    for member in PREFERENCE_ORDER {
+        if members
+            .iter()
+            .any(|archive_member| archive_member == member)
+        {
+            return Ok(member.to_string());
+        }
+    }
+
+    let found_members = if members.is_empty() {
+        "(none)".to_string()
+    } else {
+        members.join(", ")
+    };
+    Err(anyhow!(
+        "DEB payload archive missing data member; expected one of data.tar.zst > data.tar.xz > data.tar.gz > data.tar.bz2 > data.tar; found members: {found_members}"
+    ))
+}
+
+fn build_msix_unpack_command(artifact_path: &Path, raw_dir: &Path) -> Command {
+    let mut command = Command::new("makeappx");
+    command
+        .arg("unpack")
+        .arg("/p")
+        .arg(artifact_path)
+        .arg("/d")
+        .arg(raw_dir)
+        .arg("/o");
+    command
+}
+
+fn build_appx_unpack_command(artifact_path: &Path, raw_dir: &Path) -> Command {
+    build_msix_unpack_command(artifact_path, raw_dir)
+}
+
 fn build_dmg_attach_command(artifact_path: &Path, mount_point: &Path) -> Command {
     let mut command = Command::new("hdiutil");
     command
@@ -2555,6 +3020,144 @@ fn build_dmg_attach_command(artifact_path: &Path, mount_point: &Path) -> Command
         .arg("-mountpoint")
         .arg(mount_point);
     command
+}
+
+fn build_pkg_expand_command(artifact_path: &Path, expanded_dir: &Path) -> Command {
+    let mut command = Command::new("pkgutil");
+    command
+        .arg("--expand-full")
+        .arg(artifact_path)
+        .arg(expanded_dir);
+    command
+}
+
+fn build_pkg_copy_command(expanded_raw_dir: &Path, raw_dir: &Path) -> Command {
+    let mut command = Command::new("ditto");
+    command.arg(expanded_raw_dir).arg(raw_dir);
+    command
+}
+
+fn discover_pkg_payload_roots(expanded_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut payload_roots = Vec::new();
+
+    let top_level_payload = expanded_dir.join("Payload");
+    if top_level_payload.exists() {
+        payload_roots.push(top_level_payload);
+    }
+
+    let mut nested_payloads = Vec::new();
+    for entry in fs::read_dir(expanded_dir).with_context(|| {
+        format!(
+            "failed to inspect expanded PKG directory: {}",
+            expanded_dir.display()
+        )
+    })? {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed reading expanded PKG directory entry: {}",
+                expanded_dir.display()
+            )
+        })?;
+        if !entry
+            .file_type()
+            .with_context(|| {
+                format!(
+                    "failed to inspect expanded PKG entry type: {}",
+                    entry.path().display()
+                )
+            })?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let entry_path = entry.path();
+        if entry_path.extension().and_then(|value| value.to_str()) != Some("pkg") {
+            continue;
+        }
+
+        let payload_path = entry_path.join("Payload");
+        if payload_path.exists() {
+            nested_payloads.push(payload_path);
+        }
+    }
+
+    nested_payloads.sort();
+    payload_roots.extend(nested_payloads);
+
+    if payload_roots.is_empty() {
+        return Err(anyhow!(
+            "expanded PKG payload not found in {}; expected {} or {}",
+            expanded_dir.display(),
+            expanded_dir.join("Payload").display(),
+            expanded_dir
+                .join("<component>.pkg")
+                .join("Payload")
+                .display()
+        ));
+    }
+
+    Ok(payload_roots)
+}
+
+fn cleanup_pkg_expanded_dir(expanded_dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(expanded_dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to cleanup expanded PKG payload: {}",
+                expanded_dir.display()
+            )
+        }),
+    }
+}
+
+fn stage_pkg_payload_with_hooks<RunCommand>(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    expanded_dir: &Path,
+    mut run: RunCommand,
+) -> Result<()>
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    let mut expand_command = build_pkg_expand_command(artifact_path, expanded_dir);
+    let expand_result = run(&mut expand_command, "failed to expand PKG artifact");
+
+    let copy_result = if expand_result.is_ok() {
+        Some((|| {
+            for payload_root in discover_pkg_payload_roots(expanded_dir)? {
+                let mut copy_command = build_pkg_copy_command(&payload_root, raw_dir);
+                run(
+                    &mut copy_command,
+                    "failed to copy expanded PKG payload into staging directory",
+                )?;
+            }
+            Ok(())
+        })())
+    } else {
+        None
+    };
+
+    let cleanup_result = cleanup_pkg_expanded_dir(expanded_dir);
+
+    match (expand_result, copy_result, cleanup_result) {
+        (Ok(()), Some(Ok(())), Ok(())) => Ok(()),
+        (Err(expand_err), _, Ok(())) => Err(expand_err),
+        (Ok(()), Some(Err(copy_err)), Ok(())) => Err(copy_err),
+        (Ok(()), Some(Ok(())), Err(cleanup_err)) => Err(cleanup_err),
+        (Ok(()), Some(Err(copy_err)), Err(cleanup_err)) => Err(anyhow!(
+            "failed to copy expanded PKG payload: {copy_err}; additionally failed to cleanup expanded payload {}: {cleanup_err}",
+            expanded_dir.display()
+        )),
+        (Err(expand_err), _, Err(cleanup_err)) => Err(anyhow!(
+            "failed to expand PKG artifact: {expand_err}; additionally failed to cleanup expanded payload {}: {cleanup_err}",
+            expanded_dir.display()
+        )),
+        (Ok(()), None, Ok(())) => unreachable!("copy step must run after successful PKG expand"),
+        (Ok(()), None, Err(_)) => unreachable!("copy step must run after successful PKG expand"),
+    }
 }
 
 fn build_dmg_detach_command(mount_point: &Path) -> Command {
@@ -3583,6 +4186,331 @@ mod tests {
         let _ = fs::remove_dir_all(layout.prefix());
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn install_from_artifact_rejects_exe_on_non_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.exe");
+        fs::write(&artifact_path, b"dummy exe").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Exe,
+            0,
+            None,
+        )
+        .expect_err("exe should be rejected on non-Windows host");
+        assert!(
+            err.to_string()
+                .contains("EXE artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_from_artifact_rejects_pkg_on_non_macos_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.pkg");
+        fs::write(&artifact_path, b"dummy pkg").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Pkg,
+            0,
+            None,
+        )
+        .expect_err("pkg should be rejected on non-macOS host");
+        assert!(
+            err.to_string()
+                .contains("PKG artifacts are supported only on macOS hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn install_from_artifact_rejects_deb_on_non_linux_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.deb");
+        fs::write(&artifact_path, b"dummy deb").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Deb,
+            0,
+            None,
+        )
+        .expect_err("deb should be rejected on non-Linux host");
+        assert!(
+            err.to_string()
+                .contains("DEB artifacts are supported only on Linux hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn install_from_artifact_rejects_rpm_on_non_linux_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.rpm");
+        fs::write(&artifact_path, b"dummy rpm").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Rpm,
+            0,
+            None,
+        )
+        .expect_err("rpm should be rejected on non-Linux host");
+        assert!(
+            err.to_string()
+                .contains("RPM artifacts are supported only on Linux hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn install_from_artifact_rejects_msix_on_non_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.msix");
+        fs::write(&artifact_path, b"dummy msix").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Msix,
+            0,
+            None,
+        )
+        .expect_err("msix should be rejected on non-Windows host");
+        assert!(
+            err.to_string()
+                .contains("MSIX artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn install_from_artifact_rejects_appx_on_non_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.appx");
+        fs::write(&artifact_path, b"dummy appx").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Appx,
+            0,
+            None,
+        )
+        .expect_err("appx should be rejected on non-Windows host");
+        assert!(
+            err.to_string()
+                .contains("APPX artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_from_artifact_reports_exe_extraction_failure_on_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.exe");
+        fs::write(&artifact_path, b"dummy exe").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Exe,
+            0,
+            None,
+        )
+        .expect_err("exe staging should fail deterministic extraction on Windows host");
+        assert!(
+            err.to_string()
+                .contains("failed to stage EXE artifact via deterministic extraction"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_from_artifact_reports_pkg_extraction_failure_on_macos_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.pkg");
+        fs::write(&artifact_path, b"dummy pkg").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Pkg,
+            0,
+            None,
+        )
+        .expect_err("pkg staging should fail deterministic extraction on macOS host");
+        assert!(
+            err.to_string()
+                .contains("failed to stage PKG artifact via deterministic extraction"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_from_artifact_reports_deb_extraction_failure_on_linux_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.deb");
+        fs::write(&artifact_path, b"dummy deb").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Deb,
+            0,
+            None,
+        )
+        .expect_err("deb staging should fail deterministic extraction on Linux host");
+        assert!(
+            err.to_string()
+                .contains("failed to list DEB archive members"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_from_artifact_reports_rpm_extraction_failure_on_linux_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.rpm");
+        fs::write(&artifact_path, b"dummy rpm").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Rpm,
+            0,
+            None,
+        )
+        .expect_err("rpm staging should fail deterministic extraction on Linux host");
+        assert!(
+            err.to_string()
+                .contains("failed to stage RPM artifact via deterministic extraction"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_from_artifact_reports_msix_extraction_failure_on_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.msix");
+        fs::write(&artifact_path, b"dummy msix").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Msix,
+            0,
+            None,
+        )
+        .expect_err("msix staging should fail deterministic extraction on Windows host");
+        assert!(
+            err.to_string()
+                .contains("failed to stage MSIX artifact via deterministic extraction"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_from_artifact_reports_appx_extraction_failure_on_windows_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.appx");
+        fs::write(&artifact_path, b"dummy appx").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Appx,
+            0,
+            None,
+        )
+        .expect_err("appx staging should fail deterministic extraction on Windows host");
+        assert!(
+            err.to_string()
+                .contains("failed to stage APPX artifact via deterministic extraction"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_from_artifact_rejects_appimage_with_strip_components() {
         let layout = test_layout();
@@ -3609,6 +4537,34 @@ mod tests {
         let _ = fs::remove_dir_all(layout.prefix());
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn install_from_artifact_rejects_appimage_on_non_linux_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.AppImage");
+        fs::write(&artifact_path, b"dummy appimage").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::AppImage,
+            0,
+            None,
+        )
+        .expect_err("appimage installs should be rejected on non-Linux hosts");
+        assert!(
+            err.to_string()
+                .contains("AppImage artifacts are supported only on Linux hosts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn stage_appimage_copies_payload_into_raw_dir() {
         let layout = test_layout();
@@ -3631,7 +4587,7 @@ mod tests {
         let _ = fs::remove_dir_all(layout.prefix());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn stage_appimage_sets_executable_permissions_on_unix() {
         use std::os::unix::fs::PermissionsExt;
@@ -3675,6 +4631,665 @@ mod tests {
                 "/qn".to_string(),
                 format!("TARGETDIR={}", raw_dir.display())
             ]
+        );
+    }
+
+    #[test]
+    fn stage_exe_builds_extract_command_shape() {
+        let artifact_path = Path::new("C:/tmp/demo.exe");
+        let raw_dir = Path::new("C:/tmp/raw");
+        let command = build_exe_extract_command(artifact_path, raw_dir);
+
+        assert_eq!(command.get_program(), "7z");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "x".to_string(),
+                artifact_path.display().to_string(),
+                format!("-o{}", raw_dir.display()),
+                "-y".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_deb_builds_archive_member_listing_command_shape() {
+        let artifact_path = Path::new("/tmp/demo.deb");
+        let command = build_deb_archive_member_listing_command(artifact_path);
+
+        assert_eq!(command.get_program(), "ar");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec!["t".to_string(), artifact_path.display().to_string()]
+        );
+    }
+
+    #[test]
+    fn stage_deb_selects_data_payload_member_deterministically() {
+        let members = vec![
+            "control.tar.xz".to_string(),
+            "data.tar.gz".to_string(),
+            "data.tar.xz".to_string(),
+            "debian-binary".to_string(),
+        ];
+
+        let selected =
+            select_deb_data_payload_member(&members).expect("must select preferred data member");
+
+        assert_eq!(selected, "data.tar.xz");
+    }
+
+    #[test]
+    fn stage_deb_rejects_missing_data_member() {
+        let members = vec!["debian-binary".to_string(), "control.tar.xz".to_string()];
+
+        let err = select_deb_data_payload_member(&members)
+            .expect_err("missing data payload member should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("DEB payload archive missing data member"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("data.tar.zst > data.tar.xz > data.tar.gz > data.tar.bz2 > data.tar"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn stage_deb_builds_data_extract_command_shape() {
+        let data_archive_path = Path::new("/tmp/.crosspack-deb-extract/data.tar.xz");
+        let raw_dir = Path::new("/tmp/raw");
+        let command = build_deb_data_extract_command(data_archive_path, raw_dir);
+
+        assert_eq!(command.get_program(), "tar");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-xf".to_string(),
+                data_archive_path.display().to_string(),
+                "-C".to_string(),
+                raw_dir.display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_rpm_builds_rpm2cpio_command_shape() {
+        let artifact_path = Path::new("/tmp/demo.rpm");
+        let command = build_rpm2cpio_command(artifact_path);
+
+        assert_eq!(command.get_program(), "rpm2cpio");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, vec![artifact_path.display().to_string()]);
+    }
+
+    #[test]
+    fn stage_rpm_builds_cpio_extract_command_shape() {
+        let raw_dir = Path::new("/tmp/raw");
+        let command = build_cpio_extract_command(raw_dir);
+
+        assert_eq!(command.get_program(), "cpio");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-idmu".to_string(),
+                "--no-absolute-filenames".to_string(),
+                "--quiet".to_string(),
+            ]
+        );
+        assert_eq!(
+            command
+                .get_current_dir()
+                .expect("cpio extraction command should set current_dir"),
+            raw_dir
+        );
+    }
+
+    #[test]
+    fn stage_rpm_returns_actionable_error_on_extract_failure() {
+        let artifact_path = Path::new("/tmp/demo.rpm");
+        let raw_dir = Path::new("/tmp/raw");
+        let err = stage_rpm_payload_with_runner(artifact_path, raw_dir, |_rpm2cpio, _cpio| {
+            Err(anyhow!(io::Error::new(
+                io::ErrorKind::NotFound,
+                "simulated missing rpm2cpio"
+            )))
+        })
+        .expect_err("missing extraction tool should be surfaced with guidance");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to stage RPM artifact via deterministic extraction"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("required extraction tools were not found on PATH"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(
+                "ensure both 'rpm2cpio' and 'cpio' are installed and available, then retry"
+            ),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn stage_msix_builds_unpack_command_shape() {
+        let artifact_path = Path::new("C:/tmp/demo.msix");
+        let raw_dir = Path::new("C:/tmp/raw-msix");
+        let command = build_msix_unpack_command(artifact_path, raw_dir);
+
+        assert_eq!(command.get_program(), "makeappx");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "unpack".to_string(),
+                "/p".to_string(),
+                artifact_path.display().to_string(),
+                "/d".to_string(),
+                raw_dir.display().to_string(),
+                "/o".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_appx_builds_unpack_command_shape() {
+        let artifact_path = Path::new("C:/tmp/demo.appx");
+        let raw_dir = Path::new("C:/tmp/raw-appx");
+        let command = build_appx_unpack_command(artifact_path, raw_dir);
+
+        assert_eq!(command.get_program(), "makeappx");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "unpack".to_string(),
+                "/p".to_string(),
+                artifact_path.display().to_string(),
+                "/d".to_string(),
+                raw_dir.display().to_string(),
+                "/o".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_msix_payload_with_runner_invokes_expected_command_context() {
+        let artifact_path = Path::new("C:/tmp/demo.msix");
+        let raw_dir = Path::new("C:/tmp/raw-msix");
+        let mut observed_program = String::new();
+        let mut observed_args = Vec::new();
+        let mut observed_context = String::new();
+
+        stage_msix_payload_with_runner(artifact_path, raw_dir, |command, context| {
+            observed_program = command.get_program().to_string_lossy().into_owned();
+            observed_args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            observed_context = context.to_string();
+            Ok(())
+        })
+        .expect("runner should succeed");
+
+        assert_eq!(
+            observed_context,
+            "failed to stage MSIX artifact via deterministic extraction"
+        );
+        assert_eq!(observed_program, "makeappx");
+        assert_eq!(
+            observed_args,
+            vec![
+                "unpack".to_string(),
+                "/p".to_string(),
+                artifact_path.display().to_string(),
+                "/d".to_string(),
+                raw_dir.display().to_string(),
+                "/o".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_appx_payload_with_runner_invokes_expected_command_context() {
+        let artifact_path = Path::new("C:/tmp/demo.appx");
+        let raw_dir = Path::new("C:/tmp/raw-appx");
+        let mut observed_program = String::new();
+        let mut observed_args = Vec::new();
+        let mut observed_context = String::new();
+
+        stage_appx_payload_with_runner(artifact_path, raw_dir, |command, context| {
+            observed_program = command.get_program().to_string_lossy().into_owned();
+            observed_args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            observed_context = context.to_string();
+            Ok(())
+        })
+        .expect("runner should succeed");
+
+        assert_eq!(
+            observed_context,
+            "failed to stage APPX artifact via deterministic extraction"
+        );
+        assert_eq!(observed_program, "makeappx");
+        assert_eq!(
+            observed_args,
+            vec![
+                "unpack".to_string(),
+                "/p".to_string(),
+                artifact_path.display().to_string(),
+                "/d".to_string(),
+                raw_dir.display().to_string(),
+                "/o".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_exe_uses_extract_tool_not_installer_execution() {
+        let artifact_path = Path::new("C:/tmp/app.exe");
+        let raw_dir = Path::new("C:/tmp/raw");
+        let command = build_exe_extract_command(artifact_path, raw_dir);
+
+        assert_ne!(command.get_program(), artifact_path.as_os_str());
+    }
+
+    #[test]
+    fn stage_exe_payload_with_runner_invokes_expected_command_context() {
+        let artifact_path = Path::new("C:/tmp/demo.exe");
+        let raw_dir = Path::new("C:/tmp/raw");
+        let mut observed_program = String::new();
+        let mut observed_args = Vec::new();
+        let mut observed_context = String::new();
+
+        stage_exe_payload_with_runner(artifact_path, raw_dir, |command, context| {
+            observed_program = command.get_program().to_string_lossy().into_owned();
+            observed_args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            observed_context = context.to_string();
+            Ok(())
+        })
+        .expect("runner should succeed");
+
+        assert_eq!(
+            observed_context,
+            "failed to stage EXE artifact via deterministic extraction"
+        );
+        assert_eq!(observed_program, "7z");
+        assert_eq!(
+            observed_args,
+            vec![
+                "x".to_string(),
+                artifact_path.display().to_string(),
+                format!("-o{}", raw_dir.display()),
+                "-y".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_exe_returns_actionable_error_when_extraction_fails() {
+        let artifact_path = Path::new("C:/tmp/demo.exe");
+        let raw_dir = Path::new("C:/tmp/raw");
+        let err = stage_exe_payload_with_runner(artifact_path, raw_dir, |_command, _context| {
+            Err(anyhow!(io::Error::new(
+                io::ErrorKind::NotFound,
+                "simulated missing 7z"
+            )))
+        })
+        .expect_err("missing extraction tool should be surfaced with guidance");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to stage EXE artifact via deterministic extraction"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("required extraction tool '7z' was not found on PATH"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("install 7-Zip CLI and ensure '7z' is available, then retry"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn stage_pkg_builds_expand_command_shape() {
+        let artifact_path = Path::new("/tmp/demo.pkg");
+        let expanded_dir = Path::new("/tmp/pkg-expanded");
+        let command = build_pkg_expand_command(artifact_path, expanded_dir);
+
+        assert_eq!(command.get_program(), "pkgutil");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "--expand-full".to_string(),
+                artifact_path.display().to_string(),
+                expanded_dir.display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_pkg_copy_and_cleanup_command_shapes_are_stable() {
+        let expanded_raw_dir = Path::new("/tmp/pkg-expanded/Payload");
+        let raw_dir = Path::new("/tmp/raw");
+
+        let copy = build_pkg_copy_command(expanded_raw_dir, raw_dir);
+        assert_eq!(copy.get_program(), "ditto");
+        let copy_args = copy
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            copy_args,
+            vec![
+                expanded_raw_dir.display().to_string(),
+                raw_dir.display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_pkg_orchestrates_expand_then_copy_then_cleanup() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let artifact_path = layout.prefix().join("demo.pkg");
+        fs::write(&artifact_path, b"pkg").expect("must create artifact");
+        let raw_dir = layout.prefix().join("raw");
+        let expanded_dir = layout.prefix().join("pkg-expanded");
+        let mut command_invocations = Vec::new();
+
+        stage_pkg_payload_with_hooks(&artifact_path, &raw_dir, &expanded_dir, |command, _| {
+            let mut invocation = command.get_program().to_string_lossy().into_owned();
+            for arg in command.get_args() {
+                invocation.push(' ');
+                invocation.push_str(arg.to_string_lossy().as_ref());
+            }
+            command_invocations.push(invocation.clone());
+            if invocation.starts_with("pkgutil --expand-full ") {
+                fs::create_dir_all(expanded_dir.join("Payload"))
+                    .expect("must create top-level payload root");
+            }
+            Ok(())
+        })
+        .expect("stage flow should succeed");
+
+        assert_eq!(command_invocations.len(), 2, "expand + copy must run");
+        assert!(command_invocations[0].starts_with("pkgutil --expand-full "));
+        assert!(command_invocations[1].starts_with("ditto "));
+        assert!(
+            !expanded_dir.exists(),
+            "expanded dir should be removed during cleanup"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_pkg_cleanup_runs_on_expand_failure() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let artifact_path = layout.prefix().join("demo.pkg");
+        fs::write(&artifact_path, b"pkg").expect("must create artifact");
+        let raw_dir = layout.prefix().join("raw");
+        let expanded_dir = layout.prefix().join("pkg-expanded");
+        fs::create_dir_all(&expanded_dir).expect("must seed expanded dir");
+
+        let err = stage_pkg_payload_with_hooks(&artifact_path, &raw_dir, &expanded_dir, |_, _| {
+            Err(anyhow!("simulated expand failure"))
+        })
+        .expect_err("expand failure should propagate");
+
+        assert!(err.to_string().contains("simulated expand failure"));
+        assert!(
+            !expanded_dir.exists(),
+            "expanded dir should be removed during cleanup"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_pkg_payload_discovery_is_deterministic_for_top_level_and_nested_roots() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let expanded_dir = layout.prefix().join("pkg-expanded");
+        fs::create_dir_all(expanded_dir.join("Payload")).expect("must create top-level payload");
+        fs::create_dir_all(expanded_dir.join("zeta.pkg").join("Payload"))
+            .expect("must create nested payload");
+        fs::create_dir_all(expanded_dir.join("alpha.pkg").join("Payload"))
+            .expect("must create nested payload");
+        fs::create_dir_all(expanded_dir.join("ignored")).expect("must create ignored dir");
+
+        let payload_roots =
+            discover_pkg_payload_roots(&expanded_dir).expect("must discover payload roots");
+
+        assert_eq!(
+            payload_roots,
+            vec![
+                expanded_dir.join("Payload"),
+                expanded_dir.join("alpha.pkg").join("Payload"),
+                expanded_dir.join("zeta.pkg").join("Payload"),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_pkg_payload_discovery_returns_actionable_error_when_missing() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let expanded_dir = layout.prefix().join("pkg-expanded");
+        fs::create_dir_all(&expanded_dir).expect("must create expanded dir");
+
+        let err = discover_pkg_payload_roots(&expanded_dir)
+            .expect_err("missing payload roots must return error");
+        let message = err.to_string();
+        assert!(message.contains("expanded PKG payload not found"));
+        assert!(message.contains(expanded_dir.join("Payload").display().to_string().as_str()));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_pkg_cleanup_runs_on_copy_failure() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let artifact_path = layout.prefix().join("demo.pkg");
+        fs::write(&artifact_path, b"pkg").expect("must create artifact");
+        let raw_dir = layout.prefix().join("raw");
+        let expanded_dir = layout.prefix().join("pkg-expanded");
+        let mut command_invocations = Vec::new();
+
+        let err =
+            stage_pkg_payload_with_hooks(&artifact_path, &raw_dir, &expanded_dir, |command, _| {
+                let mut invocation = command.get_program().to_string_lossy().into_owned();
+                for arg in command.get_args() {
+                    invocation.push(' ');
+                    invocation.push_str(arg.to_string_lossy().as_ref());
+                }
+                command_invocations.push(invocation.clone());
+                if invocation.starts_with("pkgutil --expand-full ") {
+                    fs::create_dir_all(expanded_dir.join("Payload"))
+                        .expect("must create top-level payload root");
+                }
+                if invocation.starts_with("ditto ") {
+                    return Err(anyhow!("simulated copy failure"));
+                }
+                Ok(())
+            })
+            .expect_err("copy failure should propagate");
+
+        assert!(err.to_string().contains("simulated copy failure"));
+        assert_eq!(command_invocations.len(), 2, "expand + copy must run");
+        assert!(
+            !expanded_dir.exists(),
+            "expanded dir should be removed during cleanup"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_pkg_copies_top_level_then_nested_payloads_in_stable_order() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let artifact_path = layout.prefix().join("demo.pkg");
+        fs::write(&artifact_path, b"pkg").expect("must create artifact");
+        let raw_dir = layout.prefix().join("raw");
+        let expanded_dir = layout.prefix().join("pkg-expanded");
+        let mut copy_sources = Vec::new();
+
+        stage_pkg_payload_with_hooks(&artifact_path, &raw_dir, &expanded_dir, |command, _| {
+            if command.get_program() == "pkgutil" {
+                fs::create_dir_all(expanded_dir.join("Payload"))
+                    .expect("must create top-level payload root");
+                fs::create_dir_all(expanded_dir.join("zeta.pkg").join("Payload"))
+                    .expect("must create nested payload root");
+                fs::create_dir_all(expanded_dir.join("alpha.pkg").join("Payload"))
+                    .expect("must create nested payload root");
+                return Ok(());
+            }
+
+            if command.get_program() == "ditto" {
+                let args = command.get_args().collect::<Vec<_>>();
+                let source = args
+                    .first()
+                    .expect("ditto should have a source arg")
+                    .to_string_lossy()
+                    .into_owned();
+                copy_sources.push(source);
+            }
+            Ok(())
+        })
+        .expect("copy flow should succeed");
+
+        assert_eq!(
+            copy_sources.len(),
+            3,
+            "top-level and two nested payload roots should be copied"
+        );
+        assert_eq!(
+            copy_sources,
+            vec![
+                expanded_dir.join("Payload").display().to_string(),
+                expanded_dir
+                    .join("alpha.pkg")
+                    .join("Payload")
+                    .display()
+                    .to_string(),
+                expanded_dir
+                    .join("zeta.pkg")
+                    .join("Payload")
+                    .display()
+                    .to_string(),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_msix_returns_actionable_error_when_makeappx_is_missing() {
+        let artifact_path = Path::new("C:/tmp/demo.msix");
+        let raw_dir = Path::new("C:/tmp/raw-msix");
+        let err = stage_msix_payload_with_runner(artifact_path, raw_dir, |_command, _context| {
+            Err(anyhow!(io::Error::new(
+                io::ErrorKind::NotFound,
+                "simulated missing makeappx"
+            )))
+        })
+        .expect_err("missing makeappx should be surfaced with guidance");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to stage MSIX artifact via deterministic extraction"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("required extraction tool 'makeappx' was not found on PATH"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(
+                "install Windows SDK App Certification Kit tools and ensure 'makeappx' is available, then retry"
+            ),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn stage_appx_returns_actionable_error_when_makeappx_is_missing() {
+        let artifact_path = Path::new("C:/tmp/demo.appx");
+        let raw_dir = Path::new("C:/tmp/raw-appx");
+        let err = stage_appx_payload_with_runner(artifact_path, raw_dir, |_command, _context| {
+            Err(anyhow!(io::Error::new(
+                io::ErrorKind::NotFound,
+                "simulated missing makeappx"
+            )))
+        })
+        .expect_err("missing makeappx should be surfaced with guidance");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to stage APPX artifact via deterministic extraction"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("required extraction tool 'makeappx' was not found on PATH"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(
+                "install Windows SDK App Certification Kit tools and ensure 'makeappx' is available, then retry"
+            ),
+            "unexpected error: {message}"
         );
     }
 

@@ -4352,6 +4352,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     #[test]
     fn begin_transaction_writes_planning_metadata_and_active_marker() {
         let layout = test_layout();
@@ -8765,6 +8767,52 @@ old-cc = "<2.0.0"
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn install_reports_actionable_error_for_unsupported_exe_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut resolved = resolved_install("demo-exe", "1.0.0");
+        resolved.archive_type = ArchiveType::Exe;
+        resolved.artifact.url = "https://example.test/demo-exe-1.0.0.exe".to_string();
+        resolved.artifact.sha256 = EMPTY_SHA256.to_string();
+
+        seed_cached_artifact(&layout, &resolved, b"");
+
+        let err = install_resolved(&layout, &resolved, &[], &[], &HashMap::new(), None, false)
+            .expect_err("unsupported EXE host should fail deterministically");
+
+        assert!(
+            err.to_string()
+                .contains("EXE artifacts are supported only on Windows hosts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn install_reports_actionable_error_for_unsupported_pkg_host() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut resolved = resolved_install("demo-pkg", "1.0.0");
+        resolved.archive_type = ArchiveType::Pkg;
+        resolved.artifact.url = "https://example.test/demo-pkg-1.0.0.pkg".to_string();
+        resolved.artifact.sha256 = EMPTY_SHA256.to_string();
+
+        seed_cached_artifact(&layout, &resolved, b"");
+
+        let err = install_resolved(&layout, &resolved, &[], &[], &HashMap::new(), None, false)
+            .expect_err("unsupported PKG host should fail deterministically");
+
+        assert!(
+            err.to_string()
+                .contains("PKG artifacts are supported only on macOS hosts"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn upgrade_removes_stale_native_gui_records() {
         let layout = test_layout();
@@ -8888,6 +8936,18 @@ sha256 = "abc"
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarZst,
         }
+    }
+
+    fn seed_cached_artifact(layout: &PrefixLayout, resolved: &ResolvedInstall, payload: &[u8]) {
+        let cache_path = layout.artifact_cache_path(
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &resolved.resolved_target,
+            resolved.archive_type,
+        );
+        std::fs::create_dir_all(cache_path.parent().expect("cache path must have parent"))
+            .expect("must create cache dir");
+        std::fs::write(cache_path, payload).expect("must seed cached artifact");
     }
 
     fn sample_install_outcome() -> super::InstallOutcome {

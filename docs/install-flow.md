@@ -14,16 +14,22 @@
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
 3. Select artifact for each resolved package for requested target (`--target` or host triple).
-4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`.
+4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `deb`, `rpm`, `msix`, `appx`.
 5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
 6. Download artifact if needed (or if `--force-redownload`).
 7. Verify artifact SHA-256 against manifest `sha256`.
-8. Stage artifact payload into temporary state directory with deterministic adapters:
+8. Stage artifact payload into temporary state directory with deterministic extraction-only adapters:
    - `zip`, `tar.gz`, `tar.zst`: extract archive payload,
-   - `appimage`: copy payload as `artifact.appimage` (requires `strip_components=0` and no `artifact_root`),
-   - `msi`: administrative extraction only on Windows hosts,
-   - `dmg`: attach/copy/detach extraction only on macOS hosts.
+    - `appimage`: copy payload as `artifact.appimage` (requires `strip_components=0` and no `artifact_root`) on Linux hosts,
+    - `exe`: extraction-only staging on Windows hosts,
+    - `msi`: administrative extraction only on Windows hosts,
+    - `msix`/`appx`: extraction-only staging on Windows hosts,
+    - `dmg`: attach/copy/detach extraction only on macOS hosts,
+    - `pkg`: extraction-only staging on macOS hosts,
+    - `deb`/`rpm`: extraction-only staging on Linux hosts.
+   - Maintainer scripts are not executed for package formats (`deb`, `rpm`, `pkg`).
+   - Vendor installer UI/interactive execution fallback is not attempted for any installer/package format.
 9. Apply `strip_components` during staging copy where supported.
 10. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
 11. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
@@ -123,8 +129,9 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - Checksum mismatch: cached artifact is removed and install fails.
 - Registry key/signature validation failure: install/upgrade and other metadata-dependent operations fail closed.
 - Unsupported archive type: install fails with actionable message.
-- Unsupported MSI host (non-Windows) or DMG host (non-macOS): install fails with actionable message.
-- MSI/DMG/AppImage staging failures: install fails closed; Crosspack does not execute vendor installers as fallback.
+- Unsupported constrained kind host (Windows-only: `exe`, `msi`, `msix`, `appx`; macOS-only: `dmg`, `pkg`; Linux-only: `appimage`, `deb`, `rpm`): install fails with actionable message.
+- Installer/package staging failures (`exe`, `msi`, `msix`, `appx`, `dmg`, `pkg`, `appimage`, `deb`, `rpm`): install fails closed; Crosspack does not execute vendor installers as fallback.
+- Package maintainer scripts are not executed (`deb`, `rpm`, `pkg`); script-dependent installs fail closed.
 - Extraction failure: temporary extraction directory is cleaned up best-effort.
 - Incomplete download: `.part` file is removed on failed download.
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.

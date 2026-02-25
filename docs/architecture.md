@@ -30,7 +30,7 @@ Default user prefixes:
 1. Search and inspect package metadata from configured verified source snapshots, or from `--registry-root` when explicitly overridden.
 2. Resolve dependencies using semver constraints.
 3. Download and verify artifacts. (implemented for direct package install)
-4. Stage/extract to versioned package paths with deterministic artifact-kind adapters (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`) and no vendor-installer fallback.
+4. Stage/extract to versioned package paths with deterministic, extraction-only artifact-kind adapters (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `deb`, `rpm`, `msix`, `appx`) and no vendor-installer fallback.
 5. Expose binaries through symlinks (Unix) or shims (Windows).
 6. Expose completion and GUI application assets under the managed prefix.
 7. Record install state for upgrades and uninstalls.
@@ -62,9 +62,11 @@ Default user prefixes:
   - `--dry-run` to print deterministic transaction preview lines (`transaction_summary`, `risk_flags`, ordered `change_*`) without mutation.
   - `--force-redownload` to bypass artifact cache.
 - Artifact-kind host constraints are fail-closed:
-  - `msi` staging is supported only on Windows hosts,
-  - `dmg` staging is supported only on macOS hosts,
-  - `appimage` is direct payload staging (no installer execution fallback).
+  - Windows-only kinds: `exe`, `msi`, `msix`, `appx`,
+  - macOS-only kinds: `dmg`, `pkg`,
+  - Linux-only kinds: `appimage`, `deb`, `rpm`.
+- Installer/package formats are extraction-only; Crosspack does not execute vendor installer UI fallback paths.
+- Package maintainer scripts are not executed for `deb`, `rpm`, or `pkg`; script-dependent installs fail closed.
 - Output determinism contract remains fixed for machine-oriented lines (`transaction_preview`, `transaction_summary`, `risk_flags`, ordered `change_*`, and `update summary: updated=<n> up-to-date=<n> failed=<n>`).
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.

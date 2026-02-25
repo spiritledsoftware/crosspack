@@ -21,7 +21,7 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `sha256`: expected SHA-256 digest of artifact bytes.
 - `size` (optional): expected size in bytes.
 - `signature` (optional in v0.1): artifact-level detached signature reference.
-- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`). If omitted, inferred from URL suffix.
+- `archive` (optional): artifact kind override (`zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `deb`, `rpm`, `msix`, `appx`). If omitted, inferred from URL suffix.
 - `strip_components` (optional): number of leading path components to strip during extraction.
 - `artifact_root` (optional): expected top-level extracted path (validation hint).
 - `binaries` (optional): list of exposed commands for this artifact.
@@ -31,10 +31,12 @@ Each package version is represented by a TOML manifest stored in the registry in
 ### Artifact Kind Policy
 
 - Artifact ingestion is deterministic and fail-closed.
-- Crosspack does not run vendor installer UI/execution fallback flows.
-- `msi` artifacts are staged only on Windows hosts.
-- `dmg` artifacts are staged only on macOS hosts.
+- Installer/package formats are extraction-only; Crosspack does not run vendor installer UI/execution fallback flows.
+- Windows-only kinds: `exe`, `msi`, `msix`, `appx`.
+- macOS-only kinds: `dmg`, `pkg`.
+- Linux-only kinds: `appimage`, `deb`, `rpm`.
 - `appimage` artifacts are staged as direct payload files and require `strip_components = 0` with no `artifact_root` override.
+- Package maintainer scripts are not executed for `deb`, `rpm`, or `pkg`; script-dependent installs fail closed.
 
 ### Native GUI Registration Policy
 
