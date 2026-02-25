@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/spiritledsoftware/crosspack/compare/v0.6.0...v0.7.0) (2026-02-25)
+
+
+### Features
+
+* add deterministic cross-platform GUI installer support ([#49](https://github.com/spiritledsoftware/crosspack/issues/49)) ([61e01c6](https://github.com/spiritledsoftware/crosspack/commit/61e01c696829fb619dcedb367451d95bf04f2610))
+
 ## [0.6.0](https://github.com/spiritledsoftware/crosspack/compare/v0.5.0...v0.6.0) (2026-02-24)
 
 
