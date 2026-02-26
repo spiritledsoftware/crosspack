@@ -1399,6 +1399,9 @@ fn execute_native_uninstall_action(action: &NativeUninstallAction) -> Result<()>
         "desktop-entry" | "start-menu-launcher" | "applications-symlink" => {
             remove_native_uninstall_path(Path::new(&action.path))
         }
+        "applications-bundle-copy" => {
+            remove_native_uninstall_path_recursive(Path::new(&action.path))
+        }
         "registry-key" => remove_native_registry_key(&action.path),
         other => Err(anyhow!(
             "unsupported native uninstall action kind '{other}'"
@@ -1407,10 +1410,22 @@ fn execute_native_uninstall_action(action: &NativeUninstallAction) -> Result<()>
 }
 
 fn remove_native_uninstall_path(path: &Path) -> Result<()> {
+    remove_native_uninstall_path_with_mode(path, false)
+}
+
+fn remove_native_uninstall_path_recursive(path: &Path) -> Result<()> {
+    remove_native_uninstall_path_with_mode(path, true)
+}
+
+fn remove_native_uninstall_path_with_mode(path: &Path, recursive: bool) -> Result<()> {
     let remove_result = match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.is_dir() {
-                fs::remove_dir(path)
+                if recursive {
+                    fs::remove_dir_all(path)
+                } else {
+                    fs::remove_dir(path)
+                }
             } else {
                 fs::remove_file(path)
             }
@@ -2198,18 +2213,20 @@ where
                 if !removed_files.insert(path.clone()) {
                     continue;
                 }
-                let remove_result = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => {
-                        if metadata.is_dir() {
-                            fs::remove_dir(&path)
-                        } else {
-                            fs::remove_file(&path)
-                        }
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(err) => Err(err),
-                };
-                if let Err(err) = remove_result {
+                if let Err(err) = remove_native_uninstall_path(&path) {
+                    warnings.push(format!(
+                        "native GUI deregistration warning: failed to remove '{}': {}",
+                        path.display(),
+                        err
+                    ));
+                }
+            }
+            "applications-bundle-copy" => {
+                let path = PathBuf::from(&record.path);
+                if !removed_files.insert(path.clone()) {
+                    continue;
+                }
+                if let Err(err) = remove_native_uninstall_path_recursive(&path) {
                     warnings.push(format!(
                         "native GUI deregistration warning: failed to remove '{}': {}",
                         path.display(),
@@ -2319,8 +2336,8 @@ where
     CreateSymlink: FnMut(&Path, &Path) -> io::Result<()>,
 {
     let mut records = Vec::new();
-    let (selected_destination, mut warnings) = if is_macos_app_bundle_path(registration_source_path)
-    {
+    let uses_bundle_copy = is_macos_app_bundle_path(registration_source_path);
+    let (selected_destination, mut warnings) = if uses_bundle_copy {
         register_macos_application_bundle_copy(
             registration_source_path,
             destination_candidates,
@@ -2337,11 +2354,16 @@ where
     let Some(link_path) = selected_destination else {
         return (records, warnings);
     };
+    let native_kind = if uses_bundle_copy {
+        "applications-bundle-copy"
+    } else {
+        "applications-symlink"
+    };
 
     for asset in projected_assets {
         records.push(GuiNativeRegistrationRecord {
             key: asset.key.clone(),
-            kind: "applications-symlink".to_string(),
+            kind: native_kind.to_string(),
             path: link_path.display().to_string(),
         });
     }
@@ -4687,6 +4709,46 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_native_macos_bundle_registration_persists_bundle_copy_kind() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let root = layout.prefix().join("macos-bundle-kind-persist-test");
+        let source_bundle = root.join("staged").join("Demo.app");
+        let source_binary = source_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(source_binary.parent().expect("must have parent"))
+            .expect("must create source bundle dirs");
+        fs::write(&source_binary, b"#!/bin/sh\n").expect("must write source bundle binary");
+
+        let system_target = root.join("system-applications").join("Demo.app");
+        let user_target = root.join("user-applications").join("Demo.app");
+        let projected_assets = vec![GuiExposureAsset {
+            key: "app:dev.demo.App".to_string(),
+            rel_path: "launchers/dev-demo.command".to_string(),
+        }];
+
+        let (records, warnings) = register_macos_native_gui_registration_with_executor_and_creator(
+            &projected_assets,
+            &source_bundle,
+            [system_target.clone(), user_target],
+            &[],
+            &mut |_command, _context| Ok(()),
+            |_source, _destination| Ok(()),
+        );
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(records
+            .iter()
+            .all(|record| record.kind == "applications-bundle-copy"));
+        write_gui_native_state(&layout, "demo", &records).expect("must persist native state");
+        let loaded = read_gui_native_state(&layout, "demo").expect("must reload native state");
+        assert!(loaded
+            .iter()
+            .all(|record| record.kind == "applications-bundle-copy"));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn register_native_gui_macos_non_bundle_source_keeps_symlink_registration_behavior() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -4723,6 +4785,9 @@ mod tests {
             "non-.app registration should continue using symlink writer path"
         );
         assert_eq!(records.len(), projected_assets.len());
+        assert!(records
+            .iter()
+            .all(|record| record.kind == "applications-symlink"));
         assert!(records
             .iter()
             .all(|record| record.path == system_target.display().to_string()));
@@ -6262,6 +6327,191 @@ mod tests {
             !layout.gui_native_state_path("demo").exists(),
             "managed cleanup should clear sidecar state"
         );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_removes_bundle_copy_records_recursively() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        let copied_bundle = layout.prefix().join("Applications").join("Demo.app");
+        let copied_binary = copied_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(copied_binary.parent().expect("must have parent"))
+            .expect("must create copied bundle dirs");
+        fs::write(&copied_binary, b"#!/bin/sh\n").expect("must create copied bundle binary");
+
+        write_native_sidecar_state(
+            &layout,
+            "demo",
+            &NativeSidecarState {
+                uninstall_actions: vec![NativeUninstallAction {
+                    key: "app:demo".to_string(),
+                    kind: "applications-bundle-copy".to_string(),
+                    path: copied_bundle.display().to_string(),
+                }],
+            },
+        )
+        .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let result = uninstall_package(&layout, "demo")
+            .expect("bundle-copy native uninstall action should be removed recursively");
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!copied_bundle.exists());
+        assert!(!package_dir.exists());
+        assert!(!layout.receipt_path("demo").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_applications_symlink_kind_behavior_unchanged() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        let symlink_like_path = layout.prefix().join("Demo.app-link");
+        fs::write(&symlink_like_path, b"simulated symlink file")
+            .expect("must write symlink-like path");
+        write_native_sidecar_state(
+            &layout,
+            "demo",
+            &NativeSidecarState {
+                uninstall_actions: vec![NativeUninstallAction {
+                    key: "app:demo".to_string(),
+                    kind: "applications-symlink".to_string(),
+                    path: symlink_like_path.display().to_string(),
+                }],
+            },
+        )
+        .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let result = uninstall_package(&layout, "demo")
+            .expect("applications-symlink native uninstall action should still succeed");
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!symlink_like_path.exists());
+        assert!(!package_dir.exists());
+        assert!(!layout.receipt_path("demo").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_stale_cleanup_handles_bundle_copy_and_symlink_kinds() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        let stale_symlink_like_path = layout.prefix().join("stale-demo-link");
+        fs::write(&stale_symlink_like_path, b"simulated symlink")
+            .expect("must create stale symlink-like path");
+        let stale_bundle_copy = layout.prefix().join("stale-applications").join("Demo.app");
+        let stale_bundle_binary = stale_bundle_copy
+            .join("Contents")
+            .join("MacOS")
+            .join("demo");
+        fs::create_dir_all(stale_bundle_binary.parent().expect("must have parent"))
+            .expect("must create stale bundle dirs");
+        fs::write(&stale_bundle_binary, b"#!/bin/sh\n").expect("must create stale bundle binary");
+
+        write_gui_native_state(
+            &layout,
+            "demo",
+            &[
+                GuiNativeRegistrationRecord {
+                    key: "app:demo".to_string(),
+                    kind: "applications-symlink".to_string(),
+                    path: stale_symlink_like_path.display().to_string(),
+                },
+                GuiNativeRegistrationRecord {
+                    key: "app:demo-bundle".to_string(),
+                    kind: "applications-bundle-copy".to_string(),
+                    path: stale_bundle_copy.display().to_string(),
+                },
+            ],
+        )
+        .expect("must write stale native gui state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let result = uninstall_package(&layout, "demo")
+            .expect("stale native cleanup should handle both bundle-copy and symlink kinds");
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!stale_symlink_like_path.exists());
+        assert!(!stale_bundle_copy.exists());
+        assert!(!layout.gui_native_state_path("demo").exists());
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
