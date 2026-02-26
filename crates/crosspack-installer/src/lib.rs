@@ -2014,8 +2014,7 @@ mod tests {
         layout.ensure_base_dirs().expect("must create dirs");
         let package_dir = layout.package_dir("demo", "1.0.0");
         fs::create_dir_all(package_dir.join("bin")).expect("must create bin dir");
-        fs::write(package_dir.join("bin").join("demo"), b"#!/bin/sh\n")
-            .expect("must write binary");
+        fs::write(package_dir.join("bin").join("demo"), b"#!/bin/sh\n").expect("must write binary");
 
         let err = expose_binary(&layout, &package_dir, "demo", "prefix/bin/demo")
             .expect_err("non-app bundle path should not be rewritten");
