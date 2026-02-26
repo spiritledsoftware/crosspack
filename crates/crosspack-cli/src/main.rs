@@ -9997,7 +9997,7 @@ old-cc = "<2.0.0"
     }
 
     #[test]
-    fn native_gui_sync_kind_migration_with_path_change_still_cleans_stale_path() {
+    fn native_gui_sync_kind_migration_with_path_change_preserves_legacy_bundle_dir() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -10030,8 +10030,8 @@ old-cc = "<2.0.0"
             .expect("stale cleanup should succeed");
         assert!(warnings.is_empty(), "stale cleanup should be warning-free");
         assert!(
-            !stale_bundle.exists(),
-            "stale bundle path should be removed"
+            stale_bundle.exists(),
+            "legacy applications-symlink bundle dirs should not be removed recursively"
         );
         assert!(deployed_bundle.exists(), "deployed bundle path must remain");
         assert!(
