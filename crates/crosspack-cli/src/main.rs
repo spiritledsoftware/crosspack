@@ -9946,13 +9946,15 @@ old-cc = "<2.0.0"
 
     #[test]
     fn native_gui_sync_contract_accepts_previous_registration_records() {
-        let _register: fn(
+        type RegisterNativeGuiFn = fn(
             &str,
             &ArtifactGuiApp,
             &Path,
             &[GuiNativeRegistrationRecord],
-        ) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> =
-            register_native_gui_app_best_effort;
+        )
+            -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)>;
+
+        let _register: RegisterNativeGuiFn = register_native_gui_app_best_effort;
     }
 
     #[test]
