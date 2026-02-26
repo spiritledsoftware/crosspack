@@ -30,7 +30,7 @@ Default user prefixes:
 1. Search and inspect package metadata from configured verified source snapshots, or from `--registry-root` when explicitly overridden.
 2. Resolve dependencies using semver constraints.
 3. Download and verify artifacts. (implemented for direct package install)
-4. Stage/extract to versioned package paths with deterministic adapters; defaults are managed mode for `zip`, `tar.gz`, `tar.zst`, `dmg`, `appimage` and native mode for `pkg`, `exe`, `msi`, `msix`, `appx`.
+4. Stage/extract to versioned package paths with deterministic adapters; defaults are managed mode for `zip`, `tar.gz`, `tar.zst`, `bin`, `dmg`, `appimage` and native mode for `pkg`, `exe`, `msi`, `msix`, `appx`.
 5. Expose binaries through symlinks (Unix) or shims (Windows).
 6. Expose completion and GUI application assets under the managed prefix.
 7. Record install state for upgrades and uninstalls.
@@ -61,7 +61,7 @@ Default user prefixes:
   - `--target <triple>` to override host target selection.
   - `--dry-run` to print deterministic transaction preview lines (`transaction_summary`, `risk_flags`, ordered `change_*`) without mutation.
   - `--force-redownload` to bypass artifact cache.
-- Artifact-kind mode defaults are fail-closed: managed (`zip`, `tar.gz`, `tar.zst`, `dmg`, `appimage`) and native (`pkg`, `exe`, `msi`, `msix`, `appx`).
+- Artifact-kind mode defaults are fail-closed: managed (`zip`, `tar.gz`, `tar.zst`, `bin`, `dmg`, `appimage`) and native (`pkg`, `exe`, `msi`, `msix`, `appx`).
 - Artifact-kind host constraints are fail-closed:
   - Windows-only native kinds: `exe`, `msi`, `msix`, `appx`,
   - macOS-only native kind: `pkg`,

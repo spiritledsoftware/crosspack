@@ -3182,6 +3182,9 @@ fn stage_artifact_payload(
     match artifact_type {
         ArchiveType::Zip => extract_zip(artifact_path, raw_dir),
         ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(artifact_path, raw_dir),
+        ArchiveType::Bin => {
+            stage_bin_payload(artifact_path, raw_dir, strip_components, artifact_root)
+        }
         ArchiveType::AppImage => {
             stage_appimage_payload(artifact_path, raw_dir, strip_components, artifact_root)
         }
@@ -3232,6 +3235,49 @@ fn stage_appimage_payload(
     fs::copy(artifact_path, &staged).with_context(|| {
         format!(
             "failed to stage AppImage payload from {} to {}",
+            artifact_path.display(),
+            staged.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&staged)
+            .with_context(|| format!("failed to stat {}", staged.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&staged, permissions)
+            .with_context(|| format!("failed to set executable mode on {}", staged.display()))?;
+    }
+
+    Ok(())
+}
+
+fn stage_bin_payload(
+    artifact_path: &Path,
+    raw_dir: &Path,
+    strip_components: u32,
+    artifact_root: Option<&str>,
+) -> Result<()> {
+    if strip_components != 0 {
+        return Err(anyhow!("strip_components must be 0 for bin artifacts"));
+    }
+    if artifact_root.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(anyhow!("artifact_root is not supported for bin artifacts"));
+    }
+
+    fs::create_dir_all(raw_dir)
+        .with_context(|| format!("failed to create {}", raw_dir.display()))?;
+    let file_name = artifact_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow!("failed to derive bin artifact file name"))?;
+    let staged = raw_dir.join(file_name);
+    fs::copy(artifact_path, &staged).with_context(|| {
+        format!(
+            "failed to stage bin payload from {} to {}",
             artifact_path.display(),
             staged.display()
         )
@@ -5679,6 +5725,81 @@ mod tests {
             .expect("must stage appimage payload");
 
         let mode = fs::metadata(raw_dir.join("artifact.appimage"))
+            .expect("must stat staged payload")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn install_from_artifact_rejects_bin_with_strip_components() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.bin");
+        fs::write(&artifact_path, b"dummy bin").expect("must write artifact");
+
+        let err = install_from_artifact(
+            &layout,
+            "demo",
+            "1.0.0",
+            &artifact_path,
+            ArchiveType::Bin,
+            ArtifactInstallOptions {
+                strip_components: 1,
+                artifact_root: None,
+                install_mode: InstallMode::Managed,
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
+        )
+        .expect_err("bin strip_components should be rejected");
+        assert!(
+            err.to_string()
+                .contains("strip_components must be 0 for bin artifacts"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn stage_bin_copies_payload_into_raw_dir() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.bin");
+        fs::write(&artifact_path, b"bin payload").expect("must write artifact");
+        let raw_dir = layout.prefix().join("raw");
+        fs::create_dir_all(&raw_dir).expect("must create raw dir");
+
+        stage_bin_payload(&artifact_path, &raw_dir, 0, None).expect("must stage bin payload");
+
+        let staged = raw_dir.join("demo.bin");
+        assert!(staged.exists(), "staged payload should exist");
+        assert_eq!(
+            fs::read(&staged).expect("must read staged payload"),
+            b"bin payload"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_bin_sets_executable_permissions_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let artifact_path = layout.prefix().join("demo.bin");
+        fs::write(&artifact_path, b"bin payload").expect("must write artifact");
+        let raw_dir = layout.prefix().join("raw");
+        fs::create_dir_all(&raw_dir).expect("must create raw dir");
+
+        stage_bin_payload(&artifact_path, &raw_dir, 0, None).expect("must stage bin payload");
+
+        let mode = fs::metadata(raw_dir.join("demo.bin"))
             .expect("must stat staged payload")
             .permissions()
             .mode()

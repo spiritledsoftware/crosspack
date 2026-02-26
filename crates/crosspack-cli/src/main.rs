@@ -113,6 +113,7 @@ fn install_mode_for_archive_type(archive_type: ArchiveType) -> InstallMode {
         ArchiveType::Zip
         | ArchiveType::TarGz
         | ArchiveType::TarZst
+        | ArchiveType::Bin
         | ArchiveType::Dmg
         | ArchiveType::AppImage => InstallMode::Managed,
         ArchiveType::Msi
@@ -3784,12 +3785,14 @@ fn install_resolved(
     let declared_completions = collect_declared_completions(&resolved.artifact)?;
     let declared_gui_apps = collect_declared_gui_apps(&resolved.artifact)?;
 
-    let cache_path = layout.artifact_cache_path(
+    let cache_path = resolved_artifact_cache_path(
+        layout,
         &resolved.manifest.name,
         &resolved.manifest.version.to_string(),
         &resolved.resolved_target,
         resolved.archive_type,
-    );
+        &resolved.artifact.url,
+    )?;
     let download_status = download_artifact(
         &resolved.artifact.url,
         &cache_path,
@@ -3930,6 +3933,38 @@ fn install_resolved(
             .collect(),
         warnings: native_gui_warnings,
     })
+}
+
+fn resolved_artifact_cache_path(
+    layout: &PrefixLayout,
+    package_name: &str,
+    version: &str,
+    target: &str,
+    archive_type: ArchiveType,
+    artifact_url: &str,
+) -> Result<PathBuf> {
+    let mut cache_path = layout.artifact_cache_path(package_name, version, target, archive_type);
+    if archive_type == ArchiveType::Bin {
+        cache_path.set_file_name(bin_cache_file_name_from_url(artifact_url)?);
+    }
+    Ok(cache_path)
+}
+
+fn bin_cache_file_name_from_url(artifact_url: &str) -> Result<String> {
+    let without_fragment = artifact_url.split('#').next().unwrap_or(artifact_url);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let file_name = without_query.rsplit('/').next().unwrap_or("");
+
+    if file_name.is_empty() || file_name == "." || file_name == ".." || file_name.contains('\\') {
+        return Err(anyhow!(
+            "could not infer bin cache file name from URL '{artifact_url}'"
+        ));
+    }
+
+    Ok(file_name.to_string())
 }
 
 fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) -> Vec<String> {
@@ -8338,6 +8373,7 @@ ripgrep-legacy = "*"
             ArchiveType::Zip,
             ArchiveType::TarGz,
             ArchiveType::TarZst,
+            ArchiveType::Bin,
             ArchiveType::Dmg,
             ArchiveType::AppImage,
         ] {
@@ -8376,6 +8412,36 @@ ripgrep-legacy = "*"
         assert_eq!(options.artifact_root, Some("payload"));
         assert_eq!(options.install_mode, InstallMode::Native);
         assert_eq!(options.interaction_policy, interaction_policy);
+    }
+
+    #[test]
+    fn bin_cache_file_name_from_url_uses_final_path_segment() {
+        let file_name = bin_cache_file_name_from_url(
+            "https://example.test/releases/download/v1.0.0/tool-macos-arm64?download=1#asset",
+        )
+        .expect("must derive file name");
+        assert_eq!(file_name, "tool-macos-arm64");
+    }
+
+    #[test]
+    fn resolved_artifact_cache_path_uses_url_file_name_for_bin_artifacts() {
+        let layout = test_layout();
+        let cache_path = resolved_artifact_cache_path(
+            &layout,
+            "jq",
+            "1.8.1",
+            "aarch64-apple-darwin",
+            ArchiveType::Bin,
+            "https://example.test/releases/download/jq-1.8.1/jq-macos-arm64",
+        )
+        .expect("must resolve cache path");
+
+        assert_eq!(
+            cache_path,
+            layout
+                .prefix()
+                .join("cache/artifacts/jq/1.8.1/aarch64-apple-darwin/jq-macos-arm64")
+        );
     }
 
     #[test]

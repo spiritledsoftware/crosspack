@@ -14,14 +14,15 @@
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
 3. Select artifact for each resolved package for requested target (`--target` or host triple).
-4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`.
+4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `bin`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`.
+   - Extensionless final URL path segments infer to `bin`.
    - Pre-1.0 scope reset: `deb` and `rpm` are removed from the supported artifact contract and are rejected.
 5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
 6. Download artifact if needed (or if `--force-redownload`).
 7. Verify artifact SHA-256 against manifest `sha256`.
 8. Stage artifact payload into temporary state directory with deterministic adapters:
-   - managed mode adapters: `zip`, `tar.gz`, `tar.zst` (archive extraction), `dmg` (attach/copy/detach extraction on macOS), `appimage` (copy payload as `artifact.appimage` on Linux; requires `strip_components=0` and no `artifact_root`),
+   - managed mode adapters: `zip`, `tar.gz`, `tar.zst` (archive extraction), `bin` (copy payload using the cached file name; requires `strip_components=0` and no `artifact_root`), `dmg` (attach/copy/detach extraction on macOS), `appimage` (copy payload as `artifact.appimage` on Linux; requires `strip_components=0` and no `artifact_root`),
    - native mode defaults: `pkg` on macOS, `exe`/`msi`/`msix`/`appx` on Windows,
    - native mode still uses deterministic non-UI adapter execution; vendor installer fallback is not attempted.
 9. Apply `strip_components` during staging copy where supported.
