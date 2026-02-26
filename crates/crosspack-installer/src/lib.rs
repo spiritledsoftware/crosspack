@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use crosspack_core::{ArchiveType, ArtifactCompletionShell, ArtifactGuiApp};
 
+const MACOS_LSREGISTER_PATH: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixLayout {
     prefix: PathBuf,
@@ -2161,32 +2163,16 @@ where
             .file_name()
             .ok_or_else(|| anyhow!("gui app '{}' has invalid executable path", app.app_id))?;
         let destination_candidates = macos_registration_destination_candidates(&home, app_name);
-        let (selected_destination, mut selection_warnings) = register_macos_application_symlink(
-            &registration_source_path,
-            destination_candidates,
-            previous_records,
-        );
-        warnings.append(&mut selection_warnings);
-        let Some(link_path) = selected_destination else {
-            return Ok((records, warnings));
-        };
-
-        for asset in &projected_assets {
-            records.push(GuiNativeRegistrationRecord {
-                key: asset.key.clone(),
-                kind: "applications-symlink".to_string(),
-                path: link_path.display().to_string(),
-            });
-        }
-
-        let mut refresh = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister");
-        refresh.arg("-f").arg(&link_path);
-        if let Err(err) = run_command_executor(
-            &mut refresh,
-            "failed to refresh macOS LaunchServices registry",
-        ) {
-            warnings.push(format!("native GUI registration warning: {err}"));
-        }
+        let (mut macos_records, mut macos_warnings) =
+            register_macos_native_gui_registration_with_executor(
+                &projected_assets,
+                &registration_source_path,
+                destination_candidates,
+                previous_records,
+                &mut run_command_executor,
+            );
+        records.append(&mut macos_records);
+        warnings.append(&mut macos_warnings);
 
         return Ok((records, warnings));
     }
@@ -2300,17 +2286,120 @@ fn select_macos_registration_destination(
     (None, warnings)
 }
 
-fn register_macos_application_symlink(
+fn register_macos_native_gui_registration_with_executor<RunCommand>(
+    projected_assets: &[GuiExposureAsset],
+    registration_source_path: &Path,
+    destination_candidates: [PathBuf; 2],
+    previous_records: &[GuiNativeRegistrationRecord],
+    run_command_executor: &mut RunCommand,
+) -> (Vec<GuiNativeRegistrationRecord>, Vec<String>)
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    register_macos_native_gui_registration_with_executor_and_creator(
+        projected_assets,
+        registration_source_path,
+        destination_candidates,
+        previous_records,
+        run_command_executor,
+        create_macos_application_symlink,
+    )
+}
+
+fn register_macos_native_gui_registration_with_executor_and_creator<RunCommand, CreateSymlink>(
+    projected_assets: &[GuiExposureAsset],
+    registration_source_path: &Path,
+    destination_candidates: [PathBuf; 2],
+    previous_records: &[GuiNativeRegistrationRecord],
+    run_command_executor: &mut RunCommand,
+    create_symlink: CreateSymlink,
+) -> (Vec<GuiNativeRegistrationRecord>, Vec<String>)
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+    CreateSymlink: FnMut(&Path, &Path) -> io::Result<()>,
+{
+    let mut records = Vec::new();
+    let (selected_destination, mut warnings) = if is_macos_app_bundle_path(registration_source_path)
+    {
+        register_macos_application_bundle_copy(
+            registration_source_path,
+            destination_candidates,
+            previous_records,
+        )
+    } else {
+        register_macos_application_symlink_with_creator(
+            registration_source_path,
+            destination_candidates,
+            previous_records,
+            create_symlink,
+        )
+    };
+    let Some(link_path) = selected_destination else {
+        return (records, warnings);
+    };
+
+    for asset in projected_assets {
+        records.push(GuiNativeRegistrationRecord {
+            key: asset.key.clone(),
+            kind: "applications-symlink".to_string(),
+            path: link_path.display().to_string(),
+        });
+    }
+
+    let mut refresh = Command::new(MACOS_LSREGISTER_PATH);
+    refresh.arg("-f").arg(&link_path);
+    if let Err(err) = run_command_executor(
+        &mut refresh,
+        "failed to refresh macOS LaunchServices registry",
+    ) {
+        warnings.push(format!("native GUI registration warning: {err}"));
+    }
+
+    (records, warnings)
+}
+
+fn register_macos_application_bundle_copy(
     registration_source_path: &Path,
     destination_candidates: [PathBuf; 2],
     previous_records: &[GuiNativeRegistrationRecord],
 ) -> (Option<PathBuf>, Vec<String>) {
-    register_macos_application_symlink_with_creator(
-        registration_source_path,
-        destination_candidates,
+    let [system_destination, user_destination] = destination_candidates;
+    let mut warnings = Vec::new();
+
+    let (selected_destination, mut selection_warnings) = select_macos_registration_destination(
+        [system_destination.clone(), user_destination.clone()],
         previous_records,
-        create_macos_application_symlink,
-    )
+    );
+    warnings.append(&mut selection_warnings);
+
+    let Some(selected_destination) = selected_destination else {
+        return (None, warnings);
+    };
+
+    match write_macos_registration_bundle_copy(registration_source_path, &selected_destination) {
+        Ok(()) => return (Some(selected_destination), warnings),
+        Err(warning) => warnings.push(warning),
+    }
+
+    if selected_destination != system_destination || user_destination == system_destination {
+        return (None, warnings);
+    }
+
+    match prepare_macos_registration_destination(&user_destination, previous_records) {
+        Ok(()) => {}
+        Err(warning) => {
+            warnings.push(warning);
+            return (None, warnings);
+        }
+    }
+
+    match write_macos_registration_bundle_copy(registration_source_path, &user_destination) {
+        Ok(()) => (Some(user_destination), warnings),
+        Err(warning) => {
+            warnings.push(warning);
+            (None, warnings)
+        }
+    }
 }
 
 fn register_macos_application_symlink_with_creator<CreateSymlink>(
@@ -2438,6 +2527,49 @@ where
     Ok(())
 }
 
+fn write_macos_registration_bundle_copy(
+    registration_source_path: &Path,
+    destination_path: &Path,
+) -> std::result::Result<(), String> {
+    if !registration_source_path.is_dir() {
+        return Err(format!(
+            "native GUI registration warning: macOS app bundle source is not a directory {}",
+            registration_source_path.display()
+        ));
+    }
+
+    if destination_path.exists() {
+        let remove_result = match fs::symlink_metadata(destination_path) {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    fs::remove_dir_all(destination_path)
+                } else {
+                    fs::remove_file(destination_path)
+                }
+            }
+            Err(err) => Err(err),
+        };
+        if let Err(err) = remove_result {
+            return Err(format!(
+                "native GUI registration warning: failed to replace existing macOS application bundle {}: {}",
+                destination_path.display(),
+                err
+            ));
+        }
+    }
+
+    if let Err(err) = copy_dir_recursive(registration_source_path, destination_path) {
+        return Err(format!(
+            "native GUI registration warning: failed to copy macOS application bundle {} -> {}: {}",
+            registration_source_path.display(),
+            destination_path.display(),
+            err
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(unix)]
 fn create_macos_application_symlink(
     registration_source_path: &Path,
@@ -2488,6 +2620,13 @@ fn macos_registration_source_path(install_root: &Path, source_path: &Path) -> Pa
     }
 
     source_path.to_path_buf()
+}
+
+fn is_macos_app_bundle_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("app"))
+        .unwrap_or(false)
 }
 
 fn native_gui_launcher_filename(package_name: &str, app: &ArtifactGuiApp) -> String {
@@ -4441,6 +4580,158 @@ mod tests {
             macos_registration_source_path(install_root, &source_path),
             source_path
         );
+    }
+
+    #[test]
+    fn register_native_gui_macos_bundle_source_deploys_directory_copy_not_symlink() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let root = layout.prefix().join("macos-bundle-register-test");
+        let source_bundle = root.join("staged").join("Demo.app");
+        let source_binary = source_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(source_binary.parent().expect("must have parent"))
+            .expect("must create source bundle dirs");
+        fs::write(&source_binary, b"#!/bin/sh\n").expect("must write source bundle binary");
+
+        let system_target = root.join("system-applications").join("Demo.app");
+        let user_target = root.join("user-applications").join("Demo.app");
+        let projected_assets = vec![GuiExposureAsset {
+            key: "app:dev.demo.App".to_string(),
+            rel_path: "launchers/dev-demo.command".to_string(),
+        }];
+
+        let mut symlink_calls = 0usize;
+        let (_records, warnings) = register_macos_native_gui_registration_with_executor_and_creator(
+            &projected_assets,
+            &source_bundle,
+            [system_target.clone(), user_target],
+            &[],
+            &mut |_command, _context| Ok(()),
+            |_source, _destination| {
+                symlink_calls += 1;
+                Ok(())
+            },
+        );
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            symlink_calls, 0,
+            "bundle deployment must not use symlink registration"
+        );
+        let deployed_metadata =
+            fs::symlink_metadata(&system_target).expect("deployed bundle path should exist");
+        assert!(
+            deployed_metadata.is_dir(),
+            "deployed bundle path should be a directory"
+        );
+        assert!(
+            !deployed_metadata.file_type().is_symlink(),
+            "deployed bundle path must not be a symlink"
+        );
+        assert!(
+            system_target.join("Contents/MacOS/demo").exists(),
+            "bundle payload should be copied to deployed destination"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn register_native_gui_macos_bundle_source_runs_lsregister_for_deployed_bundle_path() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let root = layout.prefix().join("macos-bundle-lsregister-test");
+        let source_bundle = root.join("staged").join("Demo.app");
+        let source_binary = source_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(source_binary.parent().expect("must have parent"))
+            .expect("must create source bundle dirs");
+        fs::write(&source_binary, b"#!/bin/sh\n").expect("must write source bundle binary");
+
+        let system_target = root.join("system-applications").join("Demo.app");
+        let user_target = root.join("user-applications").join("Demo.app");
+        let projected_assets = vec![GuiExposureAsset {
+            key: "app:dev.demo.App".to_string(),
+            rel_path: "launchers/dev-demo.command".to_string(),
+        }];
+
+        let mut observed_program = String::new();
+        let mut observed_args: Vec<String> = Vec::new();
+        let (_records, warnings) = register_macos_native_gui_registration_with_executor_and_creator(
+            &projected_assets,
+            &source_bundle,
+            [system_target.clone(), user_target],
+            &[],
+            &mut |command, _context| {
+                observed_program = command.get_program().to_string_lossy().into_owned();
+                observed_args = command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                Ok(())
+            },
+            |_source, _destination| Ok(()),
+        );
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(observed_program, MACOS_LSREGISTER_PATH);
+        assert_eq!(
+            observed_args,
+            vec!["-f".to_string(), system_target.display().to_string()]
+        );
+        assert!(
+            Path::new(&observed_args[1]).exists(),
+            "lsregister should run against the deployed bundle path"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn register_native_gui_macos_non_bundle_source_keeps_symlink_registration_behavior() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let root = layout.prefix().join("macos-non-bundle-register-test");
+        let source_path = root.join("staged").join("demo");
+        fs::create_dir_all(source_path.parent().expect("must have parent"))
+            .expect("must create source parent");
+        fs::write(&source_path, b"#!/bin/sh\n").expect("must write source executable");
+
+        let system_target = root.join("system-applications").join("demo");
+        let user_target = root.join("user-applications").join("demo");
+        let projected_assets = vec![GuiExposureAsset {
+            key: "app:dev.demo.App".to_string(),
+            rel_path: "launchers/dev-demo.command".to_string(),
+        }];
+
+        let mut symlink_invocations = Vec::new();
+        let (records, warnings) = register_macos_native_gui_registration_with_executor_and_creator(
+            &projected_assets,
+            &source_path,
+            [system_target.clone(), user_target],
+            &[],
+            &mut |_command, _context| Ok(()),
+            |source, destination| {
+                symlink_invocations.push((source.to_path_buf(), destination.to_path_buf()));
+                fs::write(destination, b"simulated-symlink")
+            },
+        );
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            symlink_invocations,
+            vec![(source_path.clone(), system_target.clone())],
+            "non-.app registration should continue using symlink writer path"
+        );
+        assert_eq!(records.len(), projected_assets.len());
+        assert!(records
+            .iter()
+            .all(|record| record.path == system_target.display().to_string()));
+        assert_eq!(
+            fs::read(&system_target).expect("simulated symlink destination should exist"),
+            b"simulated-symlink"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
