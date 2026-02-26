@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.5](https://github.com/spiritledsoftware/crosspack/compare/v0.7.4...v0.7.5) (2026-02-26)
+
+
+### Bug Fixes
+
+* **installer:** register macOS GUI apps using bundle roots ([#64](https://github.com/spiritledsoftware/crosspack/issues/64)) ([5479fd1](https://github.com/spiritledsoftware/crosspack/commit/5479fd1d9c89df2fafcef7ea33970b5a19e11315))
+
 ## [0.7.4](https://github.com/spiritledsoftware/crosspack/compare/v0.7.3...v0.7.4) (2026-02-26)
 
 
