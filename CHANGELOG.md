@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.4](https://github.com/spiritledsoftware/crosspack/compare/v0.7.3...v0.7.4) (2026-02-26)
+
+
+### Bug Fixes
+
+* **installer:** handle flattened macOS app-bundle binary paths (SPI-35) ([#62](https://github.com/spiritledsoftware/crosspack/issues/62)) ([9791946](https://github.com/spiritledsoftware/crosspack/commit/9791946ce219a38de28eac1328482371e50ad16b))
+
 ## [0.7.3](https://github.com/spiritledsoftware/crosspack/compare/v0.7.2...v0.7.3) (2026-02-25)
 
 
