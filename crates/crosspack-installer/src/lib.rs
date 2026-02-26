@@ -1396,9 +1396,10 @@ fn run_native_uninstall_actions(layout: &PrefixLayout, package_name: &str) -> Re
 
 fn execute_native_uninstall_action(action: &NativeUninstallAction) -> Result<()> {
     match action.kind.as_str() {
-        "desktop-entry" | "start-menu-launcher" | "applications-symlink" => {
+        "desktop-entry" | "start-menu-launcher" => {
             remove_native_uninstall_path(Path::new(&action.path))
         }
+        "applications-symlink" => remove_native_applications_symlink_path(Path::new(&action.path)),
         "applications-bundle-copy" => {
             remove_native_uninstall_path_recursive(Path::new(&action.path))
         }
@@ -1415,6 +1416,31 @@ fn remove_native_uninstall_path(path: &Path) -> Result<()> {
 
 fn remove_native_uninstall_path_recursive(path: &Path) -> Result<()> {
     remove_native_uninstall_path_with_mode(path, true)
+}
+
+fn remove_native_applications_symlink_path(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to inspect native uninstall path: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return remove_native_uninstall_path(path);
+    }
+
+    if is_macos_app_bundle_path(path) {
+        return remove_native_uninstall_path_recursive(path);
+    }
+
+    remove_native_uninstall_path(path)
 }
 
 fn remove_native_uninstall_path_with_mode(path: &Path, recursive: bool) -> Result<()> {
@@ -2208,12 +2234,25 @@ where
 
     for record in records {
         match record.kind.as_str() {
-            "desktop-entry" | "start-menu-launcher" | "applications-symlink" => {
+            "desktop-entry" | "start-menu-launcher" => {
                 let path = PathBuf::from(&record.path);
                 if !removed_files.insert(path.clone()) {
                     continue;
                 }
                 if let Err(err) = remove_native_uninstall_path(&path) {
+                    warnings.push(format!(
+                        "native GUI deregistration warning: failed to remove '{}': {}",
+                        path.display(),
+                        err
+                    ));
+                }
+            }
+            "applications-symlink" => {
+                let path = PathBuf::from(&record.path);
+                if !removed_files.insert(path.clone()) {
+                    continue;
+                }
+                if let Err(err) = remove_native_applications_symlink_path(&path) {
                     warnings.push(format!(
                         "native GUI deregistration warning: failed to remove '{}': {}",
                         path.display(),
@@ -6384,6 +6423,66 @@ mod tests {
             .expect("bundle-copy native uninstall action should be removed recursively");
         assert_eq!(result.status, UninstallStatus::Uninstalled);
         assert!(!copied_bundle.exists());
+        assert!(!package_dir.exists());
+        assert!(!layout.receipt_path("demo").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_native_legacy_applications_symlink_kind_removes_app_bundle_recursively() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(&package_dir).expect("must create package dir");
+        fs::write(package_dir.join("demo.txt"), b"hello").expect("must create package file");
+
+        let legacy_bundle = layout.prefix().join("Applications").join("LegacyDemo.app");
+        let legacy_bundle_binary = legacy_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(legacy_bundle_binary.parent().expect("must have parent"))
+            .expect("must create legacy bundle dirs");
+        fs::write(&legacy_bundle_binary, b"#!/bin/sh\n").expect("must create legacy bundle binary");
+
+        write_native_sidecar_state(
+            &layout,
+            "demo",
+            &NativeSidecarState {
+                uninstall_actions: vec![NativeUninstallAction {
+                    key: "app:demo".to_string(),
+                    kind: "applications-symlink".to_string(),
+                    path: legacy_bundle.display().to_string(),
+                }],
+            },
+        )
+        .expect("must write native sidecar state");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: None,
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Native,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        let result = uninstall_package(&layout, "demo").expect(
+            "legacy applications-symlink uninstall action should remove app bundle recursively",
+        );
+        assert_eq!(result.status, UninstallStatus::Uninstalled);
+        assert!(!legacy_bundle.exists());
         assert!(!package_dir.exists());
         assert!(!layout.receipt_path("demo").exists());
 
