@@ -3681,6 +3681,40 @@ fn validate_install_preflight_for_resolved(
     Ok(())
 }
 
+fn native_gui_registration_cleanup_kind(kind: &str) -> &str {
+    match kind {
+        "applications-symlink" | "applications-bundle-copy" => "applications-path",
+        _ => kind,
+    }
+}
+
+fn native_gui_registration_cleanup_identity(
+    record: &GuiNativeRegistrationRecord,
+) -> (String, String) {
+    (
+        native_gui_registration_cleanup_kind(record.kind.as_str()).to_string(),
+        record.path.clone(),
+    )
+}
+
+fn select_stale_native_gui_registration_records(
+    previous_records: &[GuiNativeRegistrationRecord],
+    current_records: &[GuiNativeRegistrationRecord],
+) -> Vec<GuiNativeRegistrationRecord> {
+    let current_cleanup_identities = current_records
+        .iter()
+        .map(native_gui_registration_cleanup_identity)
+        .collect::<HashSet<_>>();
+
+    previous_records
+        .iter()
+        .filter(|record| {
+            !current_cleanup_identities.contains(&native_gui_registration_cleanup_identity(record))
+        })
+        .cloned()
+        .collect()
+}
+
 fn sync_native_gui_registration_state_best_effort(
     layout: &PrefixLayout,
     package_name: &str,
@@ -3707,27 +3741,8 @@ fn sync_native_gui_registration_state_best_effort(
         seen.insert((record.key.clone(), record.kind.clone(), record.path.clone()))
     });
 
-    let current_keys = current_records
-        .iter()
-        .map(|record| {
-            (
-                record.key.as_str(),
-                record.kind.as_str(),
-                record.path.as_str(),
-            )
-        })
-        .collect::<HashSet<_>>();
-    let stale_records = previous_records
-        .iter()
-        .filter(|record| {
-            !current_keys.contains(&(
-                record.key.as_str(),
-                record.kind.as_str(),
-                record.path.as_str(),
-            ))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let stale_records =
+        select_stale_native_gui_registration_records(&previous_records, &current_records);
     let mut records_to_persist = current_records.clone();
     if !stale_records.is_empty() {
         let stale_warnings = remove_native_gui_registration_best_effort(&stale_records)?;
@@ -9938,6 +9953,91 @@ old-cc = "<2.0.0"
             &[GuiNativeRegistrationRecord],
         ) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> =
             register_native_gui_app_best_effort;
+    }
+
+    #[test]
+    fn native_gui_sync_same_path_kind_migration_keeps_deployed_bundle_copy() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let deployed_bundle = layout.prefix().join("Applications").join("Demo.app");
+        let deployed_binary = deployed_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(deployed_binary.parent().expect("must have parent"))
+            .expect("must create deployed bundle dirs");
+        fs::write(&deployed_binary, b"#!/bin/sh\n").expect("must create deployed bundle binary");
+
+        let previous = vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "applications-symlink".to_string(),
+            path: deployed_bundle.display().to_string(),
+        }];
+        let current = vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "applications-bundle-copy".to_string(),
+            path: deployed_bundle.display().to_string(),
+        }];
+
+        let stale = select_stale_native_gui_registration_records(&previous, &current);
+        assert!(
+            stale.is_empty(),
+            "same-path kind migration must not schedule stale cleanup"
+        );
+        let warnings = remove_native_gui_registration_best_effort(&stale)
+            .expect("empty stale cleanup should be a no-op");
+        assert!(warnings.is_empty(), "no-op cleanup should not warn");
+        assert!(deployed_bundle.exists(), "deployed bundle copy must remain");
+        assert!(
+            deployed_binary.exists(),
+            "deployed bundle binary must remain"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn native_gui_sync_kind_migration_with_path_change_still_cleans_stale_path() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let stale_bundle = layout.prefix().join("Applications").join("OldDemo.app");
+        let stale_binary = stale_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(stale_binary.parent().expect("must have parent"))
+            .expect("must create stale bundle dirs");
+        fs::write(&stale_binary, b"#!/bin/sh\n").expect("must create stale bundle binary");
+
+        let deployed_bundle = layout.prefix().join("Applications").join("Demo.app");
+        let deployed_binary = deployed_bundle.join("Contents").join("MacOS").join("demo");
+        fs::create_dir_all(deployed_binary.parent().expect("must have parent"))
+            .expect("must create deployed bundle dirs");
+        fs::write(&deployed_binary, b"#!/bin/sh\n").expect("must create deployed bundle binary");
+
+        let previous = vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "applications-symlink".to_string(),
+            path: stale_bundle.display().to_string(),
+        }];
+        let current = vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "applications-bundle-copy".to_string(),
+            path: deployed_bundle.display().to_string(),
+        }];
+
+        let stale = select_stale_native_gui_registration_records(&previous, &current);
+        assert_eq!(stale, previous, "path change must remain stale");
+        let warnings = remove_native_gui_registration_best_effort(&stale)
+            .expect("stale cleanup should succeed");
+        assert!(warnings.is_empty(), "stale cleanup should be warning-free");
+        assert!(
+            !stale_bundle.exists(),
+            "stale bundle path should be removed"
+        );
+        assert!(deployed_bundle.exists(), "deployed bundle path must remain");
+        assert!(
+            deployed_binary.exists(),
+            "deployed bundle binary must remain"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
