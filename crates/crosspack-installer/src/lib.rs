@@ -1550,15 +1550,7 @@ pub fn expose_binary(
     binary_name: &str,
     binary_rel_path: &str,
 ) -> Result<()> {
-    let source_rel = validated_relative_binary_path(binary_rel_path)?;
-    let source_path = install_root.join(source_rel);
-    if !source_path.exists() {
-        return Err(anyhow!(
-            "declared binary path '{}' was not found in install root: {}",
-            binary_rel_path,
-            source_path.display()
-        ));
-    }
+    let source_path = resolve_binary_source_path(install_root, binary_rel_path)?;
 
     let destination = bin_path(layout, binary_name);
     if destination.exists() {
@@ -2686,6 +2678,64 @@ fn validated_relative_binary_path(path: &str) -> Result<&Path> {
         return Err(anyhow!("binary path must not include '..': {}", path));
     }
     Ok(relative)
+}
+
+fn resolve_binary_source_path(install_root: &Path, binary_rel_path: &str) -> Result<PathBuf> {
+    let source_rel = validated_relative_binary_path(binary_rel_path)?;
+    let source_path = install_root.join(source_rel);
+    if source_path.exists() {
+        return Ok(source_path);
+    }
+
+    if let Some(stripped_rel) = stripped_macos_bundle_exec_rel_path(source_rel) {
+        let stripped_source_path = install_root.join(stripped_rel);
+        if stripped_source_path.exists() {
+            return Ok(stripped_source_path);
+        }
+    }
+
+    Err(anyhow!(
+        "declared binary path '{}' was not found in install root: {}",
+        binary_rel_path,
+        source_path.display()
+    ))
+}
+
+fn stripped_macos_bundle_exec_rel_path(path: &Path) -> Option<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    if components.len() < 4 {
+        return None;
+    }
+
+    let Component::Normal(bundle_root) = components.first()? else {
+        return None;
+    };
+    if !bundle_root
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .ends_with(".app")
+    {
+        return None;
+    }
+    if components.get(1)?.as_os_str() != "Contents" {
+        return None;
+    }
+    if components.get(2)?.as_os_str() != "MacOS" {
+        return None;
+    }
+    if components
+        .iter()
+        .skip(1)
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    let mut stripped = PathBuf::new();
+    for component in components.iter().skip(1) {
+        stripped.push(component.as_os_str());
+    }
+    Some(stripped)
 }
 
 fn create_binary_entry(source_path: &Path, destination: &Path) -> Result<()> {
@@ -3908,6 +3958,55 @@ mod tests {
 
         remove_exposed_binary(&layout, "demo").expect("must remove binary");
         assert!(!exposed_path.exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn expose_binary_accepts_flattened_macos_app_bundle_exec_path() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("neovide", "0.14.0");
+        fs::create_dir_all(package_dir.join("Contents").join("MacOS"))
+            .expect("must create app executable dir");
+        fs::write(
+            package_dir.join("Contents").join("MacOS").join("neovide"),
+            b"#!/bin/sh\n",
+        )
+        .expect("must write app executable");
+
+        expose_binary(
+            &layout,
+            &package_dir,
+            "neovide",
+            "Neovide.app/Contents/MacOS/neovide",
+        )
+        .expect("must expose binary for flattened app bundle path");
+
+        assert!(bin_path(&layout, "neovide").exists());
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn expose_binary_does_not_strip_non_app_bundle_prefixes() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_dir = layout.package_dir("demo", "1.0.0");
+        fs::create_dir_all(package_dir.join("bin")).expect("must create bin dir");
+        fs::write(package_dir.join("bin").join("demo"), b"#!/bin/sh\n").expect("must write binary");
+
+        let err = expose_binary(&layout, &package_dir, "demo", "prefix/bin/demo")
+            .expect_err("non-app bundle path should not be rewritten");
+        assert!(
+            err.to_string()
+                .contains("declared binary path 'prefix/bin/demo' was not found in install root"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !bin_path(&layout, "demo").exists(),
+            "binary should not be exposed for non-app path rewrite"
+        );
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
