@@ -1436,11 +1436,7 @@ fn remove_native_applications_symlink_path(path: &Path) -> Result<()> {
         return remove_native_uninstall_path(path);
     }
 
-    if is_macos_app_bundle_path(path) {
-        return remove_native_uninstall_path_recursive(path);
-    }
-
-    remove_native_uninstall_path(path)
+    Ok(())
 }
 
 fn remove_native_uninstall_path_with_mode(path: &Path, recursive: bool) -> Result<()> {
@@ -6345,7 +6341,7 @@ mod tests {
             &NativeSidecarState {
                 uninstall_actions: vec![NativeUninstallAction {
                     key: "app:demo".to_string(),
-                    kind: "applications-symlink".to_string(),
+                    kind: "desktop-entry".to_string(),
                     path: package_dir.display().to_string(),
                 }],
             },
@@ -6508,7 +6504,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_native_legacy_applications_symlink_kind_removes_app_bundle_recursively() {
+    fn uninstall_native_legacy_applications_symlink_kind_preserves_app_bundle_directory() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -6556,11 +6552,10 @@ mod tests {
         )
         .expect("must write receipt");
 
-        let result = uninstall_package(&layout, "demo").expect(
-            "legacy applications-symlink uninstall action should remove app bundle recursively",
-        );
+        let result = uninstall_package(&layout, "demo")
+            .expect("legacy applications-symlink uninstall action should skip app bundle dirs");
         assert_eq!(result.status, UninstallStatus::Uninstalled);
-        assert!(!legacy_bundle.exists());
+        assert!(legacy_bundle.exists());
         assert!(!package_dir.exists());
         assert!(!layout.receipt_path("demo").exists());
 
