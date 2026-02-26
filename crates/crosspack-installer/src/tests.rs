@@ -8,13 +8,17 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use crate::artifact::copy_dmg_payload;
+#[cfg(target_os = "linux")]
+use crate::artifact::stage_appimage_payload;
 use crate::artifact::{
     build_appx_unpack_command, build_dmg_attach_command, build_dmg_detach_command,
     build_exe_extract_command, build_msi_admin_extract_command, build_msix_unpack_command,
-    build_pkg_copy_command, build_pkg_expand_command, copy_dmg_payload, discover_pkg_payload_roots,
-    stage_appimage_payload, stage_appx_payload_with_runner, stage_bin_payload,
-    stage_dmg_payload_with_hooks, stage_exe_payload_with_runner, stage_msix_payload_with_runner,
-    stage_pkg_payload_with_hooks, strip_rel_components,
+    build_pkg_copy_command, build_pkg_expand_command, discover_pkg_payload_roots,
+    stage_appx_payload_with_runner, stage_bin_payload, stage_dmg_payload_with_hooks,
+    stage_exe_payload_with_runner, stage_msix_payload_with_runner, stage_pkg_payload_with_hooks,
+    strip_rel_components,
 };
 use crate::native::{
     macos_registration_destination_candidates, macos_registration_source_path,
