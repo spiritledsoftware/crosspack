@@ -193,7 +193,7 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 | `init-shell [--shell <bash\|zsh\|fish\|powershell>]` | Print shell setup snippet that adds Crosspack bin directory to `PATH` and loads Crosspack/package completion scripts. |
 
 Output contract notes:
-- Human-facing lifecycle commands automatically use rich status badges on interactive terminals.
+- Human-facing lifecycle commands automatically use an enhanced interactive terminal presentation on TTYs (section framing, semantic color, and progress indicators).
 - Non-interactive usage (for example pipes/redirects) stays plain and deterministic.
 - Machine-oriented lines remain unchanged, including dry-run `transaction_preview` / `transaction_summary` / `risk_flags` / `change_*` records and `update summary: updated=<n> up-to-date=<n> failed=<n>`.
 

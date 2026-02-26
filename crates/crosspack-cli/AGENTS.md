@@ -7,6 +7,7 @@
 - `src/main.rs`: defines `Cli`, `Commands`, `RegistryCommands`, and all dispatch logic in `main()`.
 - `main()` match arms are integration boundaries; keep orchestration here and domain behavior in library crates.
 - Shared output helpers (`resolve_output_style`, `render_status_line`, `format_*`) are contract code, not cosmetic glue.
+- Renderer boundaries (`TerminalRenderer`, section/status/progress helpers, `format_*`) are contract code, not cosmetic glue.
 - Transaction orchestration entrypoints (`execute_with_transaction`, `ensure_no_active_transaction_for`, rollback/repair paths) must remain centralized for consistent preflight and recovery behavior.
 - Completion entrypoints (`Completions`, `InitShell`, completion sync helpers) are part of runtime UX and post-install maintenance.
 
@@ -27,6 +28,7 @@
 - Dry-run transaction preview lines are contract-critical keys: `transaction_preview`, `transaction_summary`, `risk_flags`, `change_add`, `change_remove`, `change_replace`, `change_transition`.
 - Keep ordering stable in machine-oriented output (summary before change lines; deterministic sort where already applied).
 - Keep update and registry formatters centralized; do not inline ad hoc `println!` variants that drift wording or field order.
+- Keep interactive enhancements additive (section headers/progress framing); plain mode remains the compatibility surface.
 - Error/guidance messages tied to trust/snapshot flows should remain explicit and actionable; do not replace with vague failures.
 
 ## ANTI-PATTERNS (CLI)

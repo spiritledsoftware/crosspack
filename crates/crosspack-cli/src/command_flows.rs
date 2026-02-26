@@ -12,6 +12,7 @@ fn run_upgrade_command(
     interaction_policy: InstallInteractionPolicy,
 ) -> Result<()> {
     let output_style = current_output_style();
+    let renderer = TerminalRenderer::from_style(output_style);
     ensure_upgrade_command_ready(layout)?;
     let backend = select_metadata_backend(registry_root, layout)?;
 
@@ -111,6 +112,12 @@ fn run_upgrade_command(
         return Ok(());
     }
 
+    let upgrade_title = match spec.as_deref() {
+        Some(single) => format!("Upgrade {single}"),
+        None => "Upgrade installed roots".to_string(),
+    };
+    renderer.print_section(&upgrade_title);
+
     execute_with_transaction(layout, "upgrade", snapshot_id.as_deref(), |tx| {
         let mut journal_seq = 1_u64;
 
@@ -137,6 +144,9 @@ fn run_upgrade_command(
                 )?;
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
+                let total_packages = resolved.len() as u64;
+                let mut completed_packages = 0_u64;
+                let mut progress = renderer.start_progress("upgrade", total_packages);
 
                 append_transaction_journal_entry(
                     layout,
@@ -151,6 +161,7 @@ fn run_upgrade_command(
                 journal_seq += 1;
 
                 for package in &resolved {
+                    progress.set(completed_packages);
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         let old_version = Version::parse(&old.version).with_context(|| {
                             format!(
@@ -159,17 +170,15 @@ fn run_upgrade_command(
                             )
                         })?;
                         if package.manifest.version <= old_version {
-                            println!(
-                                "{}",
-                                render_status_line(
-                                    output_style,
-                                    "step",
-                                    &format!(
-                                        "{} is up-to-date ({})",
-                                        package.manifest.name, old.version
-                                    )
-                                )
+                            renderer.print_status(
+                                "step",
+                                &format!(
+                                    "{} is up-to-date ({})",
+                                    package.manifest.name, old.version
+                                ),
                             );
+                            completed_packages += 1;
+                            progress.set(completed_packages);
                             continue;
                         }
                     }
@@ -238,7 +247,10 @@ fn run_upgrade_command(
                             &format!("receipt: {}", outcome.receipt_path.display())
                         )
                     );
+                    completed_packages += 1;
+                    progress.set(completed_packages);
                 }
+                progress.finish();
             }
             None => {
                 let plans = build_upgrade_plans(&receipts);
@@ -295,11 +307,18 @@ fn run_upgrade_command(
                     })
                     .collect::<Vec<_>>();
                 enforce_disjoint_multi_target_upgrade(&overlap_check)?;
+                let total_packages = grouped_resolved
+                    .iter()
+                    .map(std::vec::Vec::len)
+                    .sum::<usize>() as u64;
+                let mut completed_packages = 0_u64;
+                let mut progress = renderer.start_progress("upgrade", total_packages);
 
                 for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
                     let planned_dependency_overrides = build_planned_dependency_overrides(resolved);
 
                     for package in resolved {
+                        progress.set(completed_packages);
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
                             let old_version = Version::parse(&old.version).with_context(|| {
@@ -320,6 +339,8 @@ fn run_upgrade_command(
                                         )
                                     )
                                 );
+                                completed_packages += 1;
+                                progress.set(completed_packages);
                                 continue;
                             }
                         }
@@ -406,8 +427,11 @@ fn run_upgrade_command(
                                 &format!("receipt: {}", outcome.receipt_path.display())
                             )
                         );
+                        completed_packages += 1;
+                        progress.set(completed_packages);
                     }
                 }
+                progress.finish();
             }
         }
 
@@ -1401,8 +1425,11 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
 
 fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
     let output_style = current_output_style();
+    let renderer = TerminalRenderer::from_style(output_style);
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "uninstall")?;
+
+    renderer.print_section(&format!("Uninstall {name}"));
 
     execute_with_transaction(layout, "uninstall", None, |tx| {
         let mut journal_seq = 1_u64;
@@ -1484,9 +1511,14 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         } else {
             "ok"
         };
+        let total_steps = (1 + result.pruned_dependencies.len()) as u64;
+        let mut progress = renderer.start_progress("uninstall", total_steps);
+        progress.set(0);
         for line in format_uninstall_messages(&result) {
-            println!("{}", render_status_line(output_style, status, &line));
+            renderer.print_status(status, &line);
         }
+        progress.set(total_steps);
+        progress.finish();
 
         Ok(())
     })?;
@@ -1499,12 +1531,21 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
 }
 
 fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Result<()> {
-    let output_style = current_output_style();
+    let renderer = TerminalRenderer::current();
+    let output_style = renderer.style();
     let results = store.update_sources(registry)?;
     let report = build_update_report(&results);
+    renderer.print_section("Registry update");
+    let total_sources = report.lines.len() as u64;
+    let mut processed_sources = 0_u64;
+    let mut progress = renderer.start_progress("update", total_sources);
     for line in format_update_output_lines(&report, output_style) {
+        progress.set(processed_sources);
         println!("{line}");
+        processed_sources += 1;
+        progress.set(processed_sources);
     }
+    progress.finish();
     println!(
         "{}",
         format_update_summary_line(report.updated, report.up_to_date, report.failed)
@@ -1521,33 +1562,31 @@ fn run_self_update_command(
 ) -> Result<()> {
     let _escalation_policy = resolve_escalation_policy(escalation);
     let output_style = current_output_style();
+    let renderer = TerminalRenderer::from_style(output_style);
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "self-update")?;
 
+    renderer.print_section("Self-update");
+    let total_steps = if registry_root.is_none() { 2 } else { 1 };
+    let mut progress = renderer.start_progress("self-update", total_steps);
+    progress.set(0);
+
     if registry_root.is_none() {
-        println!(
-            "{}",
-            render_status_line(
-                output_style,
-                "step",
-                "self-update: refreshing source snapshots"
-            )
-        );
+        renderer.print_status("step", "self-update: refreshing source snapshots");
         let source_state_root = registry_state_root(layout);
         let store = RegistrySourceStore::new(&source_state_root);
         run_update_command(&store, &[])?;
+        progress.set(1);
     }
 
     let args = build_self_update_install_args(registry_root, dry_run, force_redownload, escalation);
-    println!(
-        "{}",
-        render_status_line(
-            output_style,
-            "step",
-            "self-update: installing latest crosspack"
-        )
-    );
-    run_current_exe_command(&args, "self-update install")
+    renderer.print_status("step", "self-update: installing latest crosspack");
+    let result = run_current_exe_command(&args, "self-update install");
+    if result.is_ok() {
+        progress.set(total_steps);
+    }
+    progress.finish();
+    result
 }
 
 fn build_self_update_install_args(

@@ -5089,6 +5089,30 @@ old-cc = "<2.0.0"
         assert_eq!(line, "update summary: updated=2 up-to-date=5 failed=1");
     }
 
+    fn strip_ansi_codes(value: &str) -> String {
+        let mut rendered = String::new();
+        let mut chars = value.chars().peekable();
+        let mut in_escape = false;
+
+        while let Some(ch) = chars.next() {
+            if in_escape {
+                if ch == 'm' {
+                    in_escape = false;
+                }
+                continue;
+            }
+
+            if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+                in_escape = true;
+                continue;
+            }
+
+            rendered.push(ch);
+        }
+
+        rendered
+    }
+
     #[test]
     fn resolve_output_style_auto_uses_rich_when_both_streams_are_tty() {
         assert_eq!(resolve_output_style(true, true), OutputStyle::Rich);
@@ -5105,6 +5129,28 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn resolve_ui_mode_auto_uses_interactive_when_stdout_is_tty() {
+        assert_eq!(resolve_ui_mode(true), UiMode::Interactive);
+    }
+
+    #[test]
+    fn resolve_ui_mode_auto_uses_plain_when_stdout_is_not_tty() {
+        assert_eq!(resolve_ui_mode(false), UiMode::Plain);
+    }
+
+    #[test]
+    fn render_section_header_is_only_emitted_for_interactive_mode() {
+        assert_eq!(
+            render_section_header(UiMode::Plain, "Install ripgrep"),
+            None
+        );
+        assert_eq!(
+            render_section_header(UiMode::Interactive, "Install ripgrep"),
+            Some("== Install ripgrep ==".to_string())
+        );
+    }
+
+    #[test]
     fn render_status_line_plain_is_unadorned() {
         assert_eq!(
             render_status_line(OutputStyle::Plain, "ok", "installed ripgrep 14.1.0"),
@@ -5114,16 +5160,28 @@ old-cc = "<2.0.0"
 
     #[test]
     fn render_status_line_rich_includes_ascii_badge() {
-        assert_eq!(
-            render_status_line(OutputStyle::Rich, "ok", "installed ripgrep 14.1.0"),
-            "[OK] installed ripgrep 14.1.0"
-        );
+        let rendered = render_status_line(OutputStyle::Rich, "ok", "installed ripgrep 14.1.0");
+        assert_eq!(strip_ansi_codes(&rendered), "[OK] installed ripgrep 14.1.0");
+    }
+
+    #[test]
+    fn render_status_line_plain_never_contains_ansi_escape_codes() {
+        let rendered = render_status_line(OutputStyle::Plain, "ok", "installed ripgrep 14.1.0");
+        assert!(!rendered.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn render_status_line_rich_uses_ansi_color_codes() {
+        let rendered = render_status_line(OutputStyle::Rich, "ok", "installed ripgrep 14.1.0");
+        assert!(rendered.contains("\u{1b}["));
+        assert!(rendered.contains("[OK]"));
     }
 
     #[test]
     fn render_status_line_rich_formats_warning() {
+        let rendered = render_status_line(OutputStyle::Rich, "warn", "completion sync skipped");
         assert_eq!(
-            render_status_line(OutputStyle::Rich, "warn", "completion sync skipped"),
+            strip_ansi_codes(&rendered),
             "[WARN] completion sync skipped"
         );
     }
@@ -5141,9 +5199,19 @@ old-cc = "<2.0.0"
     fn format_update_output_lines_rich_adds_status_badges() {
         let report = sample_update_report();
         let lines = format_update_output_lines(&report, OutputStyle::Rich);
-        assert_eq!(lines[0], "[OK] core: updated (snapshot=git:abc)");
-        assert_eq!(lines[1], "[..] mirror: up-to-date (snapshot=git:abc)");
-        assert_eq!(lines[2], "[ERR] edge: failed (reason=source-sync-failed)");
+        assert_eq!(
+            strip_ansi_codes(&lines[0]),
+            "[OK] core: updated (snapshot=git:abc)"
+        );
+        assert_eq!(
+            strip_ansi_codes(&lines[1]),
+            "[..] mirror: up-to-date (snapshot=git:abc)"
+        );
+        assert_eq!(
+            strip_ansi_codes(&lines[2]),
+            "[ERR] edge: failed (reason=source-sync-failed)"
+        );
+        assert!(lines.iter().all(|line| line.contains("\u{1b}[")));
     }
 
     #[test]
@@ -5161,8 +5229,44 @@ old-cc = "<2.0.0"
     fn format_install_outcome_lines_rich_adds_step_indicators() {
         let outcome = sample_install_outcome();
         let lines = format_install_outcome_lines(&outcome, OutputStyle::Rich);
-        assert!(lines[0].starts_with("[OK] "));
+        assert!(strip_ansi_codes(&lines[0]).starts_with("[OK] "));
         assert!(lines.iter().any(|line| line.contains("receipt: ")));
+    }
+
+    #[test]
+    fn render_progress_line_plain_is_not_emitted() {
+        let rendered = render_progress_line(OutputStyle::Plain, "install", 1, 3, None);
+        assert_eq!(rendered, None);
+    }
+
+    #[test]
+    fn render_progress_line_rich_includes_bar_and_counts() {
+        let rendered = render_progress_line(OutputStyle::Rich, "install", 1, 3, None)
+            .expect("rich mode should render progress");
+        assert!(rendered.contains("install"));
+        assert!(rendered.contains("1/3"));
+        assert!(rendered.contains("["));
+        assert!(rendered.contains("]"));
+    }
+
+    #[test]
+    fn render_progress_line_rich_completion_includes_elapsed_suffix() {
+        let rendered = render_progress_line(
+            OutputStyle::Rich,
+            "install",
+            3,
+            3,
+            Some(std::time::Duration::from_millis(1234)),
+        )
+        .expect("rich mode should render completion line");
+        assert!(rendered.contains("complete in 1.234s"));
+    }
+
+    #[test]
+    fn progress_tick_chars_use_operation_specific_profiles() {
+        assert_eq!(progress_tick_chars("install"), ".oO@* ");
+        assert_eq!(progress_tick_chars("update"), "<^>v ");
+        assert_eq!(progress_tick_chars("unknown"), "|/-\\ ");
     }
 
     #[test]

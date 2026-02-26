@@ -58,12 +58,6 @@ const SNAPSHOT_ID_MISMATCH_ERROR_CODE: &str = "snapshot-id-mismatch";
 const SEARCH_METADATA_GUIDANCE: &str =
     "search metadata unavailable; run `crosspack update` to refresh local snapshots and `crosspack registry list` to inspect source status";
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum OutputStyle {
-    Plain,
-    Rich,
-}
-
 #[derive(Args, Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct EscalationArgs {
     #[arg(long)]
@@ -134,58 +128,6 @@ fn build_artifact_install_options<'a>(
         install_mode: install_mode_for_archive_type(resolved.archive_type),
         interaction_policy,
     }
-}
-
-fn resolve_output_style(stdout_is_tty: bool, _stderr_is_tty: bool) -> OutputStyle {
-    if stdout_is_tty {
-        OutputStyle::Rich
-    } else {
-        OutputStyle::Plain
-    }
-}
-
-fn render_status_line(style: OutputStyle, status: &str, message: &str) -> String {
-    match style {
-        OutputStyle::Plain => message.to_string(),
-        OutputStyle::Rich => {
-            let badge = match status {
-                "ok" => "[OK]",
-                "warn" => "[WARN]",
-                "error" => "[ERR]",
-                "step" => "[..]",
-                _ => "[*]",
-            };
-            format!("{badge} {message}")
-        }
-    }
-}
-
-fn render_update_line(style: OutputStyle, line: &str) -> String {
-    if line.contains(": failed") {
-        return render_status_line(style, "error", line);
-    }
-    if line.contains(": updated") {
-        return render_status_line(style, "ok", line);
-    }
-    if line.contains(": up-to-date") {
-        return render_status_line(style, "step", line);
-    }
-    render_status_line(style, "step", line)
-}
-
-fn format_update_output_lines(report: &UpdateReport, style: OutputStyle) -> Vec<String> {
-    report
-        .lines
-        .iter()
-        .map(|line| render_update_line(style, line))
-        .collect()
-}
-
-fn current_output_style() -> OutputStyle {
-    resolve_output_style(
-        std::io::stdout().is_terminal(),
-        std::io::stderr().is_terminal(),
-    )
 }
 
 #[derive(Subcommand, Debug)]
@@ -342,6 +284,8 @@ fn main() -> Result<()> {
 }
 
 include!("completion.rs");
+
+include!("render.rs");
 
 include!("dispatch.rs");
 
