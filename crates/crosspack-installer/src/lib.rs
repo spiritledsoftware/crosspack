@@ -3310,36 +3310,6 @@ where
     }
 }
 
-#[cfg(test)]
-fn copy_dmg_payload(mount_point: &Path, raw_dir: &Path) -> Result<()> {
-    copy_dir_recursive(mount_point, raw_dir)?;
-
-    #[cfg(unix)]
-    {
-        let applications_link = raw_dir.join("Applications");
-        if let Ok(metadata) = fs::symlink_metadata(&applications_link) {
-            if metadata.file_type().is_symlink() {
-                let target = fs::read_link(&applications_link).with_context(|| {
-                    format!(
-                        "failed to read copied DMG Applications symlink {}",
-                        applications_link.display()
-                    )
-                })?;
-                if target == Path::new("/Applications") {
-                    fs::remove_file(&applications_link).with_context(|| {
-                        format!(
-                            "failed to remove copied DMG Applications symlink {}",
-                            applications_link.display()
-                        )
-                    })?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn extract_tar(archive_path: &Path, dst: &Path) -> Result<()> {
     run_command(
         Command::new("tar")
@@ -4331,6 +4301,21 @@ mod tests {
         assert_eq!(
             project_macos_user_applications_dir(home),
             PathBuf::from("/Users/tester/Applications")
+        );
+    }
+
+    #[test]
+    fn macos_registration_destination_candidates_prioritize_system_then_user() {
+        let home = Path::new("/Users/tester");
+        let candidates =
+            macos_registration_destination_candidates(home, std::ffi::OsStr::new("Demo.app"));
+
+        assert_eq!(
+            candidates,
+            [
+                PathBuf::from("/Applications/Demo.app"),
+                PathBuf::from("/Users/tester/Applications/Demo.app"),
+            ]
         );
     }
 
@@ -5602,29 +5587,6 @@ mod tests {
         assert_eq!(command_invocations.len(), 2, "attach + detach must run");
         assert!(command_invocations[0].starts_with("hdiutil attach "));
         assert!(command_invocations[1].starts_with("hdiutil detach "));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn copy_dmg_payload_skips_root_applications_symlink() {
-        let temp = test_layout();
-        temp.ensure_base_dirs().expect("must create dirs");
-
-        let mount_point = temp.prefix().join("mount");
-        let raw_dir = temp.prefix().join("raw");
-        fs::create_dir_all(mount_point.join("Neovide.app")).expect("must create app bundle");
-        std::os::unix::fs::symlink("/Applications", mount_point.join("Applications"))
-            .expect("must create Applications symlink");
-
-        copy_dmg_payload(&mount_point, &raw_dir).expect("must copy dmg payload");
-
-        assert!(raw_dir.join("Neovide.app").exists());
-        assert!(
-            !raw_dir.join("Applications").exists(),
-            "DMG root Applications symlink should be skipped"
-        );
-
-        let _ = fs::remove_dir_all(temp.prefix());
     }
 
     #[test]
