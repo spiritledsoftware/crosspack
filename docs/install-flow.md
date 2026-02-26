@@ -33,7 +33,9 @@
     - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
 14. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
 15. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
-16. Register native GUI integrations (user-scope only) as best-effort adapters; failures emit warning lines and do not fail successful install.
+16. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
+    - macOS `.app` registration uses bundle-copy deployment and tries `/Applications/<App>.app` before `~/Applications/<App>.app`.
+    - Existing unmanaged app bundles at either macOS destination are not overwritten; registration emits warnings and continues.
 17. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
 18. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
       - persist `install_mode=managed|native` from artifact-kind defaults,
@@ -127,7 +129,7 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - Binary collision: install fails if a requested binary is already owned by another package or exists unmanaged in `<prefix>/bin`.
 - Completion collision: install fails if a projected package completion file is already owned by another package or exists unmanaged in Crosspack completion storage.
 - GUI asset collision: install fails if a projected GUI ownership key is already owned by another package or a projected GUI asset path already exists unmanaged.
-- Native GUI registration failures: install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
+- Native GUI registration failures (including macOS destination prepare/write failures and unmanaged overwrite protection): install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 - Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
 
