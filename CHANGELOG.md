@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/spiritledsoftware/crosspack/compare/v0.7.7...v0.8.0) (2026-02-26)
+
+
+### Features
+
+* **cli:** add expressive interactive renderer with animated progress ([#75](https://github.com/spiritledsoftware/crosspack/issues/75)) ([2c54222](https://github.com/spiritledsoftware/crosspack/commit/2c5422246fc85cb13dc9c81a8fab657e2ee7d2ad))
+
 ## [0.7.7](https://github.com/spiritledsoftware/crosspack/compare/v0.7.6...v0.7.7) (2026-02-26)
 
 
