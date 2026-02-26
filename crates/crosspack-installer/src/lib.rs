@@ -2158,7 +2158,8 @@ where
             return Ok((records, warnings));
         }
 
-        let app_name = source_path
+        let registration_source_path = macos_registration_source_path(install_root, &source_path);
+        let app_name = registration_source_path
             .file_name()
             .ok_or_else(|| anyhow!("gui app '{}' has invalid executable path", app.app_id))?;
         let link_path = applications_dir.join(app_name);
@@ -2185,11 +2186,11 @@ where
         }
 
         #[cfg(unix)]
-        if let Err(err) = std::os::unix::fs::symlink(&source_path, &link_path) {
+        if let Err(err) = std::os::unix::fs::symlink(&registration_source_path, &link_path) {
             warnings.push(format!(
                 "native GUI registration warning: failed to create macOS application symlink {} -> {}: {}",
                 link_path.display(),
-                source_path.display(),
+                registration_source_path.display(),
                 err
             ));
             return Ok((records, warnings));
@@ -2296,6 +2297,30 @@ fn project_windows_start_menu_programs_dir(appdata: &Path) -> PathBuf {
 
 fn project_macos_user_applications_dir(home: &Path) -> PathBuf {
     home.join("Applications")
+}
+
+fn macos_registration_source_path(install_root: &Path, source_path: &Path) -> PathBuf {
+    let Ok(relative) = source_path.strip_prefix(install_root) else {
+        return source_path.to_path_buf();
+    };
+
+    let mut bundle_root = PathBuf::new();
+    for component in relative.components() {
+        let Component::Normal(value) = component else {
+            continue;
+        };
+        bundle_root.push(value);
+        if Path::new(value)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("app"))
+            .unwrap_or(false)
+        {
+            return install_root.join(bundle_root);
+        }
+    }
+
+    source_path.to_path_buf()
 }
 
 fn native_gui_launcher_filename(package_name: &str, app: &ArtifactGuiApp) -> String {
@@ -4213,6 +4238,26 @@ mod tests {
         assert_eq!(
             project_macos_user_applications_dir(home),
             PathBuf::from("/Users/tester/Applications")
+        );
+    }
+
+    #[test]
+    fn macos_registration_source_prefers_app_bundle_root() {
+        let install_root = Path::new("/Users/tester/.crosspack/pkgs/neovide/0.15.2");
+        let source_path = install_root.join("Neovide.app/Contents/MacOS/neovide");
+        assert_eq!(
+            macos_registration_source_path(install_root, &source_path),
+            install_root.join("Neovide.app")
+        );
+    }
+
+    #[test]
+    fn macos_registration_source_falls_back_to_binary_path_when_no_bundle() {
+        let install_root = Path::new("/Users/tester/.crosspack/pkgs/demo/1.0.0");
+        let source_path = install_root.join("demo");
+        assert_eq!(
+            macos_registration_source_path(install_root, &source_path),
+            source_path
         );
     }
 
