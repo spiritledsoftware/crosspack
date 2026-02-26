@@ -3692,8 +3692,12 @@ fn sync_native_gui_registration_state_best_effort(
     let mut warnings = Vec::new();
 
     for app in declared_gui_apps {
-        let (records, app_warnings) =
-            register_native_gui_app_best_effort(package_name, app, install_root)?;
+        let (records, app_warnings) = register_native_gui_app_best_effort(
+            package_name,
+            app,
+            install_root,
+            &previous_records,
+        )?;
         current_records.extend(records);
         warnings.extend(app_warnings);
     }
@@ -9923,6 +9927,17 @@ old-cc = "<2.0.0"
                 .contains("PKG artifacts are supported only on macOS hosts"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn native_gui_sync_contract_accepts_previous_registration_records() {
+        let _register: fn(
+            &str,
+            &ArtifactGuiApp,
+            &Path,
+            &[GuiNativeRegistrationRecord],
+        ) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> =
+            register_native_gui_app_best_effort;
     }
 
     #[test]

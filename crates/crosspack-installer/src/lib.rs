@@ -1898,8 +1898,15 @@ pub fn register_native_gui_app_best_effort(
     package_name: &str,
     app: &ArtifactGuiApp,
     install_root: &Path,
+    previous_records: &[GuiNativeRegistrationRecord],
 ) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)> {
-    register_native_gui_app_best_effort_with_executor(package_name, app, install_root, run_command)
+    register_native_gui_app_best_effort_with_executor(
+        package_name,
+        app,
+        install_root,
+        previous_records,
+        run_command,
+    )
 }
 
 pub fn remove_native_gui_registration_best_effort(
@@ -1912,6 +1919,7 @@ fn register_native_gui_app_best_effort_with_executor<RunCommand>(
     package_name: &str,
     app: &ArtifactGuiApp,
     install_root: &Path,
+    _previous_records: &[GuiNativeRegistrationRecord],
     mut run_command_executor: RunCommand,
 ) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)>
 where
@@ -4285,6 +4293,7 @@ mod tests {
             "demo",
             &app,
             &install_root,
+            &[],
             |_command, _context| Err(anyhow!("simulated command failure")),
         )
         .expect("command failures should become warnings");
