@@ -2161,44 +2161,15 @@ where
             .file_name()
             .ok_or_else(|| anyhow!("gui app '{}' has invalid executable path", app.app_id))?;
         let destination_candidates = macos_registration_destination_candidates(&home, app_name);
-        let (selected_destination, mut selection_warnings) =
-            select_macos_registration_destination(destination_candidates, previous_records);
+        let (selected_destination, mut selection_warnings) = register_macos_application_symlink(
+            &registration_source_path,
+            destination_candidates,
+            previous_records,
+        );
         warnings.append(&mut selection_warnings);
         let Some(link_path) = selected_destination else {
             return Ok((records, warnings));
         };
-
-        if link_path.exists() {
-            let remove_result = match fs::symlink_metadata(&link_path) {
-                Ok(metadata) => {
-                    if metadata.is_dir() {
-                        fs::remove_dir(&link_path)
-                    } else {
-                        fs::remove_file(&link_path)
-                    }
-                }
-                Err(err) => Err(err),
-            };
-            if let Err(err) = remove_result {
-                warnings.push(format!(
-                    "native GUI registration warning: failed to replace existing macOS application link {}: {}",
-                    link_path.display(),
-                    err
-                ));
-                return Ok((records, warnings));
-            }
-        }
-
-        #[cfg(unix)]
-        if let Err(err) = std::os::unix::fs::symlink(&registration_source_path, &link_path) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to create macOS application symlink {} -> {}: {}",
-                link_path.display(),
-                registration_source_path.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
 
         for asset in &projected_assets {
             records.push(GuiNativeRegistrationRecord {
@@ -2320,37 +2291,170 @@ fn select_macos_registration_destination(
     let mut warnings = Vec::new();
 
     for destination in destination_candidates {
-        let Some(applications_dir) = destination.parent() else {
-            warnings.push(format!(
-                "native GUI registration warning: invalid macOS applications destination {}",
-                destination.display()
-            ));
-            continue;
-        };
-
-        if let Err(err) = fs::create_dir_all(applications_dir) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to prepare macOS applications dir {}: {}",
-                applications_dir.display(),
-                err
-            ));
-            continue;
+        match prepare_macos_registration_destination(&destination, previous_records) {
+            Ok(()) => return (Some(destination), warnings),
+            Err(warning) => warnings.push(warning),
         }
-
-        if destination.exists()
-            && !macos_previous_records_include_path(previous_records, &destination)
-        {
-            warnings.push(format!(
-                "native GUI registration warning: refusing to overwrite unmanaged macOS app bundle {}",
-                destination.display()
-            ));
-            continue;
-        }
-
-        return (Some(destination), warnings);
     }
 
     (None, warnings)
+}
+
+fn register_macos_application_symlink(
+    registration_source_path: &Path,
+    destination_candidates: [PathBuf; 2],
+    previous_records: &[GuiNativeRegistrationRecord],
+) -> (Option<PathBuf>, Vec<String>) {
+    register_macos_application_symlink_with_creator(
+        registration_source_path,
+        destination_candidates,
+        previous_records,
+        create_macos_application_symlink,
+    )
+}
+
+fn register_macos_application_symlink_with_creator<CreateSymlink>(
+    registration_source_path: &Path,
+    destination_candidates: [PathBuf; 2],
+    previous_records: &[GuiNativeRegistrationRecord],
+    mut create_symlink: CreateSymlink,
+) -> (Option<PathBuf>, Vec<String>)
+where
+    CreateSymlink: FnMut(&Path, &Path) -> io::Result<()>,
+{
+    let [system_destination, user_destination] = destination_candidates;
+    let mut warnings = Vec::new();
+
+    let (selected_destination, mut selection_warnings) = select_macos_registration_destination(
+        [system_destination.clone(), user_destination.clone()],
+        previous_records,
+    );
+    warnings.append(&mut selection_warnings);
+
+    let Some(selected_destination) = selected_destination else {
+        return (None, warnings);
+    };
+
+    match write_macos_registration_symlink_with_creator(
+        registration_source_path,
+        &selected_destination,
+        &mut create_symlink,
+    ) {
+        Ok(()) => return (Some(selected_destination), warnings),
+        Err(warning) => warnings.push(warning),
+    }
+
+    if selected_destination != system_destination || user_destination == system_destination {
+        return (None, warnings);
+    }
+
+    match prepare_macos_registration_destination(&user_destination, previous_records) {
+        Ok(()) => {}
+        Err(warning) => {
+            warnings.push(warning);
+            return (None, warnings);
+        }
+    }
+
+    match write_macos_registration_symlink_with_creator(
+        registration_source_path,
+        &user_destination,
+        &mut create_symlink,
+    ) {
+        Ok(()) => (Some(user_destination), warnings),
+        Err(warning) => {
+            warnings.push(warning);
+            (None, warnings)
+        }
+    }
+}
+
+fn prepare_macos_registration_destination(
+    destination: &Path,
+    previous_records: &[GuiNativeRegistrationRecord],
+) -> std::result::Result<(), String> {
+    let Some(applications_dir) = destination.parent() else {
+        return Err(format!(
+            "native GUI registration warning: invalid macOS applications destination {}",
+            destination.display()
+        ));
+    };
+
+    if let Err(err) = fs::create_dir_all(applications_dir) {
+        return Err(format!(
+            "native GUI registration warning: failed to prepare macOS applications dir {}: {}",
+            applications_dir.display(),
+            err
+        ));
+    }
+
+    if destination.exists() && !macos_previous_records_include_path(previous_records, destination) {
+        return Err(format!(
+            "native GUI registration warning: refusing to overwrite unmanaged macOS app bundle {}",
+            destination.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn write_macos_registration_symlink_with_creator<CreateSymlink>(
+    registration_source_path: &Path,
+    link_path: &Path,
+    create_symlink: &mut CreateSymlink,
+) -> std::result::Result<(), String>
+where
+    CreateSymlink: FnMut(&Path, &Path) -> io::Result<()>,
+{
+    if link_path.exists() {
+        let remove_result = match fs::symlink_metadata(link_path) {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    fs::remove_dir(link_path)
+                } else {
+                    fs::remove_file(link_path)
+                }
+            }
+            Err(err) => Err(err),
+        };
+        if let Err(err) = remove_result {
+            return Err(format!(
+                "native GUI registration warning: failed to replace existing macOS application link {}: {}",
+                link_path.display(),
+                err
+            ));
+        }
+    }
+
+    if let Err(err) = create_symlink(registration_source_path, link_path) {
+        return Err(format!(
+            "native GUI registration warning: failed to create macOS application symlink {} -> {}: {}",
+            link_path.display(),
+            registration_source_path.display(),
+            err
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_macos_application_symlink(
+    registration_source_path: &Path,
+    link_path: &Path,
+) -> io::Result<()> {
+    std::os::unix::fs::symlink(registration_source_path, link_path)
+}
+
+#[cfg(not(unix))]
+fn create_macos_application_symlink(
+    _registration_source_path: &Path,
+    _link_path: &Path,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlink creation is unsupported on this host",
+    ))
 }
 
 fn macos_previous_records_include_path(
@@ -4429,6 +4533,90 @@ mod tests {
 
         assert_eq!(selected.as_ref(), Some(&system_target));
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn macos_registration_destination_falls_back_to_user_when_system_write_fails() {
+        let layout = test_layout();
+        let root = layout.prefix().join("macos-destination-test");
+        let app_name = "Demo.app";
+        let source_path = root.join("staged").join(app_name);
+        let system_target = root.join("system-applications").join(app_name);
+        let user_target = root.join("user-applications").join(app_name);
+
+        fs::create_dir_all(source_path.parent().expect("must have parent"))
+            .expect("must create source parent");
+        fs::write(&source_path, b"demo-app").expect("must seed source bundle path");
+
+        let mut attempts = Vec::new();
+        let (selected, warnings) = register_macos_application_symlink_with_creator(
+            &source_path,
+            [system_target.clone(), user_target.clone()],
+            &[],
+            |source, destination| {
+                attempts.push(destination.to_path_buf());
+                if destination == system_target.as_path() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "simulated permission denied",
+                    ));
+                }
+                let _ = source;
+                fs::write(destination, b"simulated-link")
+            },
+        );
+
+        assert_eq!(selected.as_ref(), Some(&user_target));
+        assert_eq!(attempts, vec![system_target, user_target.clone()]);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("simulated permission denied")));
+        assert!(
+            user_target.exists(),
+            "fallback destination should be written"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn macos_registration_destination_fallback_respects_unmanaged_overwrite_guard() {
+        let layout = test_layout();
+        let root = layout.prefix().join("macos-destination-test");
+        let app_name = "Demo.app";
+        let source_path = root.join("staged").join(app_name);
+        let system_target = root.join("system-applications").join(app_name);
+        let user_target = root.join("user-applications").join(app_name);
+
+        fs::create_dir_all(source_path.parent().expect("must have parent"))
+            .expect("must create source parent");
+        fs::write(&source_path, b"demo-app").expect("must seed source bundle path");
+        fs::create_dir_all(&user_target).expect("must seed unmanaged fallback target");
+
+        let mut attempts = Vec::new();
+        let (selected, warnings) = register_macos_application_symlink_with_creator(
+            &source_path,
+            [system_target.clone(), user_target],
+            &[],
+            |_source, destination| {
+                attempts.push(destination.to_path_buf());
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated permission denied",
+                ))
+            },
+        );
+
+        assert!(selected.is_none(), "fallback should skip unmanaged target");
+        assert_eq!(attempts, vec![system_target]);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("simulated permission denied")));
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("refusing to overwrite unmanaged macOS app bundle")
+        }));
 
         let _ = fs::remove_dir_all(layout.prefix());
     }
