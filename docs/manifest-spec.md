@@ -46,12 +46,14 @@ Each package version is represented by a TOML manifest stored in the registry in
 
 ### Native GUI Registration Policy
 
-- GUI metadata may be projected into native user-scope registration locations by platform.
+- GUI metadata may be projected into native platform registration locations.
 - Native registration is best-effort and warning-driven (install success does not require adapter success).
 - Known current limits:
   - Linux refresh depends on `update-desktop-database` availability.
   - Windows protocol/file-association registration is scoped to HKCU only.
-  - macOS registration links into `~/Applications` and best-effort refreshes LaunchServices.
+  - macOS `.app` registration prefers bundle-copy deployment into `/Applications/<App>.app` and falls back to `~/Applications/<App>.app` when system destination prepare/write steps fail.
+  - macOS registration refuses to overwrite unmanaged existing app bundles at either destination and emits warnings instead.
+  - macOS LaunchServices refresh remains best-effort and warning-driven.
 
 ## Registry Metadata Signing
 
