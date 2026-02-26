@@ -1919,7 +1919,7 @@ fn register_native_gui_app_best_effort_with_executor<RunCommand>(
     package_name: &str,
     app: &ArtifactGuiApp,
     install_root: &Path,
-    _previous_records: &[GuiNativeRegistrationRecord],
+    previous_records: &[GuiNativeRegistrationRecord],
     mut run_command_executor: RunCommand,
 ) -> Result<(Vec<GuiNativeRegistrationRecord>, Vec<String>)>
 where
@@ -2156,21 +2156,17 @@ where
             return Ok((records, warnings));
         };
 
-        let applications_dir = project_macos_user_applications_dir(&home);
-        if let Err(err) = fs::create_dir_all(&applications_dir) {
-            warnings.push(format!(
-                "native GUI registration warning: failed to create macOS user applications dir {}: {}",
-                applications_dir.display(),
-                err
-            ));
-            return Ok((records, warnings));
-        }
-
         let registration_source_path = macos_registration_source_path(install_root, &source_path);
         let app_name = registration_source_path
             .file_name()
             .ok_or_else(|| anyhow!("gui app '{}' has invalid executable path", app.app_id))?;
-        let link_path = applications_dir.join(app_name);
+        let destination_candidates = macos_registration_destination_candidates(&home, app_name);
+        let (selected_destination, mut selection_warnings) =
+            select_macos_registration_destination(destination_candidates, previous_records);
+        warnings.append(&mut selection_warnings);
+        let Some(link_path) = selected_destination else {
+            return Ok((records, warnings));
+        };
 
         if link_path.exists() {
             let remove_result = match fs::symlink_metadata(&link_path) {
@@ -2305,6 +2301,65 @@ fn project_windows_start_menu_programs_dir(appdata: &Path) -> PathBuf {
 
 fn project_macos_user_applications_dir(home: &Path) -> PathBuf {
     home.join("Applications")
+}
+
+fn macos_registration_destination_candidates(
+    home: &Path,
+    app_name: &std::ffi::OsStr,
+) -> [PathBuf; 2] {
+    [
+        PathBuf::from("/Applications").join(app_name),
+        project_macos_user_applications_dir(home).join(app_name),
+    ]
+}
+
+fn select_macos_registration_destination(
+    destination_candidates: [PathBuf; 2],
+    previous_records: &[GuiNativeRegistrationRecord],
+) -> (Option<PathBuf>, Vec<String>) {
+    let mut warnings = Vec::new();
+
+    for destination in destination_candidates {
+        let Some(applications_dir) = destination.parent() else {
+            warnings.push(format!(
+                "native GUI registration warning: invalid macOS applications destination {}",
+                destination.display()
+            ));
+            continue;
+        };
+
+        if let Err(err) = fs::create_dir_all(applications_dir) {
+            warnings.push(format!(
+                "native GUI registration warning: failed to prepare macOS applications dir {}: {}",
+                applications_dir.display(),
+                err
+            ));
+            continue;
+        }
+
+        if destination.exists()
+            && !macos_previous_records_include_path(previous_records, &destination)
+        {
+            warnings.push(format!(
+                "native GUI registration warning: refusing to overwrite unmanaged macOS app bundle {}",
+                destination.display()
+            ));
+            continue;
+        }
+
+        return (Some(destination), warnings);
+    }
+
+    (None, warnings)
+}
+
+fn macos_previous_records_include_path(
+    previous_records: &[GuiNativeRegistrationRecord],
+    destination: &Path,
+) -> bool {
+    previous_records.iter().any(|record| {
+        record.kind.starts_with("applications-") && Path::new(&record.path) == destination
+    })
 }
 
 fn macos_registration_source_path(install_root: &Path, source_path: &Path) -> PathBuf {
@@ -3253,6 +3308,36 @@ where
             mount_point.display()
         )),
     }
+}
+
+#[cfg(test)]
+fn copy_dmg_payload(mount_point: &Path, raw_dir: &Path) -> Result<()> {
+    copy_dir_recursive(mount_point, raw_dir)?;
+
+    #[cfg(unix)]
+    {
+        let applications_link = raw_dir.join("Applications");
+        if let Ok(metadata) = fs::symlink_metadata(&applications_link) {
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&applications_link).with_context(|| {
+                    format!(
+                        "failed to read copied DMG Applications symlink {}",
+                        applications_link.display()
+                    )
+                })?;
+                if target == Path::new("/Applications") {
+                    fs::remove_file(&applications_link).with_context(|| {
+                        format!(
+                            "failed to remove copied DMG Applications symlink {}",
+                            applications_link.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn extract_tar(archive_path: &Path, dst: &Path) -> Result<()> {
@@ -4267,6 +4352,100 @@ mod tests {
             macos_registration_source_path(install_root, &source_path),
             source_path
         );
+    }
+
+    #[test]
+    fn macos_registration_destination_prefers_system_when_safe() {
+        let layout = test_layout();
+        let root = layout.prefix().join("macos-destination-test");
+        let app_name = "Demo.app";
+        let system_target = root.join("system-applications").join(app_name);
+        let user_target = root.join("user-applications").join(app_name);
+
+        let (selected, warnings) =
+            select_macos_registration_destination([system_target.clone(), user_target], &[]);
+
+        assert_eq!(selected.as_ref(), Some(&system_target));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn macos_registration_destination_falls_back_to_user_when_system_unavailable() {
+        let layout = test_layout();
+        let root = layout.prefix().join("macos-destination-test");
+        let app_name = "Demo.app";
+        let blocked_parent = root.join("blocked-parent");
+        fs::create_dir_all(&root).expect("must create test root");
+        fs::write(&blocked_parent, b"blocked").expect("must create blocking file");
+
+        let system_target = blocked_parent.join(app_name);
+        let user_target = root.join("user-applications").join(app_name);
+
+        let (selected, warnings) =
+            select_macos_registration_destination([system_target, user_target.clone()], &[]);
+
+        assert_eq!(selected.as_ref(), Some(&user_target));
+        assert!(warnings
+            .iter()
+            .any(|warning| { warning.contains("failed to prepare macOS applications dir") }));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn macos_registration_destination_refuses_unmanaged_existing_target() {
+        let layout = test_layout();
+        let root = layout.prefix().join("macos-destination-test");
+        let app_name = "Demo.app";
+        let system_target = root.join("system-applications").join(app_name);
+        let blocked_parent = root.join("blocked-parent");
+
+        fs::create_dir_all(system_target.parent().expect("must have parent"))
+            .expect("must create system parent");
+        fs::create_dir_all(&system_target).expect("must seed unmanaged app bundle");
+        fs::write(&blocked_parent, b"blocked").expect("must create blocking file");
+
+        let user_target = blocked_parent.join(app_name);
+        let (selected, warnings) =
+            select_macos_registration_destination([system_target.clone(), user_target], &[]);
+
+        assert!(selected.is_none(), "unmanaged target must be skipped");
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("refusing to overwrite unmanaged macOS app bundle")
+        }));
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn macos_registration_destination_allows_existing_target_when_previously_managed() {
+        let layout = test_layout();
+        let root = layout.prefix().join("macos-destination-test");
+        let app_name = "Demo.app";
+        let system_target = root.join("system-applications").join(app_name);
+        let user_target = root.join("user-applications").join(app_name);
+
+        fs::create_dir_all(system_target.parent().expect("must have parent"))
+            .expect("must create system parent");
+        fs::create_dir_all(&system_target).expect("must seed managed app bundle");
+
+        let previous_records = [GuiNativeRegistrationRecord {
+            key: "app:dev.demo.App".to_string(),
+            kind: "applications-symlink".to_string(),
+            path: system_target.display().to_string(),
+        }];
+
+        let (selected, warnings) = select_macos_registration_destination(
+            [system_target.clone(), user_target],
+            &previous_records,
+        );
+
+        assert_eq!(selected.as_ref(), Some(&system_target));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
