@@ -9,6 +9,7 @@ pub enum ArchiveType {
     Zip,
     TarGz,
     TarZst,
+    Bin,
     Msi,
     Dmg,
     AppImage,
@@ -24,6 +25,7 @@ impl ArchiveType {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::Bin => "bin",
             Self::Msi => "msi",
             Self::Dmg => "dmg",
             Self::AppImage => "appimage",
@@ -39,6 +41,7 @@ impl ArchiveType {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::Bin => "bin",
             Self::Msi => "msi",
             Self::Dmg => "dmg",
             Self::AppImage => "appimage",
@@ -54,6 +57,7 @@ impl ArchiveType {
             "zip" => Some(Self::Zip),
             "tar.gz" | "tgz" => Some(Self::TarGz),
             "tar.zst" | "tzst" => Some(Self::TarZst),
+            "bin" => Some(Self::Bin),
             "msi" => Some(Self::Msi),
             "dmg" => Some(Self::Dmg),
             "appimage" => Some(Self::AppImage),
@@ -76,6 +80,9 @@ impl ArchiveType {
         if lower.ends_with(".tar.zst") || lower.ends_with(".tzst") {
             return Some(Self::TarZst);
         }
+        if lower.ends_with(".bin") {
+            return Some(Self::Bin);
+        }
         if lower.ends_with(".msi") {
             return Some(Self::Msi);
         }
@@ -97,6 +104,17 @@ impl ArchiveType {
         if lower.ends_with(".appx") {
             return Some(Self::Appx);
         }
+
+        let without_fragment = lower.split('#').next().unwrap_or(&lower);
+        let without_query = without_fragment
+            .split('?')
+            .next()
+            .unwrap_or(without_fragment);
+        let file_name = without_query.rsplit('/').next().unwrap_or("");
+        if !file_name.is_empty() && !file_name.contains('.') {
+            return Some(Self::Bin);
+        }
+
         None
     }
 }
@@ -182,7 +200,7 @@ impl Artifact {
         if let Some(archive) = &self.archive {
             return ArchiveType::parse(archive).ok_or_else(|| {
                 anyhow!(
-                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, msi, dmg, appimage, exe, pkg, msix, appx",
+                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, bin, msi, dmg, appimage, exe, pkg, msix, appx",
                     self.target
                 )
             });
@@ -286,11 +304,12 @@ fn validate_protocol_scheme(scheme: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn all_archive_types() -> [ArchiveType; 10] {
+    fn all_archive_types() -> [ArchiveType; 11] {
         [
             ArchiveType::Zip,
             ArchiveType::TarGz,
             ArchiveType::TarZst,
+            ArchiveType::Bin,
             ArchiveType::Msi,
             ArchiveType::Dmg,
             ArchiveType::AppImage,
@@ -557,6 +576,7 @@ ripgrep = "*"
         assert_eq!(ArchiveType::parse("zip"), Some(ArchiveType::Zip));
         assert_eq!(ArchiveType::parse("tgz"), Some(ArchiveType::TarGz));
         assert_eq!(ArchiveType::parse("tar.zst"), Some(ArchiveType::TarZst));
+        assert_eq!(ArchiveType::parse("bin"), Some(ArchiveType::Bin));
         assert_eq!(ArchiveType::parse("msi"), Some(ArchiveType::Msi));
         assert_eq!(ArchiveType::parse("dmg"), Some(ArchiveType::Dmg));
         assert_eq!(ArchiveType::parse("appimage"), Some(ArchiveType::AppImage));
@@ -581,6 +601,10 @@ ripgrep = "*"
             ArchiveType::parse("appx").map(|kind| kind.as_str()),
             Some("appx")
         );
+        assert_eq!(
+            ArchiveType::parse("bin").map(|kind| kind.as_str()),
+            Some("bin")
+        );
     }
 
     #[test]
@@ -600,6 +624,10 @@ ripgrep = "*"
             Some(ArchiveType::TarZst)
         );
         assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/pkg.bin"),
+            Some(ArchiveType::Bin)
+        );
+        assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg.zip"),
             Some(ArchiveType::Zip)
         );
@@ -617,6 +645,10 @@ ripgrep = "*"
         );
         assert_eq!(
             ArchiveType::infer_from_url("https://example.test/pkg"),
+            Some(ArchiveType::Bin)
+        );
+        assert_eq!(
+            ArchiveType::infer_from_url("https://example.test/path/"),
             None
         );
     }
