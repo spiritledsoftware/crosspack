@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-cli"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-core"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "semver",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-installer"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-registry"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-resolver"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-security"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
