@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.6](https://github.com/spiritledsoftware/crosspack/compare/v0.7.5...v0.7.6) (2026-02-26)
+
+
+### Bug Fixes
+
+* **install:** support extensionless bin artifact URLs ([#66](https://github.com/spiritledsoftware/crosspack/issues/66)) ([74ab19d](https://github.com/spiritledsoftware/crosspack/commit/74ab19d8f1d2001276808f438cbde21b4d14547f))
+
 ## [0.7.5](https://github.com/spiritledsoftware/crosspack/compare/v0.7.4...v0.7.5) (2026-02-26)
 
 
