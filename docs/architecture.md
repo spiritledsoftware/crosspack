@@ -86,7 +86,7 @@ Default user prefixes:
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
 - `install` and `upgrade` persist GUI asset ownership in optional `<prefix>/state/installed/<name>.gui` sidecars for deterministic stale cleanup and uninstall removal.
 - `install` and `upgrade` persist native uninstall action records in optional `<prefix>/state/installed/<name>.gui-native` sidecars.
-- Native GUI registration is user-scope only and best-effort: adapter failures produce warning lines and do not fail otherwise successful installs/upgrades/uninstalls.
+- Native GUI registration is best-effort: on macOS, adapters attempt system-scope registration first and fall back to user-scope; on other platforms, registration remains user-scope only. Adapter failures produce warning lines and do not fail otherwise successful installs/upgrades/uninstalls.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
 - Transaction recovery commands are shipped and operational:
