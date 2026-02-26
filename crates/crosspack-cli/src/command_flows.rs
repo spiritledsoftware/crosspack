@@ -250,7 +250,7 @@ fn run_upgrade_command(
                     completed_packages += 1;
                     progress.set(completed_packages);
                 }
-                progress.finish();
+                progress.finish_success();
             }
             None => {
                 let plans = build_upgrade_plans(&receipts);
@@ -431,7 +431,7 @@ fn run_upgrade_command(
                         progress.set(completed_packages);
                     }
                 }
-                progress.finish();
+                progress.finish_success();
             }
         }
 
@@ -1518,7 +1518,7 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
             renderer.print_status(status, &line);
         }
         progress.set(total_steps);
-        progress.finish();
+        progress.finish_success();
 
         Ok(())
     })?;
@@ -1545,7 +1545,7 @@ fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Resul
         processed_sources += 1;
         progress.set(processed_sources);
     }
-    progress.finish();
+    progress.finish_success();
     println!(
         "{}",
         format_update_summary_line(report.updated, report.up_to_date, report.failed)
@@ -1568,25 +1568,33 @@ fn run_self_update_command(
 
     renderer.print_section("Self-update");
     let total_steps = if registry_root.is_none() { 2 } else { 1 };
-    let mut progress = renderer.start_progress("self-update", total_steps);
-    progress.set(0);
+    let mut completed_steps = 0_u64;
 
     if registry_root.is_none() {
         renderer.print_status("step", "self-update: refreshing source snapshots");
         let source_state_root = registry_state_root(layout);
         let store = RegistrySourceStore::new(&source_state_root);
         run_update_command(&store, &[])?;
-        progress.set(1);
+        completed_steps = 1;
     }
+
+    let mut progress = renderer.start_progress("self-update", total_steps);
+    progress.set(completed_steps);
 
     let args = build_self_update_install_args(registry_root, dry_run, force_redownload, escalation);
     renderer.print_status("step", "self-update: installing latest crosspack");
     let result = run_current_exe_command(&args, "self-update install");
-    if result.is_ok() {
-        progress.set(total_steps);
+    match result {
+        Ok(()) => {
+            progress.set(total_steps);
+            progress.finish_success();
+            Ok(())
+        }
+        Err(err) => {
+            progress.finish_abandon();
+            Err(err)
+        }
     }
-    progress.finish();
-    result
 }
 
 fn build_self_update_install_args(

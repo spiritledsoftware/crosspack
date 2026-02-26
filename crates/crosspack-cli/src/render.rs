@@ -109,7 +109,7 @@ impl TerminalProgress {
         progress_bar.set_position(self.current.min(safe_total));
     }
 
-    fn finish(mut self) {
+    fn finish_success(mut self) {
         let Some(progress_bar) = self.progress_bar.take() else {
             return;
         };
@@ -123,6 +123,12 @@ impl TerminalProgress {
             Some(self.started_at.elapsed()),
         ) {
             println!("{line}");
+        }
+    }
+
+    fn finish_abandon(mut self) {
+        if let Some(progress_bar) = self.progress_bar.take() {
+            progress_bar.finish_and_clear();
         }
     }
 }

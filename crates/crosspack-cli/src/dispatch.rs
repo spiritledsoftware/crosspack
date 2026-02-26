@@ -154,7 +154,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                     applied_packages += 1;
                     progress.set(applied_packages);
                 }
-                progress.finish();
+                progress.finish_success();
 
                 append_transaction_journal_entry(
                     &layout,
