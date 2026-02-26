@@ -84,15 +84,15 @@ run_crit_check \
   test -p crosspack-registry configured_index_fails_when_no_ready_snapshot_exists -- --test-threads=1
 
 if command -v rg >/dev/null 2>&1; then
-  if rg -n --fixed-strings 'metadata snapshot mismatch across configured sources' crates/crosspack-cli/src/main.rs >/dev/null && \
-     rg -n --fixed-strings 'assert!(rendered.contains("metadata snapshot mismatch across configured sources"));' crates/crosspack-cli/src/main.rs >/dev/null; then
+  if rg -n --fixed-strings 'metadata snapshot mismatch across configured sources' crates/crosspack-cli/src >/dev/null && \
+     rg -n --fixed-strings 'assert!(rendered.contains("metadata snapshot mismatch across configured sources"));' crates/crosspack-cli/src >/dev/null; then
     record_pass "SF-201" "snapshot mismatch error text contract is enforced in tests" ""
   else
     record_crit "SF-201" "snapshot mismatch error text contract is missing" "restore the mismatch message assertion in crosspack-cli snapshot tests"
   fi
 else
-  if grep -F 'metadata snapshot mismatch across configured sources' crates/crosspack-cli/src/main.rs >/dev/null && \
-     grep -F 'assert!(rendered.contains("metadata snapshot mismatch across configured sources"));' crates/crosspack-cli/src/main.rs >/dev/null; then
+  if grep -R -F 'metadata snapshot mismatch across configured sources' crates/crosspack-cli/src >/dev/null && \
+     grep -R -F 'assert!(rendered.contains("metadata snapshot mismatch across configured sources"));' crates/crosspack-cli/src >/dev/null; then
     record_pass "SF-201" "snapshot mismatch error text contract is enforced in tests" ""
   else
     record_crit "SF-201" "snapshot mismatch error text contract is missing" "restore the mismatch message assertion in crosspack-cli snapshot tests"
