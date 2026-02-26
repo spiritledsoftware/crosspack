@@ -3385,7 +3385,7 @@ fn stage_dmg_payload(_artifact_path: &Path, _raw_dir: &Path) -> Result<()> {
         _raw_dir,
         &mount_point,
         run_command,
-        copy_dir_recursive,
+        copy_dmg_payload,
     );
 
     let _ = fs::remove_dir_all(&mount_point);
@@ -3612,6 +3612,35 @@ where
             mount_point.display()
         )),
     }
+}
+
+fn copy_dmg_payload(mount_point: &Path, raw_dir: &Path) -> Result<()> {
+    copy_dir_recursive(mount_point, raw_dir)?;
+
+    let applications_entry = raw_dir.join("Applications");
+    let metadata = match fs::symlink_metadata(&applications_entry) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to inspect copied DMG Applications entry: {}",
+                    applications_entry.display()
+                )
+            });
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        fs::remove_file(&applications_entry).with_context(|| {
+            format!(
+                "failed to remove root Applications symlink from DMG payload copy: {}",
+                applications_entry.display()
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 fn extract_tar(archive_path: &Path, dst: &Path) -> Result<()> {
@@ -6170,6 +6199,55 @@ mod tests {
         assert_eq!(command_invocations.len(), 2, "attach + detach must run");
         assert!(command_invocations[0].starts_with("hdiutil attach "));
         assert!(command_invocations[1].starts_with("hdiutil detach "));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn copy_dmg_payload_skips_root_applications_symlink() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mount_point = layout.prefix().join("mount-point");
+        let raw_dir = layout.prefix().join("raw");
+        fs::create_dir_all(&mount_point).expect("must create mount point");
+
+        let app_binary = mount_point.join("Demo.app/Contents/MacOS/demo");
+        fs::create_dir_all(app_binary.parent().expect("must have parent"))
+            .expect("must create app bundle dirs");
+        fs::write(&app_binary, b"#!/bin/sh\n").expect("must write app binary");
+
+        let nested_dir = mount_point.join("nested");
+        fs::create_dir_all(&nested_dir).expect("must create nested payload dir");
+
+        std::os::unix::fs::symlink(Path::new("/Applications"), mount_point.join("Applications"))
+            .expect("must create root Applications symlink");
+        std::os::unix::fs::symlink(Path::new("../Demo.app"), nested_dir.join("Applications"))
+            .expect("must create nested Applications symlink");
+
+        copy_dmg_payload(&mount_point, &raw_dir).expect("must copy DMG payload");
+
+        match fs::symlink_metadata(raw_dir.join("Applications")) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => panic!("root Applications symlink should be skipped"),
+            Err(err) => panic!("unexpected root Applications metadata error: {err}"),
+        }
+
+        let copied_binary = raw_dir.join("Demo.app/Contents/MacOS/demo");
+        assert!(copied_binary.exists(), "expected app bundle to be copied");
+
+        let nested_symlink = raw_dir.join("nested/Applications");
+        let nested_metadata =
+            fs::symlink_metadata(&nested_symlink).expect("nested Applications entry should exist");
+        assert!(
+            nested_metadata.file_type().is_symlink(),
+            "nested Applications symlink should be preserved"
+        );
+        assert_eq!(
+            fs::read_link(&nested_symlink).expect("must read nested symlink target"),
+            PathBuf::from("../Demo.app")
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
