@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.7](https://github.com/spiritledsoftware/crosspack/compare/v0.7.6...v0.7.7) (2026-02-26)
+
+
+### Refactoring
+
+* **cli:** modularize crosspack-cli main into focused files ([#73](https://github.com/spiritledsoftware/crosspack/issues/73)) ([8cfb1c6](https://github.com/spiritledsoftware/crosspack/commit/8cfb1c6c10bb9f78137f6d842779dc57d4671641))
+* **core:** modularize crosspack-core domain types ([#71](https://github.com/spiritledsoftware/crosspack/issues/71)) ([215be2c](https://github.com/spiritledsoftware/crosspack/commit/215be2ceea4fb2bc04e5090c7ed1b90d3a161f23))
+* **installer:** split monolithic lib into focused modules ([#74](https://github.com/spiritledsoftware/crosspack/issues/74)) ([0e81996](https://github.com/spiritledsoftware/crosspack/commit/0e81996ed20affdf053366e21aa3148ca101243c))
+* **registry:** modularize crosspack-registry lib.rs ([#72](https://github.com/spiritledsoftware/crosspack/issues/72)) ([adceffb](https://github.com/spiritledsoftware/crosspack/commit/adceffbfba7926a1999ba5f8753e45a5f5e327bd))
+* **resolver:** split dependency solver into focused modules ([#69](https://github.com/spiritledsoftware/crosspack/issues/69)) ([0a16eb4](https://github.com/spiritledsoftware/crosspack/commit/0a16eb4e6ed554a128041de30a3d0a4ce4697c8e))
+* **security:** split checksum and signature modules ([#68](https://github.com/spiritledsoftware/crosspack/issues/68)) ([ac147d1](https://github.com/spiritledsoftware/crosspack/commit/ac147d1df27d7567f4a611a6325e3018d325058e))
+
 ## [0.7.6](https://github.com/spiritledsoftware/crosspack/compare/v0.7.5...v0.7.6) (2026-02-26)
 
 
