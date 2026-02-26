@@ -5416,6 +5416,29 @@ mod tests {
         assert!(command_invocations[1].starts_with("hdiutil detach "));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn copy_dmg_payload_skips_root_applications_symlink() {
+        let temp = test_layout();
+        temp.ensure_base_dirs().expect("must create dirs");
+
+        let mount_point = temp.prefix().join("mount");
+        let raw_dir = temp.prefix().join("raw");
+        fs::create_dir_all(mount_point.join("Neovide.app")).expect("must create app bundle");
+        std::os::unix::fs::symlink("/Applications", mount_point.join("Applications"))
+            .expect("must create Applications symlink");
+
+        copy_dmg_payload(&mount_point, &raw_dir).expect("must copy dmg payload");
+
+        assert!(raw_dir.join("Neovide.app").exists());
+        assert!(
+            !raw_dir.join("Applications").exists(),
+            "DMG root Applications symlink should be skipped"
+        );
+
+        let _ = fs::remove_dir_all(temp.prefix());
+    }
+
     #[test]
     fn uninstall_removes_package_dir_and_receipt() {
         let layout = test_layout();
