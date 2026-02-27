@@ -5105,6 +5105,479 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn resolve_install_progress_mode_disables_progress_for_plain_output() {
+        assert_eq!(
+            resolve_install_progress_mode(OutputStyle::Plain, Some("en_US.UTF-8")),
+            InstallProgressMode::Disabled
+        );
+    }
+
+    #[test]
+    fn resolve_install_progress_mode_prefers_unicode_for_utf8_locale() {
+        assert_eq!(
+            resolve_install_progress_mode(OutputStyle::Rich, Some("en_US.UTF-8")),
+            InstallProgressMode::Unicode
+        );
+    }
+
+    #[test]
+    fn resolve_install_progress_mode_falls_back_to_ascii_for_non_utf8_locale() {
+        assert_eq!(
+            resolve_install_progress_mode(OutputStyle::Rich, Some("C")),
+            InstallProgressMode::Ascii
+        );
+    }
+
+    #[test]
+    fn format_install_progress_line_uses_ascii_spinner_and_progress_bar() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            1,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 6,
+                download_progress: None,
+            },
+        );
+
+        assert!(line.starts_with("\\ install gh"), "unexpected line: {line}");
+        assert!(line.contains("download"), "unexpected line: {line}");
+        assert!(line.contains("2/6"), "unexpected line: {line}");
+        assert!(line.contains("["), "unexpected line: {line}");
+        assert!(line.contains("]"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn format_install_progress_line_uses_unicode_spinner_when_enabled() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Unicode,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "prepare",
+                step: 1,
+                total_steps: 6,
+                download_progress: None,
+            },
+        );
+
+        assert!(
+            line.starts_with("\u{280b} install gh"),
+            "unexpected line: {line}"
+        );
+        assert!(line.contains("prepare"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn format_install_progress_line_includes_percent_when_total_is_known() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 7,
+                download_progress: Some((50, Some(200))),
+            },
+        );
+
+        assert!(line.contains("50B/200B (25%)"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn format_install_progress_line_uses_download_fraction_for_known_total_bar_fill() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 7,
+                download_progress: Some((50, Some(200))),
+            },
+        );
+
+        assert!(
+            line.contains("[=====---------------]"),
+            "unexpected line: {line}"
+        );
+        assert!(line.contains("2/7 download"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn format_install_progress_line_uses_indeterminate_download_bar_when_total_unknown() {
+        let extract_bar = |line: &str| {
+            let start = line
+                .find('[')
+                .expect("line must contain opening bar bracket");
+            let end = line
+                .find(']')
+                .expect("line must contain closing bar bracket");
+            line[start + 1..end].to_string()
+        };
+        let line_frame_0 = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 7,
+                download_progress: Some((50, None)),
+            },
+        );
+        let line_frame_1 = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            12,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 7,
+                download_progress: Some((50, None)),
+            },
+        );
+
+        assert_ne!(
+            extract_bar(&line_frame_0),
+            extract_bar(&line_frame_1),
+            "bars should animate by frame beyond spinner positions"
+        );
+        assert!(
+            line_frame_0.contains("50B"),
+            "unexpected line: {line_frame_0}"
+        );
+        assert!(
+            line_frame_1.contains("50B"),
+            "unexpected line: {line_frame_1}"
+        );
+    }
+
+    #[test]
+    fn install_progress_renderer_keeps_monotonic_frame_index() {
+        let mut renderer =
+            InstallProgressRenderer::new(InstallProgressMode::Ascii, "install", "gh", 7);
+        let updates = install_progress_frames(InstallProgressMode::Ascii).len() + 8;
+
+        for _ in 0..updates {
+            renderer.update("verify", 3, None);
+        }
+
+        assert_eq!(renderer.frame_index, updates);
+    }
+
+    #[test]
+    fn format_install_progress_line_uses_step_progress_for_non_download_phases() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "verify",
+                step: 2,
+                total_steps: 6,
+                download_progress: Some((50, Some(200))),
+            },
+        );
+
+        assert!(
+            line.contains("[=======-------------]"),
+            "unexpected line: {line}"
+        );
+        assert!(line.contains("50B/200B (25%)"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn format_install_progress_line_shows_bytes_only_when_total_unknown() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 7,
+                download_progress: Some((50, None)),
+            },
+        );
+
+        assert!(line.contains("50B"), "unexpected line: {line}");
+        assert!(!line.contains('%'), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn format_install_progress_line_shows_zero_bytes_at_download_start() {
+        let line = format_install_progress_line(
+            InstallProgressMode::Ascii,
+            0,
+            "install",
+            "gh",
+            InstallProgressLineState {
+                phase: "download",
+                step: 2,
+                total_steps: 7,
+                download_progress: Some((0, None)),
+            },
+        );
+
+        assert!(line.contains("0B"), "unexpected line: {line}");
+        assert!(line.contains("2/7 download"), "unexpected line: {line}");
+    }
+
+    #[test]
+    fn install_progress_renderer_finish_sequence_keeps_completed_line_visible() {
+        let sequence = install_progress_renderer_finish_sequence(true);
+        assert_eq!(sequence, "\n");
+    }
+
+    #[test]
+    fn install_progress_renderer_finish_sequence_clears_incomplete_line() {
+        let sequence = install_progress_renderer_finish_sequence(false);
+        assert_eq!(sequence, "\r\x1b[2K");
+    }
+
+    #[test]
+    fn install_progress_throttle_decision_throttles_download_same_step_within_interval() {
+        let should_render = should_render_install_progress_update(
+            Some("download"),
+            Some(2),
+            "download",
+            2,
+            Some(std::time::Duration::from_millis(40)),
+        );
+
+        assert!(!should_render, "download redraw should be throttled");
+    }
+
+    #[test]
+    fn install_progress_throttle_decision_allows_download_when_step_changes() {
+        let should_render = should_render_install_progress_update(
+            Some("download"),
+            Some(1),
+            "download",
+            2,
+            Some(std::time::Duration::from_millis(1)),
+        );
+
+        assert!(should_render, "step change should bypass throttling");
+    }
+
+    #[test]
+    fn install_progress_throttle_decision_keeps_non_download_immediate() {
+        let should_render = should_render_install_progress_update(
+            Some("verify"),
+            Some(3),
+            "verify",
+            3,
+            Some(std::time::Duration::from_millis(1)),
+        );
+
+        assert!(should_render, "non-download redraw should remain immediate");
+    }
+
+    #[test]
+    fn download_artifact_reports_progress_with_known_total() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let payload = b"crosspack-progress-known-total".to_vec();
+        let (url, server) = start_one_shot_http_server(payload.clone(), true);
+        let cache_path = layout.prefix().join("download-known.bin");
+        let mut observed = Vec::new();
+
+        let status =
+            download_artifact_with_progress(&url, &cache_path, false, |downloaded, total| {
+                observed.push((downloaded, total));
+            })
+            .expect("download must succeed");
+
+        server.join().expect("server thread must join");
+
+        assert_eq!(status, "downloaded");
+        assert_eq!(
+            std::fs::read(&cache_path).expect("must read cache file"),
+            payload
+        );
+        assert!(!observed.is_empty(), "progress callback must be invoked");
+        let last = observed.last().expect("must have progress events");
+        assert_eq!(last.0, payload.len() as u64);
+        assert_eq!(last.1, Some(payload.len() as u64));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn download_artifact_reports_progress_without_total_for_streamed_response() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let payload = b"crosspack-progress-unknown-total".to_vec();
+        let (url, server) = start_one_shot_http_server(payload.clone(), false);
+        let cache_path = layout.prefix().join("download-unknown.bin");
+        let mut observed = Vec::new();
+
+        let status =
+            download_artifact_with_progress(&url, &cache_path, false, |downloaded, total| {
+                observed.push((downloaded, total));
+            })
+            .expect("download must succeed");
+
+        server.join().expect("server thread must join");
+
+        assert_eq!(status, "downloaded");
+        assert_eq!(
+            std::fs::read(&cache_path).expect("must read cache file"),
+            payload
+        );
+        assert!(!observed.is_empty(), "progress callback must be invoked");
+        let last = observed.last().expect("must have progress events");
+        assert_eq!(last.0, payload.len() as u64);
+        assert_eq!(last.1, None);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn parse_download_backend_preference_defaults_to_in_process() {
+        let backend = parse_download_backend_preference(None, "CROSSPACK_DOWNLOAD_BACKEND")
+            .expect("empty backend preference should use in-process downloader");
+        assert_eq!(backend, DownloadBackendPreference::InProcess);
+    }
+
+    #[test]
+    fn parse_download_backend_preference_accepts_external_value() {
+        let backend =
+            parse_download_backend_preference(Some("external"), "CROSSPACK_DOWNLOAD_BACKEND")
+                .expect("external backend preference should be accepted");
+        assert_eq!(backend, DownloadBackendPreference::External);
+    }
+
+    #[test]
+    fn parse_download_backend_preference_rejects_unknown_value() {
+        let err = parse_download_backend_preference(Some("curl"), "CROSSPACK_DOWNLOAD_BACKEND")
+            .expect_err("unknown backend value should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid CROSSPACK_DOWNLOAD_BACKEND value 'curl'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn download_artifact_retries_in_process_download_before_succeeding() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let payload = b"crosspack-retry-success".to_vec();
+        let (url, server) = start_retry_http_server(payload.clone(), 3);
+        let cache_path = layout.prefix().join("download-retry.bin");
+
+        let status =
+            download_artifact_with_progress(&url, &cache_path, false, |_downloaded, _total| {})
+                .expect("download must succeed after bounded retries");
+
+        let observed_attempts = server.join().expect("server thread must join");
+
+        assert_eq!(status, "downloaded");
+        assert_eq!(
+            std::fs::read(&cache_path).expect("must read cache file"),
+            payload
+        );
+        assert_eq!(observed_attempts, 3, "in-process retries should be bounded");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn backend_selection_external_uses_external_downloader_only() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let cache_path = layout.prefix().join("external-only.bin");
+        let in_process_calls = std::cell::Cell::new(0_usize);
+        let external_calls = std::cell::Cell::new(0_usize);
+
+        let status = download_artifact_with_progress_using(
+            "https://example.test/external-only.bin",
+            &cache_path,
+            false,
+            DownloadBackendPreference::External,
+            |_downloaded, _total| {},
+            |_, _, _| {
+                in_process_calls.set(in_process_calls.get() + 1);
+                Err(anyhow!("in-process backend must not be used"))
+            },
+            |_, out_path| {
+                external_calls.set(external_calls.get() + 1);
+                std::fs::write(out_path, b"external-only").expect("must write external fixture");
+                Ok(())
+            },
+        )
+        .expect("external backend should succeed");
+
+        assert_eq!(status, "downloaded");
+        assert_eq!(in_process_calls.get(), 0);
+        assert_eq!(external_calls.get(), 1);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn in_process_failure_falls_back_to_external_backend() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let cache_path = layout.prefix().join("in-process-fallback.bin");
+        let in_process_calls = std::cell::Cell::new(0_usize);
+        let external_calls = std::cell::Cell::new(0_usize);
+        let progress_events = std::cell::RefCell::new(Vec::new());
+
+        let status = download_artifact_with_progress_using(
+            "https://example.test/in-process-fallback.bin",
+            &cache_path,
+            false,
+            DownloadBackendPreference::InProcess,
+            |downloaded, total| {
+                progress_events.borrow_mut().push((downloaded, total));
+            },
+            |_, _, _| {
+                in_process_calls.set(in_process_calls.get() + 1);
+                Err(anyhow!("simulated in-process failure"))
+            },
+            |_, out_path| {
+                external_calls.set(external_calls.get() + 1);
+                std::fs::write(out_path, b"external-fallback")
+                    .expect("must write fallback fixture");
+                Ok(())
+            },
+        )
+        .expect("external fallback should recover in-process failure");
+
+        assert_eq!(status, "downloaded");
+        assert_eq!(in_process_calls.get(), 1);
+        assert_eq!(external_calls.get(), 1);
+        assert_eq!(
+            progress_events.borrow().first().copied(),
+            Some((0, None)),
+            "download phase should be visible before fallback backend work"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn render_status_line_plain_is_unadorned() {
         assert_eq!(
             render_status_line(OutputStyle::Plain, "ok", "installed ripgrep 14.1.0"),
@@ -5202,6 +5675,7 @@ old-cc = "<2.0.0"
                 snapshot_id: None,
                 force_redownload: false,
                 interaction_policy: InstallInteractionPolicy::default(),
+                install_progress_mode: InstallProgressMode::Disabled,
             },
         )
         .expect_err("unsupported EXE host should fail deterministically");
@@ -5236,6 +5710,7 @@ old-cc = "<2.0.0"
                 snapshot_id: None,
                 force_redownload: false,
                 interaction_policy: InstallInteractionPolicy::default(),
+                install_progress_mode: InstallProgressMode::Disabled,
             },
         )
         .expect_err("unsupported PKG host should fail deterministically");
@@ -5481,6 +5956,90 @@ sha256 = "abc"
         std::fs::create_dir_all(cache_path.parent().expect("cache path must have parent"))
             .expect("must create cache dir");
         std::fs::write(cache_path, payload).expect("must seed cached artifact");
+    }
+
+    fn start_one_shot_http_server(
+        payload: Vec<u8>,
+        with_content_length: bool,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("must bind one-shot test server");
+        let address = listener
+            .local_addr()
+            .expect("must read one-shot test server address");
+        let url = format!("http://{address}/artifact.bin");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("must accept test client");
+            let mut request_buffer = [0_u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request_buffer);
+
+            if with_content_length {
+                std::io::Write::write_all(
+                    &mut stream,
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("must write test response headers");
+            } else {
+                std::io::Write::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+                )
+                .expect("must write test response headers");
+            }
+            std::io::Write::write_all(&mut stream, &payload)
+                .expect("must write test response payload");
+            std::io::Write::flush(&mut stream).expect("must flush test response payload");
+        });
+
+        (url, handle)
+    }
+
+    fn start_retry_http_server(
+        payload: Vec<u8>,
+        success_on_attempt: usize,
+    ) -> (String, std::thread::JoinHandle<usize>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("must bind retry test server");
+        let address = listener
+            .local_addr()
+            .expect("must read retry test server address");
+        let url = format!("http://{address}/artifact.bin");
+        let handle = std::thread::spawn(move || {
+            for attempt in 1..=success_on_attempt {
+                let (mut stream, _) = listener.accept().expect("must accept retry test client");
+                let mut request_buffer = [0_u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut request_buffer);
+
+                if attempt < success_on_attempt {
+                    std::io::Write::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("must write retry test failure response");
+                } else {
+                    std::io::Write::write_all(
+                        &mut stream,
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("must write retry test success headers");
+                    std::io::Write::write_all(&mut stream, &payload)
+                        .expect("must write retry test payload");
+                }
+                std::io::Write::flush(&mut stream).expect("must flush retry test response");
+            }
+
+            success_on_attempt
+        });
+
+        (url, handle)
     }
 
     fn sample_install_outcome() -> super::InstallOutcome {

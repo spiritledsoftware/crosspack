@@ -20,6 +20,10 @@
 5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
 6. Download artifact if needed (or if `--force-redownload`).
+   - backend selection env var: `CROSSPACK_DOWNLOAD_BACKEND` supports `in-process` (default) or `external`.
+   - default (`in-process`) uses reqwest with bounded retry (up to 3 attempts) and falls back to external backend on failure.
+   - `external` forces external downloader backend and skips in-process attempts.
+   - external backend is cross-platform (`curl`/`wget` with Windows PowerShell support).
 7. Verify artifact SHA-256 against manifest `sha256`.
 8. Stage artifact payload into temporary state directory with deterministic adapters:
    - managed mode adapters: `zip`, `tar.gz`, `tar.zst` (archive extraction), `bin` (copy payload using the cached file name; requires `strip_components=0` and no `artifact_root`), `dmg` (attach/copy/detach extraction on macOS), `appimage` (copy payload as `artifact.appimage` on Linux; requires `strip_components=0` and no `artifact_root`),
@@ -55,6 +59,12 @@
 For non-dry-run lifecycle output, Crosspack auto-selects output mode:
 - interactive terminal: rich status badges for human readability,
 - non-interactive/piped output: plain deterministic lines.
+
+Interactive rich mode also renders live download telemetry during the download phase:
+- when HTTP `Content-Length` is available, progress includes downloaded bytes and percent,
+- when total size is unknown, progress includes downloaded bytes only.
+
+Plain mode keeps existing deterministic line contracts unchanged (no live byte/percent progress frames).
 
 Machine-oriented dry-run preview lines remain unchanged regardless of output mode.
 

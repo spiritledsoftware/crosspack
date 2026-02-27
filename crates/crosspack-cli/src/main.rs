@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -62,6 +63,256 @@ const SEARCH_METADATA_GUIDANCE: &str =
 enum OutputStyle {
     Plain,
     Rich,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum InstallProgressMode {
+    Disabled,
+    Ascii,
+    Unicode,
+}
+
+const ASCII_PROGRESS_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
+const UNICODE_PROGRESS_FRAMES: [&str; 10] = [
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280f}",
+];
+
+fn locale_looks_utf8(locale: &str) -> bool {
+    let lower = locale.to_ascii_lowercase();
+    lower.contains("utf-8") || lower.contains("utf8")
+}
+
+fn resolve_install_progress_mode(style: OutputStyle, locale: Option<&str>) -> InstallProgressMode {
+    if style == OutputStyle::Plain {
+        return InstallProgressMode::Disabled;
+    }
+
+    match locale {
+        Some(value) if locale_looks_utf8(value) => InstallProgressMode::Unicode,
+        _ => InstallProgressMode::Ascii,
+    }
+}
+
+fn current_install_progress_mode(style: OutputStyle) -> InstallProgressMode {
+    let locale = std::env::var("LC_ALL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("LC_CTYPE")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| std::env::var("LANG").ok().filter(|value| !value.is_empty()));
+    resolve_install_progress_mode(style, locale.as_deref())
+}
+
+fn install_progress_frames(mode: InstallProgressMode) -> &'static [&'static str] {
+    match mode {
+        InstallProgressMode::Disabled => &ASCII_PROGRESS_FRAMES,
+        InstallProgressMode::Ascii => &ASCII_PROGRESS_FRAMES,
+        InstallProgressMode::Unicode => &UNICODE_PROGRESS_FRAMES,
+    }
+}
+
+struct InstallProgressLineState<'a> {
+    phase: &'a str,
+    step: usize,
+    total_steps: usize,
+    download_progress: Option<(u64, Option<u64>)>,
+}
+
+fn format_install_progress_line(
+    mode: InstallProgressMode,
+    frame_index: usize,
+    action: &str,
+    package: &str,
+    state: InstallProgressLineState<'_>,
+) -> String {
+    let frame = install_progress_frames(mode)[frame_index % install_progress_frames(mode).len()];
+    let step_progress = if state.total_steps == 0 {
+        0.0
+    } else {
+        (state.step.min(state.total_steps) as f32) / (state.total_steps as f32)
+    };
+    let bar_width = 20_usize;
+    let render_progress_bar = |progress: f32| {
+        let filled = (progress * (bar_width as f32)).round() as usize;
+        let filled = filled.min(bar_width);
+        format!(
+            "{}{}",
+            "=".repeat(filled),
+            "-".repeat(bar_width.saturating_sub(filled))
+        )
+    };
+    let bar = if state.phase == "download" {
+        match state.download_progress {
+            Some((downloaded, Some(total_bytes))) if total_bytes > 0 => {
+                let download_progress =
+                    (downloaded as f64 / total_bytes as f64).clamp(0.0, 1.0) as f32;
+                render_progress_bar(download_progress)
+            }
+            Some((_downloaded, None)) => {
+                let mut buffer = vec!['-'; bar_width];
+                let fill_width = (bar_width / 4).max(1);
+                let start = frame_index % bar_width;
+                for offset in 0..fill_width {
+                    buffer[(start + offset) % bar_width] = '=';
+                }
+                buffer.into_iter().collect::<String>()
+            }
+            _ => render_progress_bar(step_progress),
+        }
+    } else {
+        render_progress_bar(step_progress)
+    };
+    let transfer = state
+        .download_progress
+        .map(|(downloaded, total)| match total {
+            Some(total_bytes) if total_bytes > 0 => format!(
+                " {}B/{}B ({:.0}%)",
+                downloaded,
+                total_bytes,
+                ((downloaded as f64) / (total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+            ),
+            Some(total_bytes) => format!(" {}B/{}B", downloaded, total_bytes),
+            None => format!(" {}B", downloaded),
+        })
+        .unwrap_or_default();
+
+    format!(
+        "{frame} {action} {package:<12} [{bar}] {}/{} {phase}",
+        state.step.min(state.total_steps),
+        state.total_steps,
+        phase = state.phase,
+    ) + &transfer
+}
+
+struct InstallProgressRenderer {
+    mode: InstallProgressMode,
+    action: String,
+    package: String,
+    frame_index: usize,
+    total_steps: usize,
+    active: bool,
+    completed: bool,
+    last_phase: Option<String>,
+    last_step: Option<usize>,
+    last_redraw_at: Option<Instant>,
+}
+
+const DOWNLOAD_PROGRESS_REDRAW_INTERVAL: Duration = Duration::from_millis(80);
+
+fn install_progress_renderer_finish_sequence(completed: bool) -> &'static str {
+    if completed {
+        "\n"
+    } else {
+        "\r\x1b[2K"
+    }
+}
+
+fn should_render_install_progress_update(
+    previous_phase: Option<&str>,
+    previous_step: Option<usize>,
+    phase: &str,
+    step: usize,
+    elapsed_since_last_redraw: Option<Duration>,
+) -> bool {
+    if previous_phase != Some(phase) || previous_step != Some(step) {
+        return true;
+    }
+    if phase != "download" {
+        return true;
+    }
+
+    elapsed_since_last_redraw
+        .map(|elapsed| elapsed >= DOWNLOAD_PROGRESS_REDRAW_INTERVAL)
+        .unwrap_or(true)
+}
+
+impl InstallProgressRenderer {
+    fn new(mode: InstallProgressMode, action: &str, package: &str, total_steps: usize) -> Self {
+        Self {
+            mode,
+            action: action.to_string(),
+            package: package.to_string(),
+            frame_index: 0,
+            total_steps,
+            active: false,
+            completed: false,
+            last_phase: None,
+            last_step: None,
+            last_redraw_at: None,
+        }
+    }
+
+    fn update(&mut self, phase: &str, step: usize, download_progress: Option<(u64, Option<u64>)>) {
+        if self.mode == InstallProgressMode::Disabled {
+            return;
+        }
+
+        let now = Instant::now();
+        let elapsed_since_last_redraw = self
+            .last_redraw_at
+            .map(|last_redraw_at| now.saturating_duration_since(last_redraw_at));
+        if !should_render_install_progress_update(
+            self.last_phase.as_deref(),
+            self.last_step,
+            phase,
+            step,
+            elapsed_since_last_redraw,
+        ) {
+            return;
+        }
+
+        let line = format_install_progress_line(
+            self.mode,
+            self.frame_index,
+            &self.action,
+            &self.package,
+            InstallProgressLineState {
+                phase,
+                step,
+                total_steps: self.total_steps,
+                download_progress,
+            },
+        );
+        let mut stdout = std::io::stdout();
+        if write!(stdout, "\r\x1b[2K{line}").is_ok() {
+            let _ = stdout.flush();
+        }
+        self.frame_index = self.frame_index.wrapping_add(1);
+        self.active = true;
+        self.completed = self.total_steps > 0 && step >= self.total_steps;
+        self.last_phase = Some(phase.to_string());
+        self.last_step = Some(step);
+        self.last_redraw_at = Some(now);
+    }
+
+    fn finish(&mut self) {
+        if self.mode == InstallProgressMode::Disabled || !self.active {
+            return;
+        }
+
+        let mut stdout = std::io::stdout();
+        if write!(
+            stdout,
+            "{}",
+            install_progress_renderer_finish_sequence(self.completed)
+        )
+        .is_ok()
+        {
+            let _ = stdout.flush();
+        }
+        self.active = false;
+        self.completed = false;
+    }
+}
+
+impl Drop for InstallProgressRenderer {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 #[derive(Args, Copy, Clone, Debug, Default, Eq, PartialEq)]

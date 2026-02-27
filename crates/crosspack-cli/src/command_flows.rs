@@ -215,6 +215,7 @@ fn run_upgrade_command(
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload: false,
                             interaction_policy,
+                            install_progress_mode: current_install_progress_mode(output_style),
                         },
                     )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
@@ -368,6 +369,7 @@ fn run_upgrade_command(
                                 snapshot_id: snapshot_id.as_deref(),
                                 force_redownload: false,
                                 interaction_policy,
+                                install_progress_mode: current_install_progress_mode(output_style),
                             },
                         )?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
