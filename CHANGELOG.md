@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/spiritledsoftware/crosspack/compare/v0.8.0...v0.8.1) (2026-02-28)
+
+
+### Bug Fixes
+
+* **cli:** stabilize install progress rendering and download flow ([#77](https://github.com/spiritledsoftware/crosspack/issues/77)) ([fbef2a4](https://github.com/spiritledsoftware/crosspack/commit/fbef2a46329ba9b738589be1118fec83f53a87fe))
+
 ## [0.8.0](https://github.com/spiritledsoftware/crosspack/compare/v0.7.7...v0.8.0) (2026-02-26)
 
 
