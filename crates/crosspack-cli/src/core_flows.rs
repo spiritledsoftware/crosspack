@@ -1213,9 +1213,9 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
 }
 
 fn print_install_outcome(outcome: &InstallOutcome, style: OutputStyle) {
-    for line in format_install_outcome_lines(outcome, style) {
-        println!("{line}");
-    }
+    let renderer = TerminalRenderer::from_style(style);
+    renderer.print_section(&format!("Installed {} {}", outcome.name, outcome.version));
+    renderer.print_lines(&format_install_outcome_lines(outcome, style));
 }
 
 fn collect_declared_binaries(artifact: &Artifact) -> Result<Vec<String>> {
