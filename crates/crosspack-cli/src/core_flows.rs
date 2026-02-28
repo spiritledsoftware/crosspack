@@ -902,6 +902,7 @@ struct InstallResolvedOptions<'a> {
     snapshot_id: Option<&'a str>,
     force_redownload: bool,
     interaction_policy: InstallInteractionPolicy,
+    install_progress_mode: InstallProgressMode,
 }
 
 fn install_resolved(
@@ -912,6 +913,15 @@ fn install_resolved(
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
     options: InstallResolvedOptions<'_>,
 ) -> Result<InstallOutcome> {
+    const INSTALL_PROGRESS_STEPS: usize = 7;
+    let mut progress = InstallProgressRenderer::new(
+        options.install_progress_mode,
+        "install",
+        &resolved.manifest.name,
+        INSTALL_PROGRESS_STEPS,
+    );
+    progress.update("preflight", 1, None);
+
     let receipts = read_install_receipts(layout)?;
     validate_install_preflight_for_resolved(layout, resolved, &receipts)?;
 
@@ -929,12 +939,17 @@ fn install_resolved(
         resolved.archive_type,
         &resolved.artifact.url,
     )?;
-    let download_status = download_artifact(
+    progress.update("download", 2, Some((0, None)));
+    let download_status = download_artifact_with_progress(
         &resolved.artifact.url,
         &cache_path,
         options.force_redownload,
+        |downloaded_bytes, total_bytes| {
+            progress.update("download", 2, Some((downloaded_bytes, total_bytes)));
+        },
     )?;
 
+    progress.update("verify", 3, None);
     let checksum_ok = verify_sha256_file(&cache_path, &resolved.artifact.sha256)?;
     if !checksum_ok {
         let _ = remove_file_if_exists(&cache_path);
@@ -945,6 +960,7 @@ fn install_resolved(
         ));
     }
 
+    progress.update("install", 4, None);
     let install_options = build_artifact_install_options(resolved, options.interaction_policy);
     let selected_install_mode = install_options.install_mode;
     let install_root = install_from_artifact(
@@ -965,6 +981,7 @@ fn install_resolved(
 
     let receipts = read_install_receipts(layout)?;
 
+    progress.update("expose", 5, None);
     for binary in &resolved.artifact.binaries {
         expose_binary(layout, &install_root, &binary.name, &binary.path)?;
     }
@@ -1024,6 +1041,7 @@ fn install_resolved(
         &declared_gui_apps,
     )?;
 
+    progress.update("receipt", 6, None);
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
         version: resolved.manifest.version.to_string(),
@@ -1046,6 +1064,8 @@ fn install_resolved(
         installed_at_unix: current_unix_timestamp()?,
     };
     let receipt_path = write_install_receipt(layout, &receipt)?;
+    progress.update("complete", 7, None);
+    progress.finish();
 
     Ok(InstallOutcome {
         name: resolved.manifest.name.clone(),
@@ -1798,7 +1818,51 @@ fn host_target_triple() -> &'static str {
     }
 }
 
-fn download_artifact(url: &str, cache_path: &Path, force_redownload: bool) -> Result<&'static str> {
+fn download_artifact_with_progress<F>(
+    url: &str,
+    cache_path: &Path,
+    force_redownload: bool,
+    on_progress: F,
+) -> Result<&'static str>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    const DOWNLOAD_BACKEND_ENV: &str = "CROSSPACK_DOWNLOAD_BACKEND";
+
+    if cache_path.exists() && !force_redownload {
+        return Ok("cache-hit");
+    }
+
+    let backend = parse_download_backend_preference(
+        std::env::var(DOWNLOAD_BACKEND_ENV).ok().as_deref(),
+        DOWNLOAD_BACKEND_ENV,
+    )?;
+
+    download_artifact_with_progress_using(
+        url,
+        cache_path,
+        force_redownload,
+        backend,
+        on_progress,
+        download_http_to_path,
+        download_http_external_to_path,
+    )
+}
+
+fn download_artifact_with_progress_using<F, InProcessDownload, ExternalDownload>(
+    url: &str,
+    cache_path: &Path,
+    force_redownload: bool,
+    backend: DownloadBackendPreference,
+    mut on_progress: F,
+    mut in_process_download: InProcessDownload,
+    mut external_download: ExternalDownload,
+) -> Result<&'static str>
+where
+    F: FnMut(u64, Option<u64>),
+    InProcessDownload: FnMut(&str, &Path, &mut F) -> Result<()>,
+    ExternalDownload: FnMut(&str, &Path) -> Result<()>,
+{
     if cache_path.exists() && !force_redownload {
         return Ok("cache-hit");
     }
@@ -1816,10 +1880,18 @@ fn download_artifact(url: &str, cache_path: &Path, force_redownload: bool) -> Re
             .unwrap_or("artifact")
     ));
 
-    let result = if cfg!(windows) {
-        download_with_powershell(url, &part_path)
-    } else {
-        download_with_curl(url, &part_path).or_else(|_| download_with_wget(url, &part_path))
+    on_progress(0, None);
+
+    let result = match backend {
+        DownloadBackendPreference::External => external_download(url, &part_path),
+        DownloadBackendPreference::InProcess => match in_process_download(url, &part_path, &mut on_progress) {
+            Ok(()) => Ok(()),
+            Err(in_process_err) => external_download(url, &part_path).map_err(|external_err| {
+                anyhow!(
+                    "download failed for {url} using in-process backend and external fallback: in-process: {in_process_err}; external: {external_err}"
+                )
+            }),
+        },
     };
 
     if let Err(err) = result {
@@ -1841,6 +1913,129 @@ fn download_artifact(url: &str, cache_path: &Path, force_redownload: bool) -> Re
     Ok("downloaded")
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DownloadBackendPreference {
+    InProcess,
+    External,
+}
+
+fn parse_download_backend_preference(
+    value: Option<&str>,
+    env_var_name: &str,
+) -> Result<DownloadBackendPreference> {
+    let normalized = value.map(str::trim).unwrap_or("");
+    if normalized.is_empty() || normalized.eq_ignore_ascii_case("in-process") {
+        return Ok(DownloadBackendPreference::InProcess);
+    }
+    if normalized.eq_ignore_ascii_case("external") {
+        return Ok(DownloadBackendPreference::External);
+    }
+
+    Err(anyhow!(
+        "invalid {} value '{}': expected 'external' or 'in-process'",
+        env_var_name,
+        normalized
+    ))
+}
+
+fn download_http_to_path<F>(url: &str, out_path: &Path, on_progress: &mut F) -> Result<()>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    const MAX_ATTEMPTS: usize = 3;
+    let mut last_error = None;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let _ = std::fs::remove_file(out_path);
+        match download_http_to_path_attempt(url, out_path, on_progress) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt == MAX_ATTEMPTS {
+                    break;
+                }
+            }
+        }
+    }
+
+    let final_error = last_error.unwrap_or_else(|| anyhow!("unknown in-process download failure"));
+    Err(anyhow!(
+        "download failed for {url} after {MAX_ATTEMPTS} in-process attempts: {final_error}"
+    ))
+}
+
+fn download_http_to_path_attempt<F>(url: &str, out_path: &Path, on_progress: &mut F) -> Result<()>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+    let mut client_builder = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS));
+    if let Some(request_timeout_secs) = std::env::var("CROSSPACK_DOWNLOAD_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|timeout| *timeout > 0)
+    {
+        client_builder =
+            client_builder.timeout(std::time::Duration::from_secs(request_timeout_secs));
+    }
+
+    let client = client_builder
+        .build()
+        .context("failed to initialize HTTP client")?;
+    let mut response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("download failed for {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download failed for {url}"))?;
+
+    let total_bytes = response.content_length();
+    on_progress(0, total_bytes);
+
+    let mut out = std::fs::File::create(out_path).with_context(|| {
+        format!(
+            "failed to create download part file: {}",
+            out_path.display()
+        )
+    })?;
+
+    let mut downloaded_bytes: u64 = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes_read = response
+            .read(&mut buffer)
+            .with_context(|| format!("download read failed for {url}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        out.write_all(&buffer[..bytes_read]).with_context(|| {
+            format!("failed to write download part file: {}", out_path.display())
+        })?;
+        downloaded_bytes += bytes_read as u64;
+        on_progress(downloaded_bytes, total_bytes);
+    }
+
+    Ok(())
+}
+
+fn download_http_external_to_path(url: &str, out_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if download_with_powershell(url, out_path).is_ok() {
+            return Ok(());
+        }
+    }
+
+    download_with_curl(url, out_path).or_else(|curl_err| {
+        download_with_wget(url, out_path).map_err(|wget_err| {
+            anyhow!("external download failed for {url}: curl: {curl_err}; wget: {wget_err}")
+        })
+    })
+}
+
 fn download_with_curl(url: &str, out_path: &Path) -> Result<()> {
     let mut command = Command::new("curl");
     command
@@ -1850,15 +2045,16 @@ fn download_with_curl(url: &str, out_path: &Path) -> Result<()> {
         .arg("-o")
         .arg(out_path)
         .arg(url);
-    run_command(&mut command, "curl download failed")
+    run_download_command(&mut command, "curl download failed")
 }
 
 fn download_with_wget(url: &str, out_path: &Path) -> Result<()> {
     let mut command = Command::new("wget");
     command.arg("-O").arg(out_path).arg(url);
-    run_command(&mut command, "wget download failed")
+    run_download_command(&mut command, "wget download failed")
 }
 
+#[cfg(windows)]
 fn download_with_powershell(url: &str, out_path: &Path) -> Result<()> {
     let mut command = Command::new("powershell");
     command.arg("-NoProfile").arg("-Command").arg(format!(
@@ -1866,10 +2062,10 @@ fn download_with_powershell(url: &str, out_path: &Path) -> Result<()> {
         escape_ps_single_quote(url),
         escape_ps_single_quote_path(out_path)
     ));
-    run_command(&mut command, "powershell download failed")
+    run_download_command(&mut command, "powershell download failed")
 }
 
-fn run_command(command: &mut Command, context_message: &str) -> Result<()> {
+fn run_download_command(command: &mut Command, context_message: &str) -> Result<()> {
     let output = command
         .output()
         .with_context(|| format!("{context_message}: command failed to start"))?;
@@ -1891,6 +2087,7 @@ fn escape_ps_single_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+#[cfg(windows)]
 fn escape_ps_single_quote_path(path: &Path) -> String {
     let mut os = OsString::new();
     os.push(path.as_os_str());

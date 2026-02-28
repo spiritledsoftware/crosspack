@@ -1,12 +1,5 @@
 use anstyle::{AnsiColor, Effects, Style};
 use indicatif::{HumanCount, ProgressBar, ProgressStyle};
-use std::time::{Duration, Instant};
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum OutputStyle {
-    Plain,
-    Rich,
-}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum UiMode {
@@ -156,22 +149,6 @@ fn section_style() -> Style {
         .effects(Effects::BOLD)
 }
 
-fn status_style(status: &str) -> Style {
-    match status {
-        "ok" => Style::new()
-            .fg_color(Some(AnsiColor::Green.into()))
-            .effects(Effects::BOLD),
-        "warn" => Style::new()
-            .fg_color(Some(AnsiColor::Yellow.into()))
-            .effects(Effects::BOLD),
-        "error" => Style::new()
-            .fg_color(Some(AnsiColor::Red.into()))
-            .effects(Effects::BOLD),
-        "step" => Style::new().fg_color(Some(AnsiColor::Cyan.into())),
-        _ => Style::new().fg_color(Some(AnsiColor::Blue.into())),
-    }
-}
-
 fn progress_label_style() -> Style {
     Style::new()
         .fg_color(Some(AnsiColor::BrightCyan.into()))
@@ -186,22 +163,6 @@ fn colorize(style: Style, text: &str) -> String {
     format!("{}{}{}", style.render(), text, style.render_reset())
 }
 
-fn resolve_ui_mode(stdout_is_tty: bool) -> UiMode {
-    if stdout_is_tty {
-        UiMode::Interactive
-    } else {
-        UiMode::Plain
-    }
-}
-
-fn resolve_output_style(stdout_is_tty: bool, _stderr_is_tty: bool) -> OutputStyle {
-    if stdout_is_tty {
-        OutputStyle::Rich
-    } else {
-        OutputStyle::Plain
-    }
-}
-
 fn ui_mode_from_style(style: OutputStyle) -> UiMode {
     match style {
         OutputStyle::Plain => UiMode::Plain,
@@ -209,36 +170,10 @@ fn ui_mode_from_style(style: OutputStyle) -> UiMode {
     }
 }
 
-fn current_output_style() -> OutputStyle {
-    let stdout_is_tty = std::io::stdout().is_terminal();
-    let stderr_is_tty = std::io::stderr().is_terminal();
-    let mode = resolve_ui_mode(stdout_is_tty);
-    let style = resolve_output_style(stdout_is_tty, stderr_is_tty);
-    debug_assert_eq!(ui_mode_from_style(style), mode);
-    style
-}
-
 fn render_section_header(mode: UiMode, title: &str) -> Option<String> {
     match mode {
         UiMode::Plain => None,
         UiMode::Interactive => Some(format!("== {title} ==")),
-    }
-}
-
-fn render_status_line(style: OutputStyle, status: &str, message: &str) -> String {
-    match style {
-        OutputStyle::Plain => message.to_string(),
-        OutputStyle::Rich => {
-            let badge = match status {
-                "ok" => "[OK]",
-                "warn" => "[WARN]",
-                "error" => "[ERR]",
-                "step" => "[..]",
-                _ => "[*]",
-            };
-            let badge_colored = colorize(status_style(status), badge);
-            format!("{badge_colored} {message}")
-        }
     }
 }
 
@@ -276,25 +211,4 @@ fn render_progress_line(
         counts,
         suffix
     ))
-}
-
-fn render_update_line(style: OutputStyle, line: &str) -> String {
-    if line.contains(": failed") {
-        return render_status_line(style, "error", line);
-    }
-    if line.contains(": updated") {
-        return render_status_line(style, "ok", line);
-    }
-    if line.contains(": up-to-date") {
-        return render_status_line(style, "step", line);
-    }
-    render_status_line(style, "step", line)
-}
-
-fn format_update_output_lines(report: &UpdateReport, style: OutputStyle) -> Vec<String> {
-    report
-        .lines
-        .iter()
-        .map(|line| render_update_line(style, line))
-        .collect()
 }

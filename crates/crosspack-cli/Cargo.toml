@@ -25,6 +25,7 @@ crosspack-security = { path = "../crosspack-security" }
 indicatif.workspace = true
 semver.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

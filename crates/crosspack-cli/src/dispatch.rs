@@ -36,7 +36,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             let escalation_policy = resolve_escalation_policy(escalation);
             let interaction_policy = install_interaction_policy(escalation_policy);
             let output_style = current_output_style();
-            let renderer = TerminalRenderer::from_style(output_style);
+            let install_progress_mode = current_install_progress_mode(output_style);
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -71,8 +71,6 @@ fn run_cli(cli: Cli) -> Result<()> {
                 return Ok(());
             }
 
-            renderer.print_section(&format!("Install {name}"));
-
             execute_with_transaction(&layout, "install", snapshot_id.as_deref(), |tx| {
                 let mut journal_seq = 1_u64;
                 let roots = vec![RootInstallRequest { name, requirement }];
@@ -101,12 +99,8 @@ fn run_cli(cli: Cli) -> Result<()> {
                 journal_seq += 1;
 
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
-                let total_packages = resolved.len() as u64;
-                let mut applied_packages = 0_u64;
-                let mut progress = renderer.start_progress("install", total_packages);
 
                 for package in &resolved {
-                    progress.set(applied_packages);
                     let snapshot_path =
                         capture_package_state_snapshot(&layout, &tx.txid, &package.manifest.name)?;
                     append_transaction_journal_entry(
@@ -148,13 +142,11 @@ fn run_cli(cli: Cli) -> Result<()> {
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload,
                             interaction_policy,
+                            install_progress_mode,
                         },
                     )?;
                     print_install_outcome(&outcome, output_style);
-                    applied_packages += 1;
-                    progress.set(applied_packages);
                 }
-                progress.finish_success();
 
                 append_transaction_journal_entry(
                     &layout,
