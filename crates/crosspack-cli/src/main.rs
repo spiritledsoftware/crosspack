@@ -598,6 +598,8 @@ include!("dispatch.rs");
 
 include!("metadata.rs");
 
+include!("render.rs");
+
 include!("command_flows.rs");
 
 include!("core_flows.rs");
