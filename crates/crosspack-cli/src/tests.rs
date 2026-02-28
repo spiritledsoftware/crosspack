@@ -5476,6 +5476,36 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn download_artifact_cache_hit_ignores_invalid_backend_env() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let cache_path = layout.prefix().join("download-cache-hit.bin");
+        std::fs::write(&cache_path, b"cached").expect("must write cache fixture");
+
+        let previous = std::env::var("CROSSPACK_DOWNLOAD_BACKEND").ok();
+        unsafe {
+            std::env::set_var("CROSSPACK_DOWNLOAD_BACKEND", "not-a-backend");
+        }
+
+        let status = download_artifact_with_progress(
+            "https://example.test/cached.bin",
+            &cache_path,
+            false,
+            |_downloaded, _total| {},
+        )
+        .expect("cache hit should short-circuit before backend validation");
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("CROSSPACK_DOWNLOAD_BACKEND", value) },
+            None => unsafe { std::env::remove_var("CROSSPACK_DOWNLOAD_BACKEND") },
+        }
+
+        assert_eq!(status, "cache-hit");
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn download_artifact_retries_in_process_download_before_succeeding() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");

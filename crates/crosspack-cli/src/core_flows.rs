@@ -1829,6 +1829,10 @@ where
 {
     const DOWNLOAD_BACKEND_ENV: &str = "CROSSPACK_DOWNLOAD_BACKEND";
 
+    if cache_path.exists() && !force_redownload {
+        return Ok("cache-hit");
+    }
+
     let backend = parse_download_backend_preference(
         std::env::var(DOWNLOAD_BACKEND_ENV).ok().as_deref(),
         DOWNLOAD_BACKEND_ENV,
@@ -1965,11 +1969,19 @@ where
     F: FnMut(u64, Option<u64>),
 {
     const CONNECT_TIMEOUT_SECS: u64 = 10;
-    const REQUEST_TIMEOUT_SECS: u64 = 120;
 
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+    let mut client_builder = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS));
+    if let Some(request_timeout_secs) = std::env::var("CROSSPACK_DOWNLOAD_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|timeout| *timeout > 0)
+    {
+        client_builder =
+            client_builder.timeout(std::time::Duration::from_secs(request_timeout_secs));
+    }
+
+    let client = client_builder
         .build()
         .context("failed to initialize HTTP client")?;
     let mut response = client
