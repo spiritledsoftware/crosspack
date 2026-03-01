@@ -3,14 +3,570 @@ fn ensure_upgrade_command_ready(layout: &PrefixLayout) -> Result<()> {
     ensure_no_active_transaction_for(layout, "upgrade")
 }
 
+fn run_outdated_command(layout: &PrefixLayout, registry_root: Option<&Path>) -> Result<()> {
+    let backend = select_metadata_backend(registry_root, layout)?;
+    let receipts = read_install_receipts(layout)?;
+    if receipts.is_empty() {
+        println!("No installed packages");
+        return Ok(());
+    }
+
+    let mut rows = Vec::new();
+    for receipt in receipts {
+        let installed_version = match Version::parse(&receipt.version) {
+            Ok(version) => version,
+            Err(_) => {
+                rows.push(format!(
+                    "{}\t{}\tunknown\tinvalid-installed-version",
+                    receipt.name, receipt.version
+                ));
+                continue;
+            }
+        };
+
+        let Some((source, manifests)) = backend.package_versions_with_source(&receipt.name)? else {
+            continue;
+        };
+        let Some(latest) = manifests.first() else {
+            continue;
+        };
+
+        if latest.version > installed_version {
+            rows.push(format!(
+                "{}\t{}\t{}\t{}",
+                receipt.name, receipt.version, latest.version, source
+            ));
+        }
+    }
+
+    rows.sort();
+    if rows.is_empty() {
+        println!("All installed packages are up to date");
+        return Ok(());
+    }
+
+    println!("name\tinstalled\tlatest\tsource");
+    for row in rows {
+        println!("{row}");
+    }
+    Ok(())
+}
+
+fn parse_receipt_dependency_name(entry: &str) -> Option<&str> {
+    entry.split_once('@').map(|(name, _)| name)
+}
+
+fn run_depends_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    let receipts = read_install_receipts(layout)?;
+    let Some(target) = receipts.iter().find(|receipt| receipt.name == name) else {
+        println!("No installed package found: {name}");
+        return Ok(());
+    };
+
+    let mut deps = target
+        .dependencies
+        .iter()
+        .filter_map(|entry| parse_receipt_dependency_name(entry))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    deps.sort();
+    deps.dedup();
+
+    if deps.is_empty() {
+        println!("{name} has no recorded dependencies");
+        return Ok(());
+    }
+
+    println!("{name} dependency_count={}", deps.len());
+    for dependency in deps {
+        println!("dependency {dependency}");
+    }
+    Ok(())
+}
+
+fn run_uses_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    let receipts = read_install_receipts(layout)?;
+    let mut users = Vec::new();
+    for receipt in receipts {
+        if receipt
+            .dependencies
+            .iter()
+            .filter_map(|entry| parse_receipt_dependency_name(entry))
+            .any(|dependency_name| dependency_name == name)
+        {
+            users.push(receipt.name);
+        }
+    }
+
+    users.sort();
+    users.dedup();
+
+    if users.is_empty() {
+        println!("{name} is not required by any installed package");
+        return Ok(());
+    }
+
+    println!("{name} reverse_dependency_count={}", users.len());
+    for user in users {
+        println!("required_by {user}");
+    }
+    Ok(())
+}
+
+fn run_why_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    let receipts = read_install_receipts(layout)?;
+    let receipt_map = receipts
+        .iter()
+        .map(|receipt| (receipt.name.clone(), receipt))
+        .collect::<HashMap<_, _>>();
+    let Some(target) = receipt_map.get(name) else {
+        println!("No installed package found: {name}");
+        return Ok(());
+    };
+
+    if target.install_reason == InstallReason::Root {
+        println!("{name} is installed as a root package");
+        return Ok(());
+    }
+
+    let mut roots = receipts
+        .iter()
+        .filter(|receipt| receipt.install_reason == InstallReason::Root)
+        .map(|receipt| receipt.name.clone())
+        .collect::<Vec<_>>();
+    roots.sort();
+
+    if let Some(path) = find_dependency_path_from_roots(name, &roots, &receipt_map) {
+        println!("dependency path: {}", path.join(" -> "));
+        return Ok(());
+    }
+
+    println!("no root dependency path found for {name}");
+    Ok(())
+}
+
+fn find_dependency_path_from_roots(
+    target: &str,
+    roots: &[String],
+    receipt_map: &HashMap<String, &InstallReceipt>,
+) -> Option<Vec<String>> {
+    let mut queue = std::collections::VecDeque::new();
+    for root in roots {
+        queue.push_back(vec![root.clone()]);
+    }
+
+    let mut visited = HashSet::new();
+    while let Some(path) = queue.pop_front() {
+        let current = path.last()?.clone();
+        if current == target {
+            return Some(path);
+        }
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+
+        let Some(receipt) = receipt_map.get(&current) else {
+            continue;
+        };
+        let mut dependencies = receipt
+            .dependencies
+            .iter()
+            .filter_map(|entry| parse_receipt_dependency_name(entry))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        dependencies.sort();
+        dependencies.dedup();
+
+        for dependency in dependencies {
+            let mut next_path = path.clone();
+            next_path.push(dependency);
+            queue.push_back(next_path);
+        }
+    }
+
+    None
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedServiceState {
+    Stopped,
+    Running,
+}
+
+impl ManagedServiceState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Running => "running",
+        }
+    }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "stopped" => Some(Self::Stopped),
+            "running" => Some(Self::Running),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedServiceRow {
+    name: String,
+    state: ManagedServiceState,
+}
+
+fn managed_services_state_dir(layout: &PrefixLayout) -> PathBuf {
+    layout.state_dir().join("services")
+}
+
+fn managed_service_state_path(layout: &PrefixLayout, name: &str) -> PathBuf {
+    managed_services_state_dir(layout).join(format!("{name}.service"))
+}
+
+fn validate_service_name(name: &str) -> Result<()> {
+    if !is_policy_token(name) {
+        return Err(anyhow!(
+            "invalid service name '{name}': use package-token grammar"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_service_package_installed(layout: &PrefixLayout, name: &str) -> Result<()> {
+    validate_service_name(name)?;
+    let installed = read_install_receipts(layout)?
+        .iter()
+        .any(|receipt| receipt.name == name);
+    if !installed {
+        return Err(anyhow!(
+            "No installed package found: {name}. Install it first with `crosspack install {name}`"
+        ));
+    }
+    Ok(())
+}
+
+fn read_managed_service_state(layout: &PrefixLayout, name: &str) -> Result<ManagedServiceState> {
+    validate_service_name(name)?;
+    let path = managed_service_state_path(layout, name);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManagedServiceState::Stopped);
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed reading service state file: {}", path.display()));
+        }
+    };
+
+    let mut parsed_state = None;
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some(value) = line.strip_prefix("state=") else {
+            return Err(anyhow!(
+                "invalid service state file format: {}",
+                path.display()
+            ));
+        };
+        let Some(state) = ManagedServiceState::from_str(value) else {
+            return Err(anyhow!(
+                "invalid service state '{value}' in {}",
+                path.display()
+            ));
+        };
+        if parsed_state.is_some() {
+            return Err(anyhow!(
+                "duplicate service state entries in {}",
+                path.display()
+            ));
+        }
+        parsed_state = Some(state);
+    }
+
+    parsed_state.ok_or_else(|| anyhow!("missing service state in {}", path.display()))
+}
+
+fn write_managed_service_state(
+    layout: &PrefixLayout,
+    name: &str,
+    state: ManagedServiceState,
+) -> Result<PathBuf> {
+    validate_service_name(name)?;
+    let state_dir = managed_services_state_dir(layout);
+    std::fs::create_dir_all(&state_dir).with_context(|| {
+        format!(
+            "failed creating service state directory: {}",
+            state_dir.display()
+        )
+    })?;
+
+    let path = managed_service_state_path(layout, name);
+    std::fs::write(&path, format!("state={}\n", state.as_str()))
+        .with_context(|| format!("failed writing service state file: {}", path.display()))?;
+    Ok(path)
+}
+
+fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServiceRow>> {
+    let installed = read_install_receipts(layout)?
+        .into_iter()
+        .map(|receipt| receipt.name)
+        .collect::<HashSet<_>>();
+
+    let state_root = managed_services_state_dir(layout);
+    let entries = match std::fs::read_dir(&state_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed reading services state directory: {}",
+                    state_root.display()
+                )
+            })
+        }
+    };
+
+    let mut rows = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed iterating services state directory: {}",
+                state_root.display()
+            )
+        })?;
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "failed reading service state entry metadata: {}",
+                entry.path().display()
+            )
+        })?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let Some(name) = file_name
+            .to_str()
+            .and_then(|value| value.strip_suffix(".service"))
+        else {
+            continue;
+        };
+
+        if !installed.contains(name) {
+            continue;
+        }
+
+        rows.push(ManagedServiceRow {
+            name: name.to_string(),
+            state: read_managed_service_state(layout, name)?,
+        });
+    }
+
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(rows)
+}
+
+fn run_service_status_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_service_package_installed(layout, name)?;
+    let state = read_managed_service_state(layout, name)?;
+    println!("service_state name={name} state={}", state.as_str());
+    Ok(())
+}
+
+fn run_service_start_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_service_package_installed(layout, name)?;
+    write_managed_service_state(layout, name, ManagedServiceState::Running)?;
+    println!("service_state name={name} state=running action=start");
+    Ok(())
+}
+
+fn run_service_stop_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_service_package_installed(layout, name)?;
+    write_managed_service_state(layout, name, ManagedServiceState::Stopped)?;
+    println!("service_state name={name} state=stopped action=stop");
+    Ok(())
+}
+
+fn run_service_restart_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_service_package_installed(layout, name)?;
+    write_managed_service_state(layout, name, ManagedServiceState::Running)?;
+    println!("service_state name={name} state=running action=restart");
+    Ok(())
+}
+
+fn run_services_command(layout: &PrefixLayout, command: ServicesCommands) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    match command {
+        ServicesCommands::List => {
+            let rows = collect_managed_service_rows(layout)?;
+            if rows.is_empty() {
+                println!("No managed services");
+            } else {
+                for row in rows {
+                    println!("{} {}", row.name, row.state.as_str());
+                }
+            }
+        }
+        ServicesCommands::Status { name } => run_service_status_command(layout, &name)?,
+        ServicesCommands::Start { name } => run_service_start_command(layout, &name)?,
+        ServicesCommands::Stop { name } => run_service_stop_command(layout, &name)?,
+        ServicesCommands::Restart { name } => run_service_restart_command(layout, &name)?,
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheFileEntry {
+    path: PathBuf,
+    size: u64,
+}
+
+fn run_cache_command(layout: &PrefixLayout, command: CacheCommands) -> Result<()> {
+    layout.ensure_base_dirs()?;
+    match command {
+        CacheCommands::List => run_cache_list_command(layout),
+        CacheCommands::Prune => run_cache_prune_command(layout),
+        CacheCommands::Gc => run_cache_gc_command(layout),
+    }
+}
+
+fn run_cache_list_command(layout: &PrefixLayout) -> Result<()> {
+    let cache_root = layout.artifacts_cache_dir();
+    let mut entries = collect_cache_files(&cache_root)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+    if entries.is_empty() {
+        println!("cache is empty");
+        return Ok(());
+    }
+
+    println!("path\tbytes");
+    for entry in entries {
+        let relative = entry
+            .path
+            .strip_prefix(layout.prefix())
+            .unwrap_or(&entry.path)
+            .display()
+            .to_string();
+        println!("{}\t{}", relative, entry.size);
+    }
+    Ok(())
+}
+
+fn run_cache_prune_command(layout: &PrefixLayout) -> Result<()> {
+    let cache_root = layout.artifacts_cache_dir();
+    let entries = collect_cache_files(&cache_root)?;
+    let removed_files = entries.len();
+    let removed_bytes = entries.iter().map(|entry| entry.size).sum::<u64>();
+
+    if cache_root.exists() {
+        fs::remove_dir_all(&cache_root).with_context(|| {
+            format!("failed to remove cache directory: {}", cache_root.display())
+        })?;
+    }
+    fs::create_dir_all(&cache_root).with_context(|| {
+        format!(
+            "failed to recreate cache directory: {}",
+            cache_root.display()
+        )
+    })?;
+
+    println!("cache prune removed_files={removed_files} removed_bytes={removed_bytes}");
+    Ok(())
+}
+
+fn run_cache_gc_command(layout: &PrefixLayout) -> Result<()> {
+    let cache_root = layout.artifacts_cache_dir();
+    let mut entries = collect_cache_files(&cache_root)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let receipts = read_install_receipts(layout)?;
+    let referenced = receipts
+        .iter()
+        .filter_map(|receipt| receipt.cache_path.as_deref())
+        .filter_map(|cache_path| safe_artifact_cache_path(layout, cache_path))
+        .collect::<HashSet<_>>();
+
+    let mut removed_files = 0_u64;
+    let mut removed_bytes = 0_u64;
+    for entry in entries {
+        if referenced.contains(&entry.path) {
+            continue;
+        }
+        remove_file_if_exists(&entry.path)
+            .with_context(|| format!("failed to remove cache file: {}", entry.path.display()))?;
+        removed_files += 1;
+        removed_bytes += entry.size;
+    }
+
+    let kept_files = referenced.iter().filter(|path| path.exists()).count();
+    println!(
+        "cache gc removed_files={} removed_bytes={} kept_files={}",
+        removed_files, removed_bytes, kept_files
+    );
+    Ok(())
+}
+
+fn safe_artifact_cache_path(layout: &PrefixLayout, cache_path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(cache_path);
+    if !path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+    if !path.starts_with(layout.artifacts_cache_dir()) {
+        return None;
+    }
+    Some(path)
+}
+
+fn collect_cache_files(cache_root: &Path) -> Result<Vec<CacheFileEntry>> {
+    if !cache_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    collect_cache_files_recursive(cache_root, &mut entries)?;
+    Ok(entries)
+}
+
+fn collect_cache_files_recursive(
+    cache_root: &Path,
+    entries: &mut Vec<CacheFileEntry>,
+) -> Result<()> {
+    for item in fs::read_dir(cache_root)
+        .with_context(|| format!("failed to read cache directory: {}", cache_root.display()))?
+    {
+        let item = item?;
+        let path = item.path();
+        let metadata = item.metadata()?;
+        if metadata.is_dir() {
+            collect_cache_files_recursive(&path, entries)?;
+            continue;
+        }
+        if metadata.is_file() {
+            entries.push(CacheFileEntry {
+                path,
+                size: metadata.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn run_upgrade_command(
     layout: &PrefixLayout,
     registry_root: Option<&Path>,
     spec: Option<String>,
     dry_run: bool,
+    explain: bool,
     provider_overrides: &BTreeMap<String, String>,
     interaction_policy: InstallInteractionPolicy,
 ) -> Result<()> {
+    ensure_explain_requires_dry_run("upgrade", dry_run, explain)?;
     let output_style = current_output_style();
     let renderer = TerminalRenderer::from_style(output_style);
     ensure_upgrade_command_ready(layout)?;
@@ -29,6 +585,7 @@ fn run_upgrade_command(
 
     if dry_run {
         let mut planned_changes = Vec::new();
+        let mut explainability = DependencyPolicyExplainability::default();
 
         match spec.as_deref() {
             Some(single) => {
@@ -49,12 +606,19 @@ fn run_upgrade_command(
                     &roots,
                     installed_receipt.target.as_deref(),
                     provider_overrides,
+                    false,
                 )?;
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
                 for package in &resolved {
                     validate_install_preflight_for_resolved(layout, package, &receipts)?;
                 }
                 planned_changes.extend(build_planned_package_changes(&resolved, &receipts)?);
+                if explain {
+                    merge_dependency_policy_explainability(
+                        &mut explainability,
+                        build_dependency_policy_explainability(&resolved, &receipts, &roots)?,
+                    );
+                }
             }
             None => {
                 let plans = build_upgrade_plans(&receipts);
@@ -73,9 +637,20 @@ fn run_upgrade_command(
                         plan.target.as_deref(),
                         provider_overrides,
                         false,
+                        false,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
                     resolved_dependency_tokens.extend(plan_tokens);
+                    if explain {
+                        merge_dependency_policy_explainability(
+                            &mut explainability,
+                            build_dependency_policy_explainability(
+                                &resolved,
+                                &receipts,
+                                &plan.roots,
+                            )?,
+                        );
+                    }
                     grouped_resolved.push(resolved);
                 }
 
@@ -106,7 +681,11 @@ fn run_upgrade_command(
         }
 
         let preview = build_transaction_preview("upgrade", &planned_changes);
-        for line in render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun) {
+        for line in render_dry_run_output_lines(
+            &preview,
+            TransactionPreviewMode::DryRun,
+            explain.then_some(&explainability),
+        ) {
             println!("{line}");
         }
         return Ok(());
@@ -141,6 +720,7 @@ fn run_upgrade_command(
                     &roots,
                     installed_receipt.target.as_deref(),
                     provider_overrides,
+                    false,
                 )?;
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
@@ -269,6 +849,7 @@ fn run_upgrade_command(
                         &plan.roots,
                         plan.target.as_deref(),
                         provider_overrides,
+                        false,
                         false,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;

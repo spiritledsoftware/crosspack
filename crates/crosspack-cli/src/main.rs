@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -39,6 +39,7 @@ use crosspack_registry::{
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
 use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Parser, Debug)]
@@ -454,6 +455,10 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
+        explain: bool,
+        #[arg(long)]
+        build_from_source: bool,
+        #[arg(long)]
         force_redownload: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
@@ -464,6 +469,8 @@ enum Commands {
         spec: Option<String>,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long)]
+        explain: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
         #[command(flatten)]
@@ -486,6 +493,28 @@ enum Commands {
     List,
     Pin {
         spec: String,
+    },
+    Outdated,
+    Depends {
+        name: String,
+    },
+    Uses {
+        name: String,
+    },
+    Why {
+        name: String,
+    },
+    Services {
+        #[command(subcommand)]
+        command: ServicesCommands,
+    },
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommands,
     },
     Registry {
         #[command(subcommand)]
@@ -531,6 +560,44 @@ enum RegistryCommands {
         name: String,
         #[arg(long)]
         purge_cache: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheCommands {
+    List,
+    Prune,
+    Gc,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServicesCommands {
+    List,
+    Status { name: String },
+    Start { name: String },
+    Stop { name: String },
+    Restart { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum BundleCommands {
+    Export {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Apply {
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        explain: bool,
+        #[arg(long)]
+        build_from_source: bool,
+        #[arg(long)]
+        force_redownload: bool,
+        #[arg(long = "provider", value_name = "capability=package")]
+        provider: Vec<String>,
     },
 }
 
@@ -603,5 +670,7 @@ include!("render.rs");
 include!("command_flows.rs");
 
 include!("core_flows.rs");
+
+include!("bundle_flows.rs");
 
 include!("tests.rs");

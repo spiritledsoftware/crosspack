@@ -10,6 +10,7 @@ use crate::artifact::Artifact;
 pub struct PackageManifest {
     pub name: String,
     pub version: Version,
+    pub description: Option<String>,
     pub license: Option<String>,
     pub homepage: Option<String>,
     #[serde(default)]
@@ -22,6 +23,20 @@ pub struct PackageManifest {
     pub dependencies: BTreeMap<String, VersionReq>,
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
+    #[serde(default)]
+    pub source_build: Option<SourceBuildMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceBuildMetadata {
+    #[serde(alias = "source_url")]
+    pub url: String,
+    pub build_system: String,
+    #[serde(default)]
+    pub build_commands: Vec<String>,
+    #[serde(default)]
+    pub install_commands: Vec<String>,
 }
 
 impl PackageManifest {

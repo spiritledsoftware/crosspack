@@ -10,9 +10,20 @@ Each package version is represented by a TOML manifest stored in the registry in
 
 ## Optional Fields
 
+- `description`
 - `license`
 - `homepage`
 - `dependencies`: map of package name to semver constraint.
+- `source_build` (non-GA guardrail metadata): optional source-build metadata block used for explicit source-build policy signaling.
+
+### Source Build Metadata (`source_build`)
+
+`source_build` is parsed and validated, but end-to-end source-build execution is currently guarded (non-GA).
+
+- `url`: source archive or source tree URL.
+- `build_system`: build-system token (`cargo`, `cmake`, etc.).
+- `build_commands` (optional): deterministic command array used for build steps.
+- `install_commands` (optional): deterministic command array used for install steps.
 
 ## Artifact Fields
 

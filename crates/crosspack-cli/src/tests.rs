@@ -147,6 +147,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             &BTreeMap::new(),
             InstallInteractionPolicy::default(),
         )
@@ -3739,6 +3740,49 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn cli_parses_install_with_dry_run_explain_flag() {
+        let cli =
+            Cli::try_parse_from(["crosspack", "install", "ripgrep", "--dry-run", "--explain"])
+                .expect("command must parse");
+
+        match cli.command {
+            Commands::Install {
+                dry_run, explain, ..
+            } => {
+                assert!(dry_run);
+                assert!(explain);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_explain_without_dry_run_is_rejected() {
+        let cli = Cli::try_parse_from(["crosspack", "install", "ripgrep", "--explain"])
+            .expect("command must parse");
+        let err = run_cli(cli).expect_err("--explain must require --dry-run");
+        assert_eq!(
+            err.to_string(),
+            "--explain requires --dry-run for 'install'"
+        );
+    }
+
+    #[test]
+    fn cli_parses_install_with_build_from_source_flag() {
+        let cli = Cli::try_parse_from(["crosspack", "install", "ripgrep", "--build-from-source"])
+            .expect("command must parse");
+
+        match cli.command {
+            Commands::Install {
+                build_from_source, ..
+            } => {
+                assert!(build_from_source);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn cli_rejects_install_with_conflicting_escalation_flags() {
         let err = Cli::try_parse_from([
             "crosspack",
@@ -3804,6 +3848,118 @@ ripgrep-legacy = "*"
                 assert!(escalation.non_interactive);
                 assert!(escalation.allow_escalation);
                 assert!(!escalation.no_escalation);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_with_dry_run_explain_flag() {
+        let cli =
+            Cli::try_parse_from(["crosspack", "upgrade", "ripgrep", "--dry-run", "--explain"])
+                .expect("command must parse");
+
+        match cli.command {
+            Commands::Upgrade {
+                dry_run, explain, ..
+            } => {
+                assert!(dry_run);
+                assert!(explain);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_bundle_export_with_optional_output_flag() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "bundle",
+            "export",
+            "--output",
+            "state/export.toml",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Bundle {
+                command: BundleCommands::Export { output },
+            } => {
+                assert_eq!(output, Some(PathBuf::from("state/export.toml")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_bundle_apply_with_flags() {
+        let cli = Cli::try_parse_from([
+            "crosspack",
+            "bundle",
+            "apply",
+            "--file",
+            "state/bundle.toml",
+            "--dry-run",
+            "--force-redownload",
+            "--provider",
+            "c-compiler=clang",
+            "--provider",
+            "rust-toolchain=rustup",
+        ])
+        .expect("command must parse");
+
+        match cli.command {
+            Commands::Bundle {
+                command:
+                    BundleCommands::Apply {
+                        file,
+                        dry_run,
+                        force_redownload,
+                        provider,
+                        ..
+                    },
+            } => {
+                assert_eq!(file, Some(PathBuf::from("state/bundle.toml")));
+                assert!(dry_run);
+                assert!(force_redownload);
+                assert_eq!(provider, vec!["c-compiler=clang", "rust-toolchain=rustup"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_bundle_apply_with_dry_run_explain_flag() {
+        let cli = Cli::try_parse_from(["crosspack", "bundle", "apply", "--dry-run", "--explain"])
+            .expect("command must parse");
+
+        match cli.command {
+            Commands::Bundle {
+                command:
+                    BundleCommands::Apply {
+                        dry_run, explain, ..
+                    },
+            } => {
+                assert!(dry_run);
+                assert!(explain);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_bundle_apply_with_build_from_source_flag() {
+        let cli = Cli::try_parse_from(["crosspack", "bundle", "apply", "--build-from-source"])
+            .expect("command must parse");
+
+        match cli.command {
+            Commands::Bundle {
+                command:
+                    BundleCommands::Apply {
+                        build_from_source, ..
+                    },
+            } => {
+                assert!(build_from_source);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -3957,6 +4113,376 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn cli_parses_outdated_subcommand() {
+        let cli = Cli::try_parse_from(["crosspack", "outdated"]).expect("command must parse");
+        assert!(matches!(cli.command, Commands::Outdated));
+    }
+
+    #[test]
+    fn cli_parses_depends_subcommand() {
+        let cli =
+            Cli::try_parse_from(["crosspack", "depends", "ripgrep"]).expect("command must parse");
+        match cli.command {
+            Commands::Depends { name } => assert_eq!(name, "ripgrep"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_uses_subcommand() {
+        let cli = Cli::try_parse_from(["crosspack", "uses", "pcre2"]).expect("command must parse");
+        match cli.command {
+            Commands::Uses { name } => assert_eq!(name, "pcre2"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_why_subcommand() {
+        let cli = Cli::try_parse_from(["crosspack", "why", "pcre2"]).expect("command parses");
+        match cli.command {
+            Commands::Why { name } => assert_eq!(name, "pcre2"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cache_subcommands() {
+        let list = Cli::try_parse_from(["crosspack", "cache", "list"]).expect("list parses");
+        match list.command {
+            Commands::Cache {
+                command: CacheCommands::List,
+            } => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let prune = Cli::try_parse_from(["crosspack", "cache", "prune"]).expect("prune parses");
+        match prune.command {
+            Commands::Cache {
+                command: CacheCommands::Prune,
+            } => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let gc = Cli::try_parse_from(["crosspack", "cache", "gc"]).expect("gc parses");
+        match gc.command {
+            Commands::Cache {
+                command: CacheCommands::Gc,
+            } => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_subcommands() {
+        let list = Cli::try_parse_from(["crosspack", "services", "list"]).expect("list parses");
+        match list.command {
+            Commands::Services {
+                command: ServicesCommands::List,
+            } => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let status = Cli::try_parse_from(["crosspack", "services", "status", "demo"])
+            .expect("status parses");
+        match status.command {
+            Commands::Services {
+                command: ServicesCommands::Status { name },
+            } => assert_eq!(name, "demo"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let start =
+            Cli::try_parse_from(["crosspack", "services", "start", "demo"]).expect("start parses");
+        match start.command {
+            Commands::Services {
+                command: ServicesCommands::Start { name },
+            } => assert_eq!(name, "demo"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let stop =
+            Cli::try_parse_from(["crosspack", "services", "stop", "demo"]).expect("stop parses");
+        match stop.command {
+            Commands::Services {
+                command: ServicesCommands::Stop { name },
+            } => assert_eq!(name, "demo"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let restart = Cli::try_parse_from(["crosspack", "services", "restart", "demo"])
+            .expect("restart parses");
+        match restart.command {
+            Commands::Services {
+                command: ServicesCommands::Restart { name },
+            } => assert_eq!(name, "demo"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_dependency_path_from_roots_returns_shortest_root_path() {
+        let root_a = InstallReceipt {
+            name: "root-a".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["shared@1.0.0".to_string()],
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let shared = InstallReceipt {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["leaf@1.0.0".to_string()],
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let leaf = InstallReceipt {
+            name: "leaf".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Dependency,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+
+        let receipt_map = HashMap::from([
+            (root_a.name.clone(), &root_a),
+            (shared.name.clone(), &shared),
+            (leaf.name.clone(), &leaf),
+        ]);
+        let roots = vec!["root-a".to_string()];
+
+        let path = find_dependency_path_from_roots("leaf", &roots, &receipt_map)
+            .expect("dependency path should exist");
+        assert_eq!(path, vec!["root-a", "shared", "leaf"]);
+    }
+
+    #[test]
+    fn safe_artifact_cache_path_rejects_parent_traversal() {
+        let layout = test_layout();
+        let invalid = format!("{}/../escape.bin", layout.artifacts_cache_dir().display());
+        assert_eq!(safe_artifact_cache_path(&layout, &invalid), None);
+    }
+
+    #[test]
+    fn safe_artifact_cache_path_accepts_absolute_artifacts_path() {
+        let layout = test_layout();
+        let valid = layout
+            .artifacts_cache_dir()
+            .join("ripgrep/14.1.0/x86_64-unknown-linux-gnu/artifact.tar.zst");
+        let resolved = safe_artifact_cache_path(&layout, &valid.display().to_string())
+            .expect("path should be accepted");
+        assert_eq!(resolved, valid);
+    }
+
+    #[test]
+    fn managed_service_state_transitions_are_deterministic() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        assert_eq!(
+            read_managed_service_state(&layout, "demo").expect("must read default state"),
+            ManagedServiceState::Stopped
+        );
+
+        run_service_start_command(&layout, "demo").expect("start must succeed");
+        assert_eq!(
+            read_managed_service_state(&layout, "demo").expect("must read running state"),
+            ManagedServiceState::Running
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed_service_state_path(&layout, "demo"))
+                .expect("must read running state file"),
+            "state=running\n"
+        );
+
+        run_service_stop_command(&layout, "demo").expect("stop must succeed");
+        assert_eq!(
+            read_managed_service_state(&layout, "demo").expect("must read stopped state"),
+            ManagedServiceState::Stopped
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed_service_state_path(&layout, "demo"))
+                .expect("must read stopped state file"),
+            "state=stopped\n"
+        );
+
+        run_service_restart_command(&layout, "demo").expect("restart must succeed");
+        assert_eq!(
+            read_managed_service_state(&layout, "demo").expect("must read restarted state"),
+            ManagedServiceState::Running
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed_service_state_path(&layout, "demo"))
+                .expect("must read restarted state file"),
+            "state=running\n"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn service_commands_require_installed_receipt_presence() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let err = run_service_start_command(&layout, "missing")
+            .expect_err("service start should require installed package receipt");
+        let message = err.to_string();
+        assert!(message.contains("No installed package found: missing"));
+        assert!(message.contains("crosspack install missing"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn managed_services_list_rows_are_sorted_and_filtered_to_installed_packages() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        for name in ["bravo", "alpha", "charlie"] {
+            write_install_receipt(
+                &layout,
+                &InstallReceipt {
+                    name: name.to_string(),
+                    version: "1.0.0".to_string(),
+                    dependencies: Vec::new(),
+                    target: Some("x86_64-unknown-linux-gnu".to_string()),
+                    artifact_url: None,
+                    artifact_sha256: None,
+                    cache_path: None,
+                    exposed_bins: Vec::new(),
+                    exposed_completions: Vec::new(),
+                    snapshot_id: None,
+                    install_mode: InstallMode::Managed,
+                    install_reason: InstallReason::Root,
+                    install_status: "installed".to_string(),
+                    installed_at_unix: 1,
+                },
+            )
+            .expect("must write receipt");
+        }
+
+        write_managed_service_state(&layout, "charlie", ManagedServiceState::Running)
+            .expect("must write running service state");
+        write_managed_service_state(&layout, "alpha", ManagedServiceState::Stopped)
+            .expect("must write stopped service state");
+        write_managed_service_state(&layout, "ghost", ManagedServiceState::Running)
+            .expect("must write non-installed service state");
+
+        let rows =
+            collect_managed_service_rows(&layout).expect("must collect managed service rows");
+        let rendered = rows
+            .iter()
+            .map(|row| format!("{} {}", row.name, row.state.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, vec!["alpha stopped", "charlie running"]);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn service_commands_accept_plus_in_package_name() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "cpp+tool".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
+        run_service_start_command(&layout, "cpp+tool").expect("start must succeed");
+        assert_eq!(
+            read_managed_service_state(&layout, "cpp+tool").expect("must read running state"),
+            ManagedServiceState::Running
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn read_managed_service_state_rejects_duplicate_state_entries() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let path = managed_service_state_path(&layout, "demo");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("must create service state dir");
+        }
+        std::fs::write(&path, "state=running\nstate=stopped\n")
+            .expect("must write duplicate service state file");
+
+        let err = read_managed_service_state(&layout, "demo")
+            .expect_err("duplicate state lines should fail");
+        assert!(err.to_string().contains("duplicate service state entries"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn build_self_update_install_args_includes_registry_root_and_flags() {
         let registry_root = PathBuf::from("/tmp/registry");
         let args = build_self_update_install_args(
@@ -4078,6 +4604,204 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn dry_run_output_without_explain_matches_existing_contract_lines() {
+        let preview = build_transaction_preview(
+            "upgrade",
+            &[PlannedPackageChange {
+                name: "tool".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                new_version: "2.0.0".to_string(),
+                old_version: Some("1.0.0".to_string()),
+                replacement_removals: Vec::new(),
+            }],
+        );
+
+        let contract_lines =
+            render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        let without_explain =
+            render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(without_explain, contract_lines);
+    }
+
+    #[test]
+    fn explainability_lines_are_deterministic_for_provider_replacement_and_conflicts() {
+        let tool_manifest = PackageManifest::from_toml_str(
+            r#"
+name = "tool"
+version = "1.0.0"
+
+[dependencies]
+c-compiler = "*"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/tool-1.0.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+        let provider_manifest = PackageManifest::from_toml_str(
+            r#"
+name = "clang"
+version = "18.0.0"
+provides = ["c-compiler"]
+
+[conflicts]
+gcc = "*"
+legacy-cc = "<2.0.0"
+
+[replaces]
+old-cc = "<2.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/clang-18.0.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+
+        let resolved = vec![
+            ResolvedInstall {
+                artifact: provider_manifest.artifacts[0].clone(),
+                manifest: provider_manifest,
+                resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+                archive_type: ArchiveType::TarZst,
+            },
+            ResolvedInstall {
+                artifact: tool_manifest.artifacts[0].clone(),
+                manifest: tool_manifest,
+                resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+                archive_type: ArchiveType::TarZst,
+            },
+        ];
+        let receipts = vec![InstallReceipt {
+            name: "old-cc".to_string(),
+            version: "1.5.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        }];
+        let roots = vec![RootInstallRequest {
+            name: "tool".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+
+        let explainability = build_dependency_policy_explainability(&resolved, &receipts, &roots)
+            .expect("must build explainability");
+        let lines = render_dependency_policy_explainability_lines(&explainability);
+
+        assert_eq!(
+            lines,
+            vec![
+                "explain_provider capability=c-compiler selected=clang@18.0.0".to_string(),
+                "explain_replacement selected=clang@18.0.0 removes=old-cc@1.5.0 declared=<2.0.0"
+                    .to_string(),
+                "explain_conflict selected=clang@18.0.0 conflicts=gcc(*)".to_string(),
+                "explain_conflict selected=clang@18.0.0 conflicts=legacy-cc(<2.0.0)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn explainability_includes_multiple_provider_substitutions_for_same_capability() {
+        let app_manifest = PackageManifest::from_toml_str(
+            r#"
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+c-compiler = "*"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+        let clang_manifest = PackageManifest::from_toml_str(
+            r#"
+name = "clang"
+version = "18.0.0"
+provides = ["c-compiler"]
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/clang-18.0.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+        let zigcc_manifest = PackageManifest::from_toml_str(
+            r#"
+name = "zigcc"
+version = "0.12.0"
+provides = ["c-compiler"]
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/zigcc-0.12.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+
+        let resolved = vec![
+            ResolvedInstall {
+                artifact: app_manifest.artifacts[0].clone(),
+                manifest: app_manifest,
+                resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+                archive_type: ArchiveType::TarZst,
+            },
+            ResolvedInstall {
+                artifact: zigcc_manifest.artifacts[0].clone(),
+                manifest: zigcc_manifest,
+                resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+                archive_type: ArchiveType::TarZst,
+            },
+            ResolvedInstall {
+                artifact: clang_manifest.artifacts[0].clone(),
+                manifest: clang_manifest,
+                resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+                archive_type: ArchiveType::TarZst,
+            },
+        ];
+
+        let roots = vec![RootInstallRequest {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+        let explainability = build_dependency_policy_explainability(&resolved, &[], &roots)
+            .expect("must build explainability");
+        let lines = render_dependency_policy_explainability_lines(&explainability);
+        assert!(lines
+            .contains(&"explain_provider capability=c-compiler selected=clang@18.0.0".to_string()));
+        assert!(lines
+            .contains(&"explain_provider capability=c-compiler selected=zigcc@0.12.0".to_string()));
+    }
+
+    #[test]
+    fn explain_requires_dry_run_error_is_actionable() {
+        let err = ensure_explain_requires_dry_run("install", false, true)
+            .expect_err("--explain without --dry-run should fail");
+        assert_eq!(
+            err.to_string(),
+            "--explain requires --dry-run for 'install'"
+        );
+    }
+
+    #[test]
     fn transaction_preview_omits_multi_package_flag_when_no_mutations() {
         let preview = build_transaction_preview(
             "upgrade",
@@ -4105,6 +4829,196 @@ ripgrep-legacy = "*"
             "transaction_summary adds=0 removals=0 replacements=0 transitions=0"
         );
         assert_eq!(lines[2], "risk_flags=none");
+    }
+
+    #[test]
+    fn bundle_export_document_orders_roots_and_pins_deterministically() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "zeta".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 2,
+            },
+        )
+        .expect("must write zeta receipt");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "alpha".to_string(),
+                version: "3.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("aarch64-apple-darwin".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 3,
+            },
+        )
+        .expect("must write alpha receipt");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "dep".to_string(),
+                version: "2.5.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Dependency,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write dependency receipt");
+        write_pin(&layout, "zeta", "^1").expect("must write zeta pin");
+
+        let bundle = build_export_bundle_document(&layout).expect("must build bundle");
+        assert_eq!(bundle.roots.len(), 2);
+        assert_eq!(bundle.roots[0].name, "alpha");
+        assert_eq!(
+            bundle.roots[0].target.as_deref(),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(bundle.roots[0].requirement.as_deref(), Some("=3.0.0"));
+        assert_eq!(bundle.roots[1].name, "zeta");
+        assert_eq!(
+            bundle.roots[1].target.as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(bundle.roots[1].requirement.as_deref(), Some("^1"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn parse_bundle_document_rejects_unknown_fields() {
+        let raw = r#"
+format = "crosspack.bundle"
+version = 1
+unexpected = "value"
+
+[[roots]]
+name = "ripgrep"
+requirement = "^14"
+"#;
+
+        let err = parse_bundle_document(raw).expect_err("unknown fields should be rejected");
+        let rendered = err
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            rendered.contains("unknown field") && rendered.contains("unexpected"),
+            "unexpected parse error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bundle_apply_group_plans_reject_cross_target_overlap() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        write_signed_test_manifest(&layout, "official", "ripgrep", "14.1.0", None, None, &[]);
+
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let bundle = BundleDocument {
+            format: BUNDLE_FORMAT_MARKER.to_string(),
+            version: BUNDLE_FORMAT_VERSION,
+            roots: vec![
+                BundleRoot {
+                    name: "ripgrep".to_string(),
+                    target: None,
+                    requirement: Some("^14".to_string()),
+                },
+                BundleRoot {
+                    name: "ripgrep".to_string(),
+                    target: Some("x86_64-unknown-linux-gnu".to_string()),
+                    requirement: Some("^14".to_string()),
+                },
+            ],
+            snapshot_context: None,
+        };
+
+        let err =
+            build_bundle_apply_group_plans(&layout, &backend, &bundle, &BTreeMap::new(), false)
+                .expect_err("overlap across target groups must fail");
+        assert!(
+            err.to_string()
+                .contains("cannot safely process package 'ripgrep'"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn bundle_apply_dry_run_preview_includes_stable_transaction_keys() {
+        let preview = build_transaction_preview(
+            "bundle-apply",
+            &[PlannedPackageChange {
+                name: "tool".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                new_version: "1.2.3".to_string(),
+                old_version: None,
+                replacement_removals: Vec::new(),
+            }],
+        );
+
+        let first = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+        let second = render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun);
+
+        assert_eq!(first, second);
+        assert!(first
+            .iter()
+            .any(|line| line.starts_with("transaction_preview ")));
+        assert!(first
+            .iter()
+            .any(|line| line.starts_with("transaction_summary ")));
+        assert!(first.iter().any(|line| line.starts_with("risk_flags=")));
+        assert!(first.iter().any(|line| line.starts_with("change_add ")));
+    }
+
+    #[test]
+    fn bundle_apply_with_missing_file_returns_actionable_error() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let missing = layout.prefix().join("missing-bundle.toml");
+        let err = load_bundle_document_from_path(&missing)
+            .expect_err("missing file should return actionable error");
+        let rendered = err.to_string();
+        assert!(rendered.contains("bundle file not found"));
+        assert!(rendered.contains(missing.to_string_lossy().as_ref()));
+        assert!(rendered.contains("--file <path>"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
@@ -4426,6 +5340,7 @@ old-cc = "<2.0.0"
         assert_eq!(lines[2], "  Provides: c-compiler, cc");
         assert_eq!(lines[3], "  Conflicts: legacy-cc(*)");
         assert_eq!(lines[4], "  Replaces: old-cc(<2.0.0)");
+        assert_eq!(lines[5], "  Policy: provides=2 conflicts=1 replaces=1");
     }
 
     #[test]
@@ -4994,6 +5909,48 @@ old-cc = "<2.0.0"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn best_available_short_description_prefers_manifest_description() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "ripgrep"
+version = "14.1.0"
+description = "Fast line-oriented search tool"
+license = "MIT"
+homepage = "https://ripgrep.example.test"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/ripgrep.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+
+        let summary = best_available_short_description(&manifest);
+        assert_eq!(summary.as_deref(), Some("Fast line-oriented search tool"));
+    }
+
+    #[test]
+    fn best_available_short_description_sanitizes_tab_and_newline() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "ripgrep"
+version = "14.1.0"
+description = "Fast\tline\nsearch"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/ripgrep.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+
+        let summary = best_available_short_description(&manifest);
+        assert_eq!(summary.as_deref(), Some("Fast line search"));
     }
 
     #[test]
@@ -5952,6 +6909,94 @@ old-cc = "<2.0.0"
         run_uninstall_command(&layout, "demo".to_string()).expect("must uninstall package");
 
         assert!(!layout.gui_native_state_path("demo").exists());
+    }
+
+    #[test]
+    fn build_from_source_flag_returns_not_supported_error_text() {
+        let err = ensure_build_from_source_not_supported("install", true)
+            .expect_err("build-from-source should fail closed until implemented");
+        assert_eq!(
+            err.to_string(),
+            "source builds are not yet supported; remove --build-from-source and use a target with published binary artifacts"
+        );
+    }
+
+    #[test]
+    fn install_build_from_source_is_rejected_at_command_entrypoint() {
+        let cli = Cli::try_parse_from(["crosspack", "install", "demo", "--build-from-source"])
+            .expect("command must parse");
+        let err = run_cli(cli).expect_err("build-from-source must be rejected before install");
+        assert!(err
+            .to_string()
+            .contains("source builds are not yet supported"));
+    }
+
+    #[test]
+    fn bundle_apply_build_from_source_is_rejected_at_command_entrypoint() {
+        let cli = Cli::try_parse_from(["crosspack", "bundle", "apply", "--build-from-source"])
+            .expect("command must parse");
+        let err = run_cli(cli).expect_err("build-from-source must be rejected before bundle apply");
+        assert!(err
+            .to_string()
+            .contains("source builds are not yet supported"));
+    }
+
+    #[test]
+    fn source_build_metadata_requires_build_from_source_flag_when_binary_artifact_missing() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "aarch64-apple-darwin"
+url = "https://example.test/demo-1.0.0-aarch64.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/demo-1.0.0-src.tar.gz"
+build_system = "cargo"
+build_commands = ["cargo", "build", "--release"]
+install_commands = ["cargo", "install", "--path", "."]
+"#,
+        )
+        .expect("manifest should parse");
+
+        let err = select_artifact_for_target(&manifest, "x86_64-unknown-linux-gnu", false)
+            .expect_err("source-build gate should require explicit opt-in");
+        assert_eq!(
+            err.to_string(),
+            "source build required for demo 1.0.0 on target x86_64-unknown-linux-gnu: no binary artifact published; source builds are not yet supported"
+        );
+    }
+
+    #[test]
+    fn source_build_metadata_with_flag_returns_not_supported_guardrail_error() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "aarch64-apple-darwin"
+url = "https://example.test/demo-1.0.0-aarch64.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/demo-1.0.0-src.tar.gz"
+build_system = "cargo"
+build_commands = ["cargo", "build", "--release"]
+install_commands = ["cargo", "install", "--path", "."]
+"#,
+        )
+        .expect("manifest should parse");
+
+        let err = select_artifact_for_target(&manifest, "x86_64-unknown-linux-gnu", true)
+            .expect_err("source build path should fail closed while unimplemented");
+        assert_eq!(
+            err.to_string(),
+            "source builds are not yet supported; remove --build-from-source and use a target with published binary artifacts"
+        );
     }
 
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {

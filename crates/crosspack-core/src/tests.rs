@@ -23,6 +23,7 @@ fn parse_manifest() {
     let content = r#"
 name = "ripgrep"
 version = "14.1.0"
+description = "Fast line-oriented search tool"
 license = "MIT"
 provides = ["ripgrep", "rg"]
 
@@ -52,6 +53,10 @@ path = "completions/rg.bash"
     let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
     assert_eq!(parsed.name, "ripgrep");
     assert_eq!(parsed.version.to_string(), "14.1.0");
+    assert_eq!(
+        parsed.description.as_deref(),
+        Some("Fast line-oriented search tool")
+    );
     assert_eq!(parsed.provides, vec!["ripgrep", "rg"]);
     assert_eq!(
         parsed.conflicts.get("grep"),
@@ -74,6 +79,52 @@ path = "completions/rg.bash"
     assert_eq!(
         parsed.artifacts[0].completions[0].path,
         "completions/rg.bash"
+    );
+}
+
+#[test]
+fn parse_manifest_without_description_defaults_to_none() {
+    let content = r#"
+name = "jq"
+version = "1.7.1"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/jq-1.7.1.tar.gz"
+sha256 = "abc123"
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    assert_eq!(parsed.description, None);
+    assert_eq!(parsed.source_build, None);
+}
+
+#[test]
+fn parse_manifest_with_source_build_section() {
+    let content = r#"
+name = "demo"
+version = "1.2.3"
+
+[source_build]
+url = "https://example.test/demo-1.2.3.tar.gz"
+build_system = "cargo"
+build_commands = ["cargo", "build", "--release"]
+install_commands = ["cargo", "install", "--path", "."]
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    let source_build = parsed
+        .source_build
+        .expect("source_build metadata should be present");
+    assert_eq!(source_build.url, "https://example.test/demo-1.2.3.tar.gz");
+    assert_eq!(source_build.build_system, "cargo");
+    assert_eq!(
+        source_build.build_commands,
+        vec!["cargo", "build", "--release"]
+    );
+    assert_eq!(
+        source_build.install_commands,
+        vec!["cargo", "install", "--path", "."]
     );
 }
 

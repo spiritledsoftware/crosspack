@@ -74,3 +74,4 @@ scripts/validate-snapshot-flow.sh
 
 ## USER PREFERENCES
 - Write planning/design documents to `.agents/plans/` instead of `docs/plans/`.
+- Avoid Homebrew-specific terminology (`tap`, `cask`) in Crosspack UX; prefer Crosspack-native naming.
