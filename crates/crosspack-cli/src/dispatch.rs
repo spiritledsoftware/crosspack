@@ -36,7 +36,6 @@ fn run_cli(cli: Cli) -> Result<()> {
             let (name, requirement) = parse_spec(&spec)?;
             let provider_overrides = parse_provider_overrides(&provider)?;
             ensure_explain_requires_dry_run("install", dry_run, explain)?;
-            ensure_build_from_source_not_supported("install", build_from_source)?;
             let escalation_policy = resolve_escalation_policy(escalation);
             let interaction_policy = install_interaction_policy(escalation_policy);
             let output_style = current_output_style();
@@ -147,6 +146,10 @@ fn run_cli(cli: Cli) -> Result<()> {
                     journal_seq += 1;
 
                     let dependencies = build_dependency_receipts(package, &resolved);
+                    let mut source_build_journal = SourceBuildJournal {
+                        txid: &tx.txid,
+                        seq: &mut journal_seq,
+                    };
                     let outcome = install_resolved(
                         &layout,
                         package,
@@ -159,6 +162,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                             interaction_policy,
                             install_progress_mode,
                         },
+                        Some(&mut source_build_journal),
                     )?;
                     print_install_outcome(&outcome, output_style);
                 }
@@ -301,6 +305,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                         fingerprint_sha256: fingerprint,
                         enabled: true,
                         priority,
+                        community: None,
                     })?;
                     for line in output_lines {
                         println!("{line}");

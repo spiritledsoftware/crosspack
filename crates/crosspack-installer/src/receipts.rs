@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use crosspack_core::ServiceDeclaration;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -96,7 +98,7 @@ pub(crate) fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     let mut install_status = None;
     let mut installed_at_unix = None;
 
-    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
@@ -137,4 +139,163 @@ pub(crate) fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
         install_status: install_status.unwrap_or_else(|| "installed".to_string()),
         installed_at_unix: installed_at_unix.context("missing installed_at_unix")?,
     })
+}
+
+const DECLARED_SERVICES_STATE_VERSION: u32 = 1;
+
+pub fn write_declared_services_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    services: &[ServiceDeclaration],
+) -> Result<PathBuf> {
+    let path = layout.declared_services_state_path(package_name);
+    if services.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(path);
+    }
+
+    let mut payload = String::new();
+    payload.push_str(&format!("version={}\n", DECLARED_SERVICES_STATE_VERSION));
+    for service in services {
+        if service.name.contains('\t')
+            || service.name.contains('\n')
+            || service
+                .native_id
+                .as_deref()
+                .is_some_and(|id| id.contains('\t') || id.contains('\n'))
+        {
+            return Err(anyhow!(
+                "declared service values must not contain tabs or newlines"
+            ));
+        }
+        payload.push_str(&format!(
+            "service={}\t{}\n",
+            service.name,
+            service.native_id.as_deref().unwrap_or("")
+        ));
+    }
+
+    fs::write(&path, payload.as_bytes()).with_context(|| {
+        format!(
+            "failed to write declared services state: {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+pub fn read_declared_services_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<ServiceDeclaration>> {
+    let path = layout.declared_services_state_path(package_name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read declared services state: {}", path.display()))?;
+    parse_declared_services_state(&raw).with_context(|| {
+        format!(
+            "failed to parse declared services state: {}",
+            path.display()
+        )
+    })
+}
+
+pub fn read_all_declared_services_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<ServiceDeclaration>>> {
+    let dir = layout.installed_state_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut states = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".services"))
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        let raw = fs::read_to_string(&path).with_context(|| {
+            format!("failed to read declared services state: {}", path.display())
+        })?;
+        let services = parse_declared_services_state(&raw).with_context(|| {
+            format!(
+                "failed to parse declared services state: {}",
+                path.display()
+            )
+        })?;
+        states.insert(stem.to_string(), services);
+    }
+
+    Ok(states)
+}
+
+pub fn clear_declared_services_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    let path = layout.declared_services_state_path(package_name);
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+fn parse_declared_services_state(raw: &str) -> Result<Vec<ServiceDeclaration>> {
+    let mut version = None;
+    let mut services = Vec::new();
+
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("invalid declared services row format: {line}"));
+        };
+        match key {
+            "version" => {
+                version = Some(
+                    value
+                        .parse::<u32>()
+                        .context("declared services version must be u32")?,
+                );
+            }
+            "service" => {
+                let parts = value.split('\t').collect::<Vec<_>>();
+                if parts.len() != 2 {
+                    return Err(anyhow!("invalid declared service row format"));
+                }
+                if parts[0].trim().is_empty() {
+                    return Err(anyhow!("declared service name must not be empty"));
+                }
+                let native_id = if parts[1].trim().is_empty() {
+                    None
+                } else {
+                    Some(parts[1].to_string())
+                };
+                services.push(ServiceDeclaration {
+                    name: parts[0].to_string(),
+                    native_id,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(found_version) = version {
+        if found_version != DECLARED_SERVICES_STATE_VERSION {
+            return Err(anyhow!(
+                "unsupported declared services state version: {found_version}"
+            ));
+        }
+    }
+
+    Ok(services)
 }

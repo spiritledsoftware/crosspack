@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,9 @@ pub(crate) fn validate_loaded_sources(sources: &[RegistrySourceRecord]) -> Resul
     for source in sources {
         validate_source_name(&source.name)?;
         validate_source_fingerprint(&source.fingerprint_sha256)?;
+        if let Some(community) = &source.community {
+            validate_community_recipe_catalog_path(&community.recipe_catalog_path)?;
+        }
 
         if !seen_names.insert(source.name.as_str()) {
             anyhow::bail!(
@@ -112,6 +116,53 @@ pub(crate) fn validate_loaded_sources(sources: &[RegistrySourceRecord]) -> Resul
                 source.name
             );
         }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_community_recipe_catalog_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        anyhow::bail!("invalid community recipe catalog path: must not be empty");
+    }
+
+    let path_value = Path::new(path);
+    if path_value.is_absolute() {
+        anyhow::bail!(
+            "invalid community recipe catalog path '{}': must be relative",
+            path
+        );
+    }
+
+    if path_value
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "invalid community recipe catalog path '{}': parent traversal is not allowed",
+            path
+        );
+    }
+
+    if path_value
+        .components()
+        .any(|component| matches!(component, std::path::Component::CurDir))
+    {
+        anyhow::bail!(
+            "invalid community recipe catalog path '{}': '.' segments are not allowed",
+            path
+        );
+    }
+
+    if path_value
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("toml")
+    {
+        anyhow::bail!(
+            "invalid community recipe catalog path '{}': expected .toml file",
+            path
+        );
     }
 
     Ok(())

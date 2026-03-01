@@ -4,7 +4,10 @@ mod tests {
     use clap::error::ErrorKind;
     use crosspack_registry::RegistrySourceWithSnapshotStatus;
     use ed25519_dalek::{Signer, SigningKey};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    };
 
     const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
@@ -481,6 +484,15 @@ mod tests {
         };
         write_gui_native_state(&layout, package_name, std::slice::from_ref(&native_record))
             .expect("must write native sidecar state");
+        write_declared_services_state(
+            &layout,
+            package_name,
+            &[ServiceDeclaration {
+                name: "demo".to_string(),
+                native_id: Some("demo@main".to_string()),
+            }],
+        )
+        .expect("must write declared services sidecar state");
 
         write_install_receipt(
             &layout,
@@ -514,6 +526,7 @@ mod tests {
         assert_eq!(manifest.completions, vec![completion_rel_path.clone()]);
         assert_eq!(manifest.gui_assets, vec![gui_asset.clone()]);
         assert!(manifest.native_sidecar_exists);
+        assert!(manifest.declared_services_sidecar_exists);
 
         assert!(snapshot_bin_path(&snapshot_root, "demo").exists());
         assert!(
@@ -527,6 +540,10 @@ mod tests {
         assert!(
             snapshot_native_sidecar_path(&snapshot_root).exists(),
             "native sidecar state file should be captured"
+        );
+        assert!(
+            snapshot_declared_services_sidecar_path(&snapshot_root).exists(),
+            "declared services sidecar should be captured"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -577,6 +594,12 @@ mod tests {
         };
         write_install_receipt(&layout, &previous_receipt).expect("must write previous receipt");
         std::fs::write(bin_path(&layout, "demo"), "old-bin").expect("must write old binary");
+        let old_declared_services = vec![ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo@old".to_string()),
+        }];
+        write_declared_services_state(&layout, package_name, &old_declared_services)
+            .expect("must write old declared services sidecar");
 
         let snapshot_root = layout
             .transaction_staging_path(txid)
@@ -587,6 +610,8 @@ mod tests {
         std::fs::create_dir_all(snapshot_root.join("receipt"))
             .expect("must create snapshot receipts");
         std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins");
+        std::fs::create_dir_all(snapshot_root.join("services"))
+            .expect("must create snapshot services dir");
         std::fs::copy(
             layout
                 .pkgs_dir()
@@ -608,9 +633,14 @@ mod tests {
             snapshot_root.join("bins").join("demo"),
         )
         .expect("must copy bin fixture into snapshot");
+        std::fs::copy(
+            layout.declared_services_state_path(package_name),
+            snapshot_declared_services_sidecar_path(&snapshot_root),
+        )
+        .expect("must copy declared services fixture into snapshot");
         std::fs::write(
             snapshot_root.join("manifest.txt"),
-            "package_exists=1\nreceipt_exists=1\nbin=demo\n",
+            "package_exists=1\nreceipt_exists=1\nbin=demo\ndeclared_services_sidecar_exists=1\n",
         )
         .expect("must write snapshot manifest");
 
@@ -659,6 +689,15 @@ mod tests {
         };
         write_install_receipt(&layout, &new_receipt).expect("must write new receipt");
         std::fs::write(bin_path(&layout, "demo"), "new-bin").expect("must write new binary");
+        write_declared_services_state(
+            &layout,
+            package_name,
+            &[ServiceDeclaration {
+                name: "demo".to_string(),
+                native_id: Some("demo@new".to_string()),
+            }],
+        )
+        .expect("must write new declared services sidecar");
 
         append_transaction_journal_entry(
             &layout,
@@ -712,6 +751,89 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(bin_path(&layout, "demo")).expect("must read restored binary"),
             "old-bin"
+        );
+        let restored_declared_services = read_declared_services_state(&layout, package_name)
+            .expect("must read restored declared services sidecar");
+        assert_eq!(restored_declared_services, old_declared_services);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn rollback_cleans_declared_services_sidecar_when_snapshot_has_no_sidecar() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-clean-services-sidecar";
+        let package_name = "demo";
+        write_transaction_metadata(
+            &layout,
+            &TransactionMetadata {
+                version: 1,
+                txid: txid.to_string(),
+                operation: "upgrade".to_string(),
+                status: "failed".to_string(),
+                started_at_unix: 1_771_001_307,
+                snapshot_id: None,
+            },
+        )
+        .expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must set active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(txid)
+            .join("rollback")
+            .join(package_name);
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\ndeclared_services_sidecar_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+
+        write_declared_services_state(
+            &layout,
+            package_name,
+            &[ServiceDeclaration {
+                name: "demo".to_string(),
+                native_id: Some("demo@interrupted".to_string()),
+            }],
+        )
+        .expect("must seed interrupted declared services sidecar");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("upgrade_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append mutating step");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback should remove declared services sidecar when absent in snapshot");
+
+        assert!(
+            !layout.declared_services_state_path(package_name).exists(),
+            "declared services sidecar should be removed"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -844,6 +966,128 @@ mod tests {
         assert!(
             restored_marker.exists(),
             "native uninstall must run before managed restore operations"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn rollback_ignores_source_build_journal_steps_and_restores_snapshot_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-source-build-rollback";
+        let package_name = "demo";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: "failed".to_string(),
+            started_at_unix: 1_771_001_300,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must set active marker");
+
+        let snapshot_root = layout
+            .transaction_staging_path(txid)
+            .join("rollback")
+            .join(package_name);
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::create_dir_all(snapshot_root.join("bins")).expect("must create snapshot bins dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+
+        std::fs::create_dir_all(layout.pkgs_dir().join(package_name).join("2.0.0"))
+            .expect("must create interrupted package state");
+        std::fs::write(
+            layout
+                .pkgs_dir()
+                .join(package_name)
+                .join("2.0.0")
+                .join("partial.txt"),
+            "interrupted",
+        )
+        .expect("must write interrupted package marker");
+
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: format!("source_fetch:{package_name}"),
+                state: "done".to_string(),
+                path: Some("/tmp/source-archive.tar.gz".to_string()),
+            },
+        )
+        .expect("must append source fetch step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 3,
+                step: format!("source_build_system:{package_name}:cargo"),
+                state: "done".to_string(),
+                path: None,
+            },
+        )
+        .expect("must append source build system step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 4,
+                step: format!("source_install:{package_name}"),
+                state: "done".to_string(),
+                path: Some(layout.pkgs_dir().join(package_name).display().to_string()),
+            },
+        )
+        .expect("must append source install step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 5,
+                step: format!("install_package:{package_name}"),
+                state: "done".to_string(),
+                path: Some(package_name.to_string()),
+            },
+        )
+        .expect("must append mutating install step");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback should succeed with source-build journal steps");
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read rollback metadata")
+            .expect("rollback metadata should exist");
+        assert_eq!(updated.status, "rolled_back");
+        assert!(
+            read_active_transaction(&layout)
+                .expect("must read active marker")
+                .is_none(),
+            "rollback should clear active marker"
+        );
+        assert!(
+            !layout.pkgs_dir().join(package_name).exists(),
+            "rollback should remove interrupted source-build package state"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -2384,6 +2628,7 @@ path = "rg"
             manifest,
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarGz,
+            source_build: None,
         };
 
         let err = validate_install_preflight_for_resolved(&layout, &resolved, &[])
@@ -4302,7 +4547,7 @@ ripgrep-legacy = "*"
     }
 
     #[test]
-    fn managed_service_state_transitions_are_deterministic() {
+    fn managed_service_state_transitions_are_deterministic_when_native_not_applied() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -4326,6 +4571,15 @@ ripgrep-legacy = "*"
             },
         )
         .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "demo",
+            &[crosspack_core::ServiceDeclaration {
+                name: "demo".to_string(),
+                native_id: Some("crosspack-missing-service-for-tests".to_string()),
+            }],
+        )
+        .expect("must write declared services state");
 
         assert_eq!(
             read_managed_service_state(&layout, "demo").expect("must read default state"),
@@ -4334,13 +4588,13 @@ ripgrep-legacy = "*"
 
         run_service_start_command(&layout, "demo").expect("start must succeed");
         assert_eq!(
-            read_managed_service_state(&layout, "demo").expect("must read running state"),
-            ManagedServiceState::Running
+            read_managed_service_state(&layout, "demo")
+                .expect("must preserve stopped state when native action fails"),
+            ManagedServiceState::Stopped
         );
-        assert_eq!(
-            std::fs::read_to_string(managed_service_state_path(&layout, "demo"))
-                .expect("must read running state file"),
-            "state=running\n"
+        assert!(
+            !managed_service_state_path(&layout, "demo").exists(),
+            "state file should not be created when native start is not applied"
         );
 
         run_service_stop_command(&layout, "demo").expect("stop must succeed");
@@ -4348,36 +4602,97 @@ ripgrep-legacy = "*"
             read_managed_service_state(&layout, "demo").expect("must read stopped state"),
             ManagedServiceState::Stopped
         );
-        assert_eq!(
-            std::fs::read_to_string(managed_service_state_path(&layout, "demo"))
-                .expect("must read stopped state file"),
-            "state=stopped\n"
+        assert!(
+            !managed_service_state_path(&layout, "demo").exists(),
+            "state file should remain absent when native stop is not applied"
         );
 
         run_service_restart_command(&layout, "demo").expect("restart must succeed");
         assert_eq!(
-            read_managed_service_state(&layout, "demo").expect("must read restarted state"),
-            ManagedServiceState::Running
+            read_managed_service_state(&layout, "demo")
+                .expect("must preserve stopped state on restart failure"),
+            ManagedServiceState::Stopped
         );
-        assert_eq!(
-            std::fs::read_to_string(managed_service_state_path(&layout, "demo"))
-                .expect("must read restarted state file"),
-            "state=running\n"
+        assert!(
+            !managed_service_state_path(&layout, "demo").exists(),
+            "state file should remain absent when native restart is not applied"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
-    fn service_commands_require_installed_receipt_presence() {
+    fn service_output_contract_lines_include_adapter_applied_and_reason_keys() {
+        let outcome = NativeServiceOutcome {
+            adapter: "systemd".to_string(),
+            applied: false,
+            reason_code: "adapter-tool-missing".to_string(),
+        };
+
+        assert_eq!(
+            render_service_state_line("demo", ManagedServiceState::Stopped, None, &outcome),
+            "service_state name=demo state=stopped adapter=systemd applied=false reason=adapter-tool-missing"
+        );
+        assert_eq!(
+            render_service_state_line(
+                "demo",
+                ManagedServiceState::Stopped,
+                Some("start"),
+                &outcome
+            ),
+            "service_state name=demo state=stopped action=start adapter=systemd applied=false reason=adapter-tool-missing"
+        );
+        assert_eq!(
+            render_service_state_line(
+                "demo",
+                ManagedServiceState::Stopped,
+                Some("stop"),
+                &outcome
+            ),
+            "service_state name=demo state=stopped action=stop adapter=systemd applied=false reason=adapter-tool-missing"
+        );
+        assert_eq!(
+            render_service_state_line(
+                "demo",
+                ManagedServiceState::Stopped,
+                Some("restart"),
+                &outcome
+            ),
+            "service_state name=demo state=stopped action=restart adapter=systemd applied=false reason=adapter-tool-missing"
+        );
+    }
+
+    #[test]
+    fn service_commands_require_declared_service_presence() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "missing".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+
         let err = run_service_start_command(&layout, "missing")
-            .expect_err("service start should require installed package receipt");
+            .expect_err("service start should require declared service metadata");
         let message = err.to_string();
-        assert!(message.contains("No installed package found: missing"));
-        assert!(message.contains("crosspack install missing"));
+        assert!(message.contains("No declared service found: missing"));
+        assert!(message.contains("crosspack install"));
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -4409,6 +4724,24 @@ ripgrep-legacy = "*"
             )
             .expect("must write receipt");
         }
+        write_declared_services_state(
+            &layout,
+            "alpha",
+            &[crosspack_core::ServiceDeclaration {
+                name: "alpha".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write declared services");
+        write_declared_services_state(
+            &layout,
+            "charlie",
+            &[crosspack_core::ServiceDeclaration {
+                name: "charlie".to_string(),
+                native_id: Some("charlie-daemon".to_string()),
+            }],
+        )
+        .expect("must write declared services");
 
         write_managed_service_state(&layout, "charlie", ManagedServiceState::Running)
             .expect("must write running service state");
@@ -4453,11 +4786,21 @@ ripgrep-legacy = "*"
             },
         )
         .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "cpp+tool",
+            &[crosspack_core::ServiceDeclaration {
+                name: "cpp+tool".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write declared services state");
 
         run_service_start_command(&layout, "cpp+tool").expect("start must succeed");
         assert_eq!(
-            read_managed_service_state(&layout, "cpp+tool").expect("must read running state"),
-            ManagedServiceState::Running
+            read_managed_service_state(&layout, "cpp+tool")
+                .expect("must keep stopped state when start is not applied"),
+            ManagedServiceState::Stopped
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -4668,12 +5011,14 @@ sha256 = "abc"
                 manifest: provider_manifest,
                 resolved_target: "x86_64-unknown-linux-gnu".to_string(),
                 archive_type: ArchiveType::TarZst,
+                source_build: None,
             },
             ResolvedInstall {
                 artifact: tool_manifest.artifacts[0].clone(),
                 manifest: tool_manifest,
                 resolved_target: "x86_64-unknown-linux-gnu".to_string(),
                 archive_type: ArchiveType::TarZst,
+                source_build: None,
             },
         ];
         let receipts = vec![InstallReceipt {
@@ -4763,18 +5108,21 @@ sha256 = "abc"
                 manifest: app_manifest,
                 resolved_target: "x86_64-unknown-linux-gnu".to_string(),
                 archive_type: ArchiveType::TarZst,
+                source_build: None,
             },
             ResolvedInstall {
                 artifact: zigcc_manifest.artifacts[0].clone(),
                 manifest: zigcc_manifest,
                 resolved_target: "x86_64-unknown-linux-gnu".to_string(),
                 archive_type: ArchiveType::TarZst,
+                source_build: None,
             },
             ResolvedInstall {
                 artifact: clang_manifest.artifacts[0].clone(),
                 manifest: clang_manifest,
                 resolved_target: "x86_64-unknown-linux-gnu".to_string(),
                 archive_type: ArchiveType::TarZst,
+                source_build: None,
             },
         ];
 
@@ -5318,11 +5666,34 @@ sha256 = "bar"
     }
 
     #[test]
-    fn format_info_lines_includes_policy_sections_when_present() {
+    fn format_info_lines_includes_sanitized_description_when_present() {
         let manifest = PackageManifest::from_toml_str(
             r#"
 name = "compiler"
 version = "2.1.0"
+ description = "Fast\tline\nsearch\rtool"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/compiler.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines = format_info_lines("compiler", &[manifest]);
+        assert_eq!(lines[0], "Package: compiler");
+        assert_eq!(lines[1], "- 2.1.0");
+        assert_eq!(lines[2], "  Description: Fast line search tool");
+    }
+
+    #[test]
+    fn format_info_lines_preserves_policy_order_with_and_without_description() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+description = "Portable toolchain"
 provides = ["c-compiler", "cc"]
 
 [conflicts]
@@ -5337,10 +5708,58 @@ old-cc = "<2.0.0"
         let lines = format_info_lines("compiler", &[manifest]);
         assert_eq!(lines[0], "Package: compiler");
         assert_eq!(lines[1], "- 2.1.0");
-        assert_eq!(lines[2], "  Provides: c-compiler, cc");
-        assert_eq!(lines[3], "  Conflicts: legacy-cc(*)");
-        assert_eq!(lines[4], "  Replaces: old-cc(<2.0.0)");
-        assert_eq!(lines[5], "  Policy: provides=2 conflicts=1 replaces=1");
+        assert_eq!(lines[2], "  Description: Portable toolchain");
+        assert_eq!(lines[3], "  Provides: c-compiler, cc");
+        assert_eq!(lines[4], "  Conflicts: legacy-cc(*)");
+        assert_eq!(lines[5], "  Replaces: old-cc(<2.0.0)");
+        assert_eq!(lines[6], "  Policy: provides=2 conflicts=1 replaces=1");
+
+        let manifest_without_description = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+provides = ["c-compiler", "cc"]
+
+[conflicts]
+legacy-cc = "*"
+
+[replaces]
+old-cc = "<2.0.0"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines_without_description =
+            format_info_lines("compiler", &[manifest_without_description]);
+        assert_eq!(lines_without_description[0], "Package: compiler");
+        assert_eq!(lines_without_description[1], "- 2.1.0");
+        assert_eq!(lines_without_description[2], "  Provides: c-compiler, cc");
+        assert_eq!(lines_without_description[3], "  Conflicts: legacy-cc(*)");
+        assert_eq!(lines_without_description[4], "  Replaces: old-cc(<2.0.0)");
+        assert_eq!(
+            lines_without_description[5],
+            "  Policy: provides=2 conflicts=1 replaces=1"
+        );
+    }
+
+    #[test]
+    fn format_info_lines_omits_description_when_only_whitespace() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+description = "   \n\t"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines = format_info_lines("compiler", &[manifest]);
+        assert_eq!(lines[0], "Package: compiler");
+        assert_eq!(lines[1], "- 2.1.0");
+        assert!(
+            !lines.iter().any(|line| line.starts_with("  Description:")),
+            "whitespace-only descriptions must not be rendered"
+        );
     }
 
     #[test]
@@ -5509,6 +5928,7 @@ old-cc = "<2.0.0"
                             .to_string(),
                     enabled: true,
                     priority: 10,
+                    community: None,
                 },
                 snapshot: RegistrySourceSnapshotState::Ready {
                     snapshot_id: "git:0123456789abcdef".to_string(),
@@ -5524,6 +5944,7 @@ old-cc = "<2.0.0"
                             .to_string(),
                     enabled: true,
                     priority: 1,
+                    community: None,
                 },
                 snapshot: RegistrySourceSnapshotState::None,
             },
@@ -5594,6 +6015,7 @@ old-cc = "<2.0.0"
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
                 enabled: true,
                 priority: 1,
+                community: None,
             })
             .expect("must add alpha source");
         store
@@ -5605,6 +6027,7 @@ old-cc = "<2.0.0"
                     "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
                 enabled: false,
                 priority: 2,
+                community: None,
             })
             .expect("must add beta source");
 
@@ -5646,6 +6069,7 @@ old-cc = "<2.0.0"
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
                 enabled: true,
                 priority: 1,
+                community: None,
             })
             .expect("must add alpha source");
         store
@@ -5657,6 +6081,7 @@ old-cc = "<2.0.0"
                     "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
                 enabled: true,
                 priority: 2,
+                community: None,
             })
             .expect("must add beta source");
 
@@ -5710,6 +6135,7 @@ old-cc = "<2.0.0"
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
                 enabled: true,
                 priority: 1,
+                community: None,
             })
             .expect("must add alpha source");
         store
@@ -5721,6 +6147,7 @@ old-cc = "<2.0.0"
                     "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
                 enabled: true,
                 priority: 2,
+                community: None,
             })
             .expect("must add beta source");
 
@@ -5768,6 +6195,7 @@ old-cc = "<2.0.0"
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
                 enabled: true,
                 priority: 1,
+                community: None,
             })
             .expect("must add alpha source");
 
@@ -5797,6 +6225,7 @@ old-cc = "<2.0.0"
                     "f0cf90f634c31f8f43f56f3576d2f23f9f66d4b041e92f788bcbdbdbf4dcd89f".to_string(),
                 enabled: true,
                 priority: 1,
+                community: None,
             })
             .expect("must add ok source");
         store
@@ -5808,6 +6237,7 @@ old-cc = "<2.0.0"
                     "f0cf90f634c31f8f43f56f3576d2f23f9f66d4b041e92f788bcbdbdbf4dcd89f".to_string(),
                 enabled: true,
                 priority: 2,
+                community: None,
             })
             .expect("must add bad source");
 
@@ -6346,6 +6776,9 @@ sha256 = "abc"
 
     #[test]
     fn download_artifact_reports_progress_with_known_total() {
+        let _env_lock = download_backend_env_lock()
+            .lock()
+            .expect("download backend env lock must be available");
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -6377,6 +6810,9 @@ sha256 = "abc"
 
     #[test]
     fn download_artifact_reports_progress_without_total_for_streamed_response() {
+        let _env_lock = download_backend_env_lock()
+            .lock()
+            .expect("download backend env lock must be available");
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -6434,16 +6870,16 @@ sha256 = "abc"
 
     #[test]
     fn download_artifact_cache_hit_ignores_invalid_backend_env() {
+        let _env_lock = download_backend_env_lock()
+            .lock()
+            .expect("download backend env lock must be available");
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
         let cache_path = layout.prefix().join("download-cache-hit.bin");
         std::fs::write(&cache_path, b"cached").expect("must write cache fixture");
 
-        let previous = std::env::var("CROSSPACK_DOWNLOAD_BACKEND").ok();
-        unsafe {
-            std::env::set_var("CROSSPACK_DOWNLOAD_BACKEND", "not-a-backend");
-        }
+        let _backend_guard = DownloadBackendEnvGuard::set("not-a-backend");
 
         let status = download_artifact_with_progress(
             "https://example.test/cached.bin",
@@ -6453,17 +6889,15 @@ sha256 = "abc"
         )
         .expect("cache hit should short-circuit before backend validation");
 
-        match previous {
-            Some(value) => unsafe { std::env::set_var("CROSSPACK_DOWNLOAD_BACKEND", value) },
-            None => unsafe { std::env::remove_var("CROSSPACK_DOWNLOAD_BACKEND") },
-        }
-
         assert_eq!(status, "cache-hit");
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
     fn download_artifact_retries_in_process_download_before_succeeding() {
+        let _env_lock = download_backend_env_lock()
+            .lock()
+            .expect("download backend env lock must be available");
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
 
@@ -6664,6 +7098,7 @@ sha256 = "abc"
                 interaction_policy: InstallInteractionPolicy::default(),
                 install_progress_mode: InstallProgressMode::Disabled,
             },
+            None,
         )
         .expect_err("unsupported EXE host should fail deterministically");
 
@@ -6699,6 +7134,7 @@ sha256 = "abc"
                 interaction_policy: InstallInteractionPolicy::default(),
                 install_progress_mode: InstallProgressMode::Disabled,
             },
+            None,
         )
         .expect_err("unsupported PKG host should fail deterministically");
 
@@ -6912,36 +7348,6 @@ sha256 = "abc"
     }
 
     #[test]
-    fn build_from_source_flag_returns_not_supported_error_text() {
-        let err = ensure_build_from_source_not_supported("install", true)
-            .expect_err("build-from-source should fail closed until implemented");
-        assert_eq!(
-            err.to_string(),
-            "source builds are not yet supported; remove --build-from-source and use a target with published binary artifacts"
-        );
-    }
-
-    #[test]
-    fn install_build_from_source_is_rejected_at_command_entrypoint() {
-        let cli = Cli::try_parse_from(["crosspack", "install", "demo", "--build-from-source"])
-            .expect("command must parse");
-        let err = run_cli(cli).expect_err("build-from-source must be rejected before install");
-        assert!(err
-            .to_string()
-            .contains("source builds are not yet supported"));
-    }
-
-    #[test]
-    fn bundle_apply_build_from_source_is_rejected_at_command_entrypoint() {
-        let cli = Cli::try_parse_from(["crosspack", "bundle", "apply", "--build-from-source"])
-            .expect("command must parse");
-        let err = run_cli(cli).expect_err("build-from-source must be rejected before bundle apply");
-        assert!(err
-            .to_string()
-            .contains("source builds are not yet supported"));
-    }
-
-    #[test]
     fn source_build_metadata_requires_build_from_source_flag_when_binary_artifact_missing() {
         let manifest = PackageManifest::from_toml_str(
             r#"
@@ -6955,6 +7361,7 @@ sha256 = "abc123"
 
 [source_build]
 url = "https://example.test/demo-1.0.0-src.tar.gz"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 build_system = "cargo"
 build_commands = ["cargo", "build", "--release"]
 install_commands = ["cargo", "install", "--path", "."]
@@ -6966,12 +7373,12 @@ install_commands = ["cargo", "install", "--path", "."]
             .expect_err("source-build gate should require explicit opt-in");
         assert_eq!(
             err.to_string(),
-            "source build required for demo 1.0.0 on target x86_64-unknown-linux-gnu: no binary artifact published; source builds are not yet supported"
+            "source build required for demo 1.0.0 on target x86_64-unknown-linux-gnu: no binary artifact published; rerun with --build-from-source"
         );
     }
 
     #[test]
-    fn source_build_metadata_with_flag_returns_not_supported_guardrail_error() {
+    fn source_build_metadata_with_flag_uses_source_build_path() {
         let manifest = PackageManifest::from_toml_str(
             r#"
 name = "demo"
@@ -6984,6 +7391,7 @@ sha256 = "abc123"
 
 [source_build]
 url = "https://example.test/demo-1.0.0-src.tar.gz"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 build_system = "cargo"
 build_commands = ["cargo", "build", "--release"]
 install_commands = ["cargo", "install", "--path", "."]
@@ -6991,12 +7399,487 @@ install_commands = ["cargo", "install", "--path", "."]
         )
         .expect("manifest should parse");
 
-        let err = select_artifact_for_target(&manifest, "x86_64-unknown-linux-gnu", true)
-            .expect_err("source build path should fail closed while unimplemented");
+        let (selected, source_build) =
+            select_install_plan_for_target(&manifest, "x86_64-unknown-linux-gnu", true)
+                .expect("source-build opt-in should use supported source-build path");
         assert_eq!(
-            err.to_string(),
-            "source builds are not yet supported; remove --build-from-source and use a target with published binary artifacts"
+            selected.target, "aarch64-apple-darwin",
+            "fallback artifact metadata should be selected deterministically"
         );
+        let source_build = source_build.expect("source-build plan should be present");
+        assert_eq!(
+            source_build.url,
+            "https://example.test/demo-1.0.0-src.tar.gz"
+        );
+        assert_eq!(
+            source_build.archive_sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(source_build.archive_type, ArchiveType::TarGz);
+        assert_eq!(source_build.build_system, "cargo");
+    }
+
+    #[test]
+    fn source_build_metadata_rejects_unknown_fields_fail_closed() {
+        let err = PackageManifest::from_toml_str(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/demo-1.0.0.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/demo-1.0.0-src.zip"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+build_system = "shell"
+build_commands = ["sh", "-c", "true"]
+install_commands = ["sh", "-c", "true"]
+unexpected = "value"
+"#,
+        )
+        .expect_err("unknown source_build fields must be rejected");
+        let rendered = err
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            rendered.contains("unknown field") && rendered.contains("unexpected"),
+            "unexpected parse error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn source_build_metadata_rejects_invalid_archive_sha256_fail_closed() {
+        let target = host_target_triple().to_string();
+        let manifest = PackageManifest::from_toml_str(&format!(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/demo-1.0.0.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/demo-1.0.0-src.tar.gz"
+archive_sha256 = "xyz"
+build_system = "shell"
+build_commands = ["sh", "-c", "true"]
+install_commands = ["sh", "-c", "true"]
+"#
+        ))
+        .expect("manifest should parse before source-build plan validation");
+
+        let err = select_install_plan_for_target(&manifest, &target, true)
+            .expect_err("invalid source archive checksum metadata must fail closed");
+        assert!(
+            err.to_string()
+                .contains("archive_sha256 must be a 64-character hexadecimal SHA-256 digest"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn source_build_metadata_rejects_empty_command_tokens_fail_closed() {
+        let target = host_target_triple().to_string();
+        let manifest = PackageManifest::from_toml_str(&format!(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/demo-1.0.0.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/demo-1.0.0-src.zip"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+build_system = "shell"
+build_commands = ["", "-c", "true"]
+install_commands = ["sh", "-c", "true"]
+"#
+        ))
+        .expect("manifest should parse before source-build plan validation");
+
+        let err = select_install_plan_for_target(&manifest, &target, true)
+            .expect_err("empty source-build command tokens must fail closed");
+        assert!(
+            err.to_string().contains("command tokens must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn source_build_metadata_rejects_unsupported_archive_type_fail_closed() {
+        let target = host_target_triple().to_string();
+        let manifest = PackageManifest::from_toml_str(&format!(
+            r#"
+name = "demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/demo-1.0.0.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/demo-1.0.0-src.pkg"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+build_system = "shell"
+build_commands = ["sh", "-c", "true"]
+install_commands = ["sh", "-c", "true"]
+"#
+        ))
+        .expect("manifest should parse before source-build plan validation");
+
+        let err = select_install_plan_for_target(&manifest, &target, true)
+            .expect_err("unsupported source-build archive types must fail closed");
+        assert!(
+            err.to_string()
+                .contains("archive type 'pkg' is not supported for source builds"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_build_from_source_cli_flow_records_source_build_journal_steps() {
+        let home_root = build_test_layout_path(current_unix_nanos());
+        std::fs::create_dir_all(&home_root).expect("must create test HOME root");
+
+        with_test_home_layout(&home_root, |layout| {
+            layout.ensure_base_dirs().expect("must create base dirs");
+            configure_ready_source(layout, "official");
+            let target = host_target_triple().to_string();
+            let source_archive_sha256 =
+                seed_source_build_tar_gz_cache(layout, "demo", "1.0.0", &target);
+            write_signed_source_build_manifest(
+                layout,
+                "official",
+                "demo",
+                "1.0.0",
+                &target,
+                &source_archive_sha256,
+            );
+
+            let cli = Cli::try_parse_from(["crosspack", "install", "demo", "--build-from-source"])
+                .expect("install command must parse");
+            run_cli(cli).expect("install --build-from-source should succeed");
+
+            let receipts = read_install_receipts(layout).expect("must read receipts");
+            assert_eq!(receipts.len(), 1, "exactly one package should be installed");
+            let receipt = &receipts[0];
+            assert_eq!(receipt.name, "demo");
+            assert_eq!(receipt.version, "1.0.0");
+            assert_eq!(
+                receipt.artifact_url.as_deref(),
+                Some("https://example.test/demo-1.0.0-src.tar.gz")
+            );
+            assert_eq!(
+                receipt.artifact_sha256.as_deref(),
+                Some(source_archive_sha256.as_str()),
+                "source-build installs must persist source archive checksum provenance"
+            );
+
+            let txid = single_transaction_txid(layout);
+            let metadata = read_transaction_metadata(layout, &txid)
+                .expect("must read transaction metadata")
+                .expect("metadata should exist");
+            assert_eq!(metadata.operation, "install");
+            assert_eq!(metadata.status, "committed");
+
+            let records =
+                read_transaction_journal_records(layout, &txid).expect("must read journal records");
+            let fetch_index = records
+                .iter()
+                .position(|entry| entry.step == "source_fetch:demo")
+                .expect("source fetch step must be journaled");
+            let build_system_index = records
+                .iter()
+                .position(|entry| entry.step == "source_build_system:demo:shell")
+                .expect("source build system step must be journaled");
+            let install_index = records
+                .iter()
+                .position(|entry| entry.step == "source_install:demo")
+                .expect("source install step must be journaled");
+            assert!(
+                fetch_index < build_system_index && build_system_index < install_index,
+                "source-build journal step order must remain deterministic"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(home_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_apply_build_from_source_executes_install_and_records_source_steps() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple().to_string();
+        let source_archive_sha256 =
+            seed_source_build_tar_gz_cache(&layout, "bundle-demo", "1.0.0", &target);
+        write_signed_source_build_manifest(
+            &layout,
+            "official",
+            "bundle-demo",
+            "1.0.0",
+            &target,
+            &source_archive_sha256,
+        );
+
+        let bundle_path = layout.prefix().join("bundle-source-build.toml");
+        std::fs::write(
+            &bundle_path,
+            r#"
+format = "crosspack.bundle"
+version = 1
+
+[[roots]]
+name = "bundle-demo"
+"#,
+        )
+        .expect("must write bundle apply fixture");
+
+        let provider_values: Vec<String> = Vec::new();
+        run_bundle_apply_command(
+            &layout,
+            None,
+            BundleApplyOptions {
+                file: Some(bundle_path.as_path()),
+                dry_run: false,
+                explain: false,
+                build_from_source: true,
+                force_redownload: false,
+                provider_values: &provider_values,
+            },
+        )
+        .expect("bundle apply --build-from-source should execute install path");
+
+        let receipts = read_install_receipts(&layout).expect("must read receipts");
+        assert!(
+            receipts.iter().any(|receipt| receipt.name == "bundle-demo"),
+            "bundle apply should install bundle root package"
+        );
+
+        let txid = single_transaction_txid(&layout);
+        let metadata = read_transaction_metadata(&layout, &txid)
+            .expect("must read transaction metadata")
+            .expect("metadata should exist");
+        assert_eq!(metadata.operation, "bundle-apply");
+        assert_eq!(metadata.status, "committed");
+
+        let records = read_transaction_journal_records(&layout, &txid)
+            .expect("must read bundle apply journal records");
+        assert!(
+            records
+                .iter()
+                .any(|entry| entry.step == "source_fetch:bundle-demo"),
+            "bundle apply source-build flow must record source_fetch step"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|entry| entry.step == "source_build_system:bundle-demo:shell"),
+            "bundle apply source-build flow must record build-system step"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|entry| entry.step == "source_install:bundle-demo"),
+            "bundle apply source-build flow must record source_install step"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_build_from_source_fails_closed_on_source_archive_checksum_mismatch() {
+        let home_root = build_test_layout_path(current_unix_nanos());
+        std::fs::create_dir_all(&home_root).expect("must create test HOME root");
+
+        with_test_home_layout(&home_root, |layout| {
+            layout.ensure_base_dirs().expect("must create base dirs");
+            configure_ready_source(layout, "official");
+            let target = host_target_triple().to_string();
+            let _source_archive_sha256 =
+                seed_source_build_tar_gz_cache(layout, "checksum-demo", "1.0.0", &target);
+            write_signed_source_build_manifest(
+                layout,
+                "official",
+                "checksum-demo",
+                "1.0.0",
+                &target,
+                EMPTY_SHA256,
+            );
+
+            let cli = Cli::try_parse_from([
+                "crosspack",
+                "install",
+                "checksum-demo",
+                "--build-from-source",
+            ])
+            .expect("install command must parse");
+            let err = run_cli(cli).expect_err("checksum mismatch must fail closed");
+            assert!(
+                err.to_string().contains("source archive sha256 mismatch"),
+                "unexpected error: {err}"
+            );
+
+            let receipts = read_install_receipts(layout).expect("must read receipts after failure");
+            assert!(
+                receipts
+                    .iter()
+                    .all(|receipt| receipt.name != "checksum-demo"),
+                "checksum mismatch must not persist an install receipt"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(home_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_source_build_does_not_mark_build_system_journal_step_done() {
+        let home_root = build_test_layout_path(current_unix_nanos());
+        std::fs::create_dir_all(&home_root).expect("must create test HOME root");
+
+        with_test_home_layout(&home_root, |layout| {
+            layout.ensure_base_dirs().expect("must create base dirs");
+            configure_ready_source(layout, "official");
+            let target = host_target_triple().to_string();
+            let source_archive_sha256 =
+                seed_source_build_tar_gz_cache(layout, "journal-demo", "1.0.0", &target);
+            write_signed_source_build_manifest_with_commands(
+                layout,
+                "official",
+                "journal-demo",
+                "1.0.0",
+                &target,
+                &source_archive_sha256,
+                SourceBuildScripts {
+                    build: "exit 7".to_string(),
+                    install: "true".to_string(),
+                },
+            );
+
+            let cli = Cli::try_parse_from([
+                "crosspack",
+                "install",
+                "journal-demo",
+                "--build-from-source",
+            ])
+            .expect("install command must parse");
+            let err = run_cli(cli).expect_err("build failure must fail install");
+            assert!(
+                err.to_string()
+                    .contains("source build build command failed"),
+                "unexpected error: {err}"
+            );
+
+            let txid = single_transaction_txid(layout);
+            let records = read_transaction_journal_records(layout, &txid)
+                .expect("must read source-build failure journal records");
+            assert!(
+                records
+                    .iter()
+                    .any(|entry| entry.step == "source_fetch:journal-demo"),
+                "source fetch should still be journaled after successful download"
+            );
+            assert!(
+                records
+                    .iter()
+                    .all(|entry| entry.step != "source_build_system:journal-demo:shell"),
+                "source build system step must not be journaled as done before successful build"
+            );
+            assert!(
+                records
+                    .iter()
+                    .all(|entry| entry.step != "source_install:journal-demo"),
+                "source install step must not be journaled when build fails"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(home_root);
+    }
+
+    #[test]
+    fn install_build_from_source_dry_run_keeps_machine_contract_keys_and_order() {
+        let target = host_target_triple().to_string();
+        let manifest = PackageManifest::from_toml_str(&format!(
+            r#"
+name = "dryrun-demo"
+version = "1.0.0"
+
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/dryrun-demo-1.0.0.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/dryrun-demo-1.0.0-src.zip"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+build_system = "shell"
+build_commands = ["sh", "-c", "true"]
+install_commands = ["sh", "-c", "true"]
+"#
+        ))
+        .expect("manifest should parse");
+
+        let (binary_artifact, _) = select_install_plan_for_target(&manifest, &target, false)
+            .expect("binary path must resolve");
+        let binary_planned = build_planned_package_changes(
+            &[ResolvedInstall {
+                manifest: manifest.clone(),
+                artifact: binary_artifact.clone(),
+                resolved_target: target.clone(),
+                archive_type: binary_artifact
+                    .archive_type()
+                    .expect("artifact archive type must parse"),
+                source_build: None,
+            }],
+            &[],
+        )
+        .expect("binary planned changes must build");
+        let binary_lines = render_dry_run_output_lines(
+            &build_transaction_preview("install", &binary_planned),
+            TransactionPreviewMode::DryRun,
+            None,
+        );
+
+        let (source_artifact, source_build) =
+            select_install_plan_for_target(&manifest, &target, true)
+                .expect("source-build path must resolve");
+        let source_planned = build_planned_package_changes(
+            &[ResolvedInstall {
+                manifest,
+                artifact: source_artifact,
+                resolved_target: target,
+                archive_type: ArchiveType::Zip,
+                source_build,
+            }],
+            &[],
+        )
+        .expect("source-build planned changes must build");
+        let source_lines = render_dry_run_output_lines(
+            &build_transaction_preview("install", &source_planned),
+            TransactionPreviewMode::DryRun,
+            None,
+        );
+
+        assert_eq!(source_lines, binary_lines);
+        assert!(source_lines[0].starts_with("transaction_preview "));
+        assert!(source_lines[1].starts_with("transaction_summary "));
+        assert!(source_lines[2].starts_with("risk_flags="));
+        assert!(source_lines[3].starts_with("change_add "));
     }
 
     fn resolved_install(name: &str, version: &str) -> ResolvedInstall {
@@ -7018,6 +7901,7 @@ sha256 = "abc"
             artifact,
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarZst,
+            source_build: None,
         }
     }
 
@@ -7151,6 +8035,107 @@ sha256 = "abc"
 
     static TEST_LAYOUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn home_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn download_backend_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct DownloadBackendEnvGuard {
+        previous: Option<String>,
+    }
+
+    impl DownloadBackendEnvGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var("CROSSPACK_DOWNLOAD_BACKEND").ok();
+            unsafe {
+                std::env::set_var("CROSSPACK_DOWNLOAD_BACKEND", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for DownloadBackendEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var("CROSSPACK_DOWNLOAD_BACKEND", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("CROSSPACK_DOWNLOAD_BACKEND");
+                },
+            }
+        }
+    }
+
+    struct HomeEnvGuard {
+        previous: Option<String>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let previous = std::env::var("HOME").ok();
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var("HOME", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+        }
+    }
+
+    fn current_unix_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    }
+
+    fn with_test_home_layout<T>(home_root: &Path, run: impl FnOnce(&PrefixLayout) -> T) -> T {
+        let _home_lock = home_env_lock()
+            .lock()
+            .expect("HOME env lock should not be poisoned");
+        let _home_guard = HomeEnvGuard::set(home_root);
+        let layout = PrefixLayout::new(home_root.join(".crosspack"));
+        run(&layout)
+    }
+
+    fn single_transaction_txid(layout: &PrefixLayout) -> String {
+        let mut txids = std::fs::read_dir(layout.transactions_dir())
+            .expect("must read transactions dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .filter_map(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<Vec<_>>();
+        txids.sort();
+        assert_eq!(
+            txids.len(),
+            1,
+            "expected exactly one transaction metadata file, found {:?}",
+            txids
+        );
+        txids.remove(0)
+    }
+
     fn build_test_layout_path(nanos: u128) -> PathBuf {
         let mut path = std::env::temp_dir();
         let sequence = TEST_LAYOUT_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -7183,10 +8168,7 @@ sha256 = "abc"
 
     fn test_registry_source_dir(name: &str, with_registry_pub: bool) -> PathBuf {
         let mut path = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
+        let nanos = current_unix_nanos();
         path.push(format!("crosspack-cli-test-registry-{name}-{nanos}"));
         std::fs::create_dir_all(path.join("index")).expect("must create index dir");
         if with_registry_pub {
@@ -7246,6 +8228,133 @@ sha256 = "abc"
             hex::encode(signature.to_bytes()),
         )
         .expect("must write signature");
+    }
+
+    fn write_signed_source_build_manifest(
+        layout: &PrefixLayout,
+        source_name: &str,
+        package_name: &str,
+        version: &str,
+        target: &str,
+        source_archive_sha256: &str,
+    ) {
+        write_signed_source_build_manifest_with_commands(
+            layout,
+            source_name,
+            package_name,
+            version,
+            target,
+            source_archive_sha256,
+            SourceBuildScripts {
+                build: "mkdir -p $CROSSPACK_STAGE_DIR/bin".to_string(),
+                install: format!(
+                    "echo '#!/bin/sh' > $CROSSPACK_STAGE_DIR/bin/{package_name}; echo 'exit 0' >> $CROSSPACK_STAGE_DIR/bin/{package_name}; chmod +x $CROSSPACK_STAGE_DIR/bin/{package_name}"
+                ),
+            },
+        );
+    }
+
+    struct SourceBuildScripts {
+        build: String,
+        install: String,
+    }
+
+    fn write_signed_source_build_manifest_with_commands(
+        layout: &PrefixLayout,
+        source_name: &str,
+        package_name: &str,
+        version: &str,
+        target: &str,
+        source_archive_sha256: &str,
+        scripts: SourceBuildScripts,
+    ) {
+        let manifest = format!(
+            r#"
+name = "{package_name}"
+version = "{version}"
+
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/{package_name}-{version}.tar.zst"
+sha256 = "abc123"
+[[artifacts.binaries]]
+name = "{package_name}"
+path = "bin/{package_name}"
+
+[source_build]
+url = "https://example.test/{package_name}-{version}-src.tar.gz"
+archive_sha256 = "{source_archive_sha256}"
+build_system = "shell"
+build_commands = ["sh", "-c", "{build_script}"]
+install_commands = ["sh", "-c", "{install_script}"]
+"#,
+            build_script = scripts.build,
+            install_script = scripts.install
+        );
+
+        let cache_root = registry_state_root(layout).join("cache").join(source_name);
+        let package_dir = cache_root.join("index").join(package_name);
+        std::fs::create_dir_all(&package_dir).expect("must create package directory");
+
+        let signing_key = test_signing_key();
+        std::fs::write(
+            cache_root.join("registry.pub"),
+            public_key_hex(&signing_key),
+        )
+        .expect("must write registry key");
+
+        let manifest_path = package_dir.join(format!("{version}.toml"));
+        std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
+
+        let signature = signing_key.sign(manifest.as_bytes());
+        std::fs::write(
+            manifest_path.with_extension("toml.sig"),
+            hex::encode(signature.to_bytes()),
+        )
+        .expect("must write signature");
+    }
+
+    fn seed_source_build_tar_gz_cache(
+        layout: &PrefixLayout,
+        package_name: &str,
+        version: &str,
+        target: &str,
+    ) -> String {
+        let cache_path =
+            layout.artifact_cache_path(package_name, version, target, ArchiveType::TarGz);
+        std::fs::create_dir_all(
+            cache_path
+                .parent()
+                .expect("artifact cache path must have a parent"),
+        )
+        .expect("must create source-build cache dir");
+
+        let fixture_root = layout
+            .tmp_state_dir()
+            .join(format!("source-build-archive-{package_name}-{version}"));
+        let _ = std::fs::remove_dir_all(&fixture_root);
+        std::fs::create_dir_all(&fixture_root).expect("must create source archive fixture root");
+        std::fs::write(fixture_root.join("README.txt"), "source-build fixture\n")
+            .expect("must write source archive fixture file");
+
+        let status = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&cache_path)
+            .arg("-C")
+            .arg(&fixture_root)
+            .arg(".")
+            .status()
+            .expect("must spawn tar to build source archive fixture");
+        assert!(
+            status.success(),
+            "tar must create source archive fixture successfully"
+        );
+
+        let archive_bytes = std::fs::read(&cache_path).expect("must read source archive fixture");
+        let archive_sha256 = crosspack_security::sha256_hex(&archive_bytes);
+
+        let _ = std::fs::remove_dir_all(fixture_root);
+        archive_sha256
     }
 
     fn test_signing_key() -> SigningKey {

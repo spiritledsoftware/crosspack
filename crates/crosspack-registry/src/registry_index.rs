@@ -7,8 +7,8 @@ use crosspack_core::PackageManifest;
 use crosspack_security::verify_ed25519_signature_hex;
 
 use crate::{
-    parse_source_state_file, sort_sources, source_has_ready_snapshot, RegistrySourceRecord,
-    RegistrySourceStateFile,
+    parse_source_state_file, sort_sources, source_has_ready_snapshot,
+    verify_community_recipe_catalog_policy, RegistrySourceRecord, RegistrySourceStateFile,
 };
 
 #[derive(Debug, Clone)]
@@ -177,6 +177,12 @@ impl ConfiguredRegistryIndex {
             if !source_has_ready_snapshot(&cache_root)? {
                 continue;
             }
+            verify_community_recipe_catalog_policy(&cache_root, &source).with_context(|| {
+                format!(
+                    "failed validating community recipe metadata for configured source '{}'",
+                    source.name
+                )
+            })?;
             configured.push(ConfiguredSnapshotSource {
                 name: source.name,
                 index: RegistryIndex::open(cache_root),

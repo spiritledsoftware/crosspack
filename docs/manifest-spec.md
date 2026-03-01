@@ -14,16 +14,43 @@ Each package version is represented by a TOML manifest stored in the registry in
 - `license`
 - `homepage`
 - `dependencies`: map of package name to semver constraint.
-- `source_build` (non-GA guardrail metadata): optional source-build metadata block used for explicit source-build policy signaling.
+- `source_build`: optional source-build metadata block used when `--build-from-source` is requested.
+- `services`: optional list of service declarations consumed by `crosspack services` commands.
+
+`crosspack info <name>` prints `Description: <value>` when `description` is present and non-empty.
+For deterministic plain output, tab/newline/carriage-return characters in `description` are normalized to spaces.
 
 ### Source Build Metadata (`source_build`)
 
-`source_build` is parsed and validated, but end-to-end source-build execution is currently guarded (non-GA).
+`source_build` is parsed, validated, and used by source-build install flows.
 
 - `url`: source archive or source tree URL.
+- `archive_sha256`: expected SHA-256 digest of downloaded source archive bytes (required).
 - `build_system`: build-system token (`cargo`, `cmake`, etc.).
-- `build_commands` (optional): deterministic command array used for build steps.
-- `install_commands` (optional): deterministic command array used for install steps.
+- `build_commands`: deterministic command-token array used for build steps (must be non-empty).
+- `install_commands`: deterministic command-token array used for install steps (must be non-empty).
+
+Source-build constraints:
+
+- source builds run only when `--build-from-source` is set,
+- source URL must infer to a supported archive type (`zip`, `tar.gz`, `tar.zst`),
+- source archive checksum must be a 64-character hexadecimal SHA-256 digest,
+- command tokens must be non-empty,
+- metadata or command validation failures fail closed.
+
+### Service Declarations (`services`)
+
+`services` is parsed and validated strictly.
+
+- `name`: service token exposed to `crosspack services <subcommand> <name>`.
+- `native_id` (optional): host-native service identifier; defaults to `name` when omitted.
+
+Service declaration constraints:
+
+- service names must follow package-token grammar (`[a-z0-9][a-z0-9._+-]{0,63}`),
+- `native_id`, when present, must follow package-token grammar with optional `@` segments,
+- service names must be unique per manifest,
+- unknown fields fail closed.
 
 ## Artifact Fields
 

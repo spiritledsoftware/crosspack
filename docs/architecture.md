@@ -49,6 +49,7 @@ Default user prefixes:
 - `registry remove <name> [--purge-cache]` removes a source and optionally deletes its cached snapshot.
 - `update [--registry <name>]...` refreshes all or selected sources and prints per-source status plus `update summary: updated=<n> up-to-date=<n> failed=<n>`.
 - `self-update [--dry-run] [--force-redownload]` refreshes configured source snapshots and then installs the latest `crosspack` package for the current host target.
+- Source records support an optional `community` metadata block with a signed `recipe_catalog_path`; validation is fail-closed during update and again when opening configured snapshots.
 - Lifecycle-oriented commands use automatic output mode selection: an enhanced interactive terminal renderer (section hierarchy + semantic color + progress indicators) on interactive terminals, plain deterministic output for non-interactive/piped usage.
 - Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root, which acts as the local trust anchor for that registry snapshot or mirror.
 - Every version manifest requires a detached hex signature sidecar at `<version>.toml.sig`.
@@ -82,13 +83,14 @@ Default user prefixes:
 - `outdated` compares installed receipt versions with latest available metadata versions and reports upgrade candidates.
 - `depends <name>`, `uses <name>`, and `why <name>` provide deterministic dependency introspection from installed receipts.
 - `bundle export` writes deterministic root+pin environment bundles; `bundle apply` replays bundle roots through standard resolve/install flows.
-- `services list|status|start|stop|restart` manages deterministic Crosspack service-state files under `<prefix>/state/services/` for installed packages.
+- `services list|status|start|stop|restart` resolves service names from manifest-declared service state persisted under `<prefix>/state/installed/<name>.services` and tracks deterministic state files under `<prefix>/state/services/`.
+- Service actions integrate host-native adapters (`systemd` on Linux, `launchctl` on macOS, `sc` on Windows) with deterministic reason-coded fallback (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) when native actions are unavailable or fail.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - `upgrade --dry-run` performs full planning and emits the same deterministic transaction preview format without mutating install state.
 - `install`, `upgrade`, and `bundle apply` support `--explain` in dry-run mode only; explainability lines are additive and deterministic (`explain_provider`, `explain_replacement`, `explain_conflict`).
 - Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
 - `install` and `upgrade` persist `install_mode` in receipts (`managed` or `native`, derived from artifact-kind defaults).
-- `--build-from-source` is parsed for `install` and `bundle apply` but currently guarded fail-closed until source-build execution is shipped.
+- `--build-from-source` is supported for `install` and `bundle apply` when manifests provide valid `source_build` metadata (including `archive_sha256`); invalid metadata, checksum mismatch, and command/tool failures fail closed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
 - `install` and `upgrade` persist GUI asset ownership in optional `<prefix>/state/installed/<name>.gui` sidecars for deterministic stale cleanup and uninstall removal.

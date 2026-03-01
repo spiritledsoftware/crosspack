@@ -2,14 +2,46 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use crosspack_security::sha256_hex;
+use crosspack_security::{sha256_hex, verify_ed25519_signature_hex};
+use serde::Deserialize;
 
 use crate::{
     compute_filesystem_snapshot_id, copy_source_to_temp, count_manifest_files,
     git_head_snapshot_id, read_snapshot_id, run_git_clone, run_git_command, unique_suffix,
-    validate_staged_registry_layout, write_snapshot_file, RegistryIndex, RegistrySourceKind,
-    RegistrySourceRecord, RegistrySourceStore, SourceUpdateStatus,
+    validate_community_recipe_catalog_path, validate_staged_registry_layout, write_snapshot_file,
+    RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
+    SourceUpdateStatus,
 };
+
+#[derive(Debug, Deserialize)]
+struct CommunityRecipeCatalog {
+    #[serde(default = "community_recipe_catalog_version")]
+    version: u32,
+    #[serde(default)]
+    recipes: Vec<CommunityRecipeCatalogEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommunityRecipeCatalogEntry {
+    package: String,
+}
+
+fn community_recipe_catalog_version() -> u32 {
+    1
+}
+
+fn is_package_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+
+    let starts_valid = bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit();
+    starts_valid
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._+-".contains(b))
+}
 
 pub(crate) fn update_source(
     store: &RegistrySourceStore,
@@ -117,6 +149,7 @@ fn finalize_staged_source_update(
         }
 
         verify_metadata_signature_policy(&staged_root, &source.name)?;
+        verify_community_recipe_catalog_policy(&staged_root, source)?;
 
         let manifest_count = count_manifest_files(&staged_root.join("index"))?;
         let existing_snapshot_id = read_snapshot_id(
@@ -205,6 +238,129 @@ fn finalize_staged_source_update(
         SourceUpdateStatus::Updated
     };
     Ok((status, snapshot_id))
+}
+
+pub(crate) fn verify_community_recipe_catalog_policy(
+    staged_root: &Path,
+    source: &RegistrySourceRecord,
+) -> Result<()> {
+    let Some(community) = &source.community else {
+        return Ok(());
+    };
+
+    validate_community_recipe_catalog_path(&community.recipe_catalog_path)?;
+
+    let trusted_key_path = staged_root.join("registry.pub");
+    let trusted_public_key_hex = fs::read_to_string(&trusted_key_path).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed reading trusted key {}",
+            source.name,
+            trusted_key_path.display()
+        )
+    })?;
+    let trusted_public_key_hex = trusted_public_key_hex.trim();
+
+    let catalog_path = staged_root.join(&community.recipe_catalog_path);
+    let catalog_bytes = fs::read(&catalog_path).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' missing community recipe catalog {}",
+            source.name,
+            catalog_path.display()
+        )
+    })?;
+
+    let catalog_signature_path = catalog_path.with_extension("toml.sig");
+    let catalog_signature_hex = fs::read_to_string(&catalog_signature_path).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' missing community recipe catalog signature {}",
+            source.name,
+            catalog_signature_path.display()
+        )
+    })?;
+    let catalog_signature_hex = catalog_signature_hex.trim();
+
+    let signature_is_valid = verify_ed25519_signature_hex(
+        &catalog_bytes,
+        trusted_public_key_hex,
+        catalog_signature_hex,
+    )
+    .with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed verifying community recipe catalog signature {}",
+            source.name,
+            catalog_signature_path.display()
+        )
+    })?;
+    if !signature_is_valid {
+        anyhow::bail!(
+            "source-metadata-invalid: source '{}' community recipe catalog has invalid signature {}",
+            source.name,
+            catalog_signature_path.display()
+        );
+    }
+
+    let catalog_content = String::from_utf8(catalog_bytes).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' community recipe catalog is not UTF-8: {}",
+            source.name,
+            catalog_path.display()
+        )
+    })?;
+    let catalog: CommunityRecipeCatalog = toml::from_str(&catalog_content).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed parsing community recipe catalog {}",
+            source.name,
+            catalog_path.display()
+        )
+    })?;
+
+    if catalog.version != community_recipe_catalog_version() {
+        anyhow::bail!(
+            "source-metadata-invalid: source '{}' unsupported community recipe catalog version {}",
+            source.name,
+            catalog.version
+        );
+    }
+
+    let mut previous = None::<&str>;
+    for entry in &catalog.recipes {
+        if entry.package.is_empty() {
+            anyhow::bail!(
+                "source-metadata-invalid: source '{}' community recipe catalog contains empty package entry",
+                source.name
+            );
+        }
+
+        if !is_package_token(&entry.package) {
+            anyhow::bail!(
+                "source-metadata-invalid: source '{}' community recipe catalog contains invalid package token '{}': use package-token grammar",
+                source.name,
+                entry.package
+            );
+        }
+
+        let package_index_dir = staged_root.join("index").join(&entry.package);
+        if !package_index_dir.is_dir() {
+            anyhow::bail!(
+                "source-metadata-invalid: source '{}' community recipe '{}' missing index directory {}",
+                source.name,
+                entry.package,
+                package_index_dir.display()
+            );
+        }
+
+        if let Some(last) = previous {
+            if entry.package.as_str() <= last {
+                anyhow::bail!(
+                    "source-metadata-invalid: source '{}' community recipe catalog must be strictly sorted by package name",
+                    source.name
+                );
+            }
+        }
+        previous = Some(entry.package.as_str());
+    }
+
+    Ok(())
 }
 
 pub(crate) fn verify_metadata_signature_policy(

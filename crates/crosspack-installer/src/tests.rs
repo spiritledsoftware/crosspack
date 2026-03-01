@@ -2,11 +2,12 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::anyhow;
-use crosspack_core::{ArchiveType, ArtifactCompletionShell, ArtifactGuiApp};
+use crosspack_core::{ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, ServiceDeclaration};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[cfg(unix)]
 use crate::artifact::copy_dmg_payload;
@@ -26,8 +27,8 @@ use crate::native::{
     project_macos_user_applications_dir, project_windows_start_menu_programs_dir,
     register_macos_application_symlink_with_creator,
     register_macos_native_gui_registration_with_executor_and_creator,
-    register_native_gui_app_best_effort_with_executor, select_macos_registration_destination,
-    MACOS_LSREGISTER_PATH,
+    register_native_gui_app_best_effort_with_executor, run_native_service_action_with_executor,
+    select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
 use crate::receipts::parse_receipt;
 
@@ -106,6 +107,68 @@ fn receipt_unknown_install_mode_falls_back_to_managed() {
     let raw = "name=fd\nversion=10.2.0\ninstall_mode=native-v2\ninstalled_at_unix=123\n";
     let receipt = parse_receipt(raw).expect("must parse unknown install mode tokens");
     assert_eq!(receipt.install_mode, InstallMode::Managed);
+}
+
+#[test]
+fn declared_services_state_round_trip() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let services = vec![
+        ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: None,
+        },
+        ServiceDeclaration {
+            name: "demo-worker".to_string(),
+            native_id: Some("demo-worker@main".to_string()),
+        },
+    ];
+
+    write_declared_services_state(&layout, "demo", &services)
+        .expect("must write declared services state");
+    let loaded =
+        read_declared_services_state(&layout, "demo").expect("must read declared services state");
+    assert_eq!(loaded, services);
+
+    let all =
+        read_all_declared_services_states(&layout).expect("must read all declared services state");
+    assert_eq!(all.get("demo"), Some(&services));
+}
+
+#[test]
+fn declared_services_state_is_removed_when_empty() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    write_declared_services_state(
+        &layout,
+        "demo",
+        &[ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: None,
+        }],
+    )
+    .expect("must write services state");
+    write_declared_services_state(&layout, "demo", &[]).expect("must clear services state");
+
+    assert!(!layout.declared_services_state_path("demo").exists());
+}
+
+#[test]
+fn native_service_adapter_returns_reason_coded_fallback_on_command_failure() {
+    let outcome = run_native_service_action_with_executor(
+        NativeServiceAction::Start,
+        "demo",
+        "demo",
+        |_command, _context| Err(anyhow!("simulated service command failure")),
+    );
+
+    assert!(
+        !outcome.applied,
+        "failed native command should report deterministic fallback"
+    );
+    assert_eq!(outcome.reason_code, "native-command-failed");
 }
 
 #[test]
@@ -1219,6 +1282,82 @@ fn install_from_artifact_rejects_native_installer_when_escalation_policy_forbids
     assert!(
         err.to_string()
             .contains("native installer mode requires escalation but policy forbids it"),
+        "unexpected error: {err}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_from_source_archive_runs_build_and_install_commands() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let source_root = layout.prefix().join("source");
+    let project_dir = source_root.join("demo-src");
+    fs::create_dir_all(&project_dir).expect("must create source project dir");
+    fs::write(project_dir.join("demo"), b"#!/bin/sh\n").expect("must write source payload");
+
+    let archive_path = layout.prefix().join("demo-src.tar.gz");
+    let tar_status = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&source_root)
+        .arg("demo-src")
+        .status()
+        .expect("must execute tar command for test fixture");
+    assert!(tar_status.success(), "tar fixture creation must succeed");
+
+    let install_root = install_from_source_archive(
+        &layout,
+        "demo",
+        "1.0.0",
+        &archive_path,
+        ArchiveType::TarGz,
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "cp demo built-demo".to_string(),
+        ],
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "test -f built-demo && cp built-demo $CROSSPACK_STAGE_DIR/built-demo".to_string(),
+        ],
+    )
+    .expect("source archive install should succeed");
+
+    assert!(
+        install_root.join("built-demo").exists(),
+        "source build output should be present in installed package root"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn install_from_source_archive_rejects_missing_build_commands() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let archive_path = layout.prefix().join("demo-src.tar.gz");
+    fs::write(&archive_path, b"not-a-real-archive").expect("must write archive fixture");
+
+    let err = install_from_source_archive(
+        &layout,
+        "demo",
+        "1.0.0",
+        &archive_path,
+        ArchiveType::TarGz,
+        &[],
+        &["true".to_string()],
+    )
+    .expect_err("empty build command set should fail closed");
+    assert!(
+        err.to_string()
+            .contains("source build metadata requires non-empty build_commands"),
         "unexpected error: {err}"
     );
 

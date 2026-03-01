@@ -13,23 +13,28 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use crosspack_core::{
     ArchiveType, Artifact, ArtifactCompletionShell, ArtifactGuiApp, PackageManifest,
+    ServiceDeclaration,
 };
+#[cfg(test)]
+use crosspack_installer::read_declared_services_state;
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, expose_completion, expose_gui_app, exposed_completion_path,
-    gui_asset_path, install_from_artifact, projected_exposed_completion_path, projected_gui_assets,
-    read_active_transaction, read_all_gui_exposure_states, read_all_pins, read_gui_exposure_state,
-    read_gui_native_state, read_install_receipts, read_transaction_metadata,
-    register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
-    remove_exposed_gui_asset, remove_file_if_exists, remove_native_gui_registration_best_effort,
+    gui_asset_path, install_from_artifact, install_from_source_archive,
+    projected_exposed_completion_path, projected_gui_assets, read_active_transaction,
+    read_all_declared_services_states, read_all_gui_exposure_states, read_all_pins,
+    read_gui_exposure_state, read_gui_native_state, read_install_receipts,
+    read_transaction_metadata, register_native_gui_app_best_effort, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_file_if_exists,
+    remove_native_gui_registration_best_effort, run_native_service_action,
     run_package_native_uninstall_actions, set_active_transaction,
     uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
     uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
-    write_gui_exposure_state, write_gui_native_state, write_install_receipt, write_pin,
-    write_transaction_metadata, ArtifactInstallOptions, GuiExposureAsset,
-    GuiNativeRegistrationRecord, InstallInteractionPolicy, InstallMode, InstallReason,
-    InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
-    UninstallStatus,
+    write_declared_services_state, write_gui_exposure_state, write_gui_native_state,
+    write_install_receipt, write_pin, write_transaction_metadata, ArtifactInstallOptions,
+    GuiExposureAsset, GuiNativeRegistrationRecord, InstallInteractionPolicy, InstallMode,
+    InstallReason, InstallReceipt, NativeServiceAction, NativeServiceOutcome, PrefixLayout,
+    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,

@@ -499,6 +499,106 @@ fn source_store_defaults_enabled_to_true_when_missing_in_loaded_state() {
 }
 
 #[test]
+fn source_store_persists_and_loads_optional_community_metadata() {
+    let root = test_registry_root();
+    let store = RegistrySourceStore::new(&root);
+
+    let mut source = source_record("community", 5);
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+    store.add_source(source).expect("must add source");
+
+    let listed = store.list_sources().expect("must list sources");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].community,
+        Some(RegistrySourceCommunity {
+            recipe_catalog_path: "community/recipes.toml".to_string(),
+        })
+    );
+
+    let content = fs::read_to_string(root.join("sources.toml")).expect("must read state file");
+    assert!(
+        content.contains("[sources.community]"),
+        "expected persisted nested community metadata block\n{content}"
+    );
+    assert!(
+        content.contains("recipe_catalog_path = \"community/recipes.toml\""),
+        "expected persisted recipe catalog path\n{content}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn source_store_rejects_invalid_community_recipe_catalog_path() {
+    let root = test_registry_root();
+    let store = RegistrySourceStore::new(&root);
+
+    let mut source = source_record("community", 5);
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "../recipes.toml".to_string(),
+    });
+
+    let err = store
+        .add_source(source)
+        .expect_err("must reject unsafe community recipe catalog path");
+    assert!(
+        err.to_string()
+            .contains("invalid community recipe catalog path"),
+        "expected community path validation error, got: {err:#}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn configured_index_precedence_remains_deterministic_with_community_metadata() {
+    let state_root = test_registry_root();
+    let store = RegistrySourceStore::new(&state_root);
+
+    let mut preferred = source_record("alpha", 1);
+    preferred.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+    store
+        .add_source(preferred)
+        .expect("must add preferred source");
+
+    store
+        .add_source(source_record("beta", 1))
+        .expect("must add fallback source");
+
+    let preferred_key = SigningKey::from_bytes(&[41u8; 32]);
+    let fallback_key = SigningKey::from_bytes(&[43u8; 32]);
+    write_ready_snapshot_cache(&state_root, "alpha", &preferred_key, &["14.2.0"]);
+    write_signed_community_recipe_catalog(
+        &state_root
+            .join("cache")
+            .join("alpha")
+            .join("community")
+            .join("recipes.toml"),
+        &preferred_key,
+        &["ripgrep"],
+    );
+    write_ready_snapshot_cache(&state_root, "beta", &fallback_key, &["14.1.0"]);
+
+    let index = ConfiguredRegistryIndex::open(&state_root).expect("must open configured index");
+    let manifests = index
+        .package_versions("ripgrep")
+        .expect("must read package using deterministic source ordering");
+
+    let versions: Vec<String> = manifests
+        .iter()
+        .map(|manifest| manifest.version.to_string())
+        .collect();
+    assert_eq!(versions, vec!["14.2.0"]);
+
+    let _ = fs::remove_dir_all(&state_root);
+}
+
+#[test]
 fn source_store_first_write_from_empty_uses_version_one() {
     let root = test_registry_root();
     let store = RegistrySourceStore::new(&root);
@@ -610,6 +710,53 @@ fn update_filesystem_source_accepts_uppercase_configured_fingerprint() {
     let results = store.update_sources(&[]).expect("must update source");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, SourceUpdateStatus::Updated);
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_community_recipe_catalog_signature_is_missing() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    let mut source = filesystem_source_record(
+        "local",
+        source_root
+            .to_str()
+            .expect("filesystem source path must be valid UTF-8"),
+        sha256_hex_bytes(&registry_pub),
+        0,
+    );
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+
+    fs::create_dir_all(source_root.join("community")).expect("must create community dir");
+    fs::write(
+        source_root.join("community").join("recipes.toml"),
+        "version = 1\n[[recipes]]\npackage = \"ripgrep\"\n",
+    )
+    .expect("must write community recipe catalog without signature");
+
+    store.add_source(source).expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    assert!(
+        results[0]
+            .error
+            .as_deref()
+            .expect("must include error message")
+            .contains("missing community recipe catalog signature"),
+        "expected fail-closed missing signature error, got: {:?}",
+        results[0].error
+    );
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1013,6 +1160,269 @@ fn configured_index_fails_when_no_ready_snapshot_exists() {
 }
 
 #[test]
+fn configured_index_fails_closed_when_cached_community_recipe_catalog_signature_is_invalid() {
+    let state_root = test_registry_root();
+    let store = RegistrySourceStore::new(&state_root);
+
+    let mut source = source_record("community", 0);
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+    store.add_source(source).expect("must add source");
+
+    let signing_key = SigningKey::from_bytes(&[53u8; 32]);
+    write_ready_snapshot_cache(&state_root, "community", &signing_key, &["14.1.0"]);
+    let catalog_path = state_root
+        .join("cache")
+        .join("community")
+        .join("community")
+        .join("recipes.toml");
+    write_signed_community_recipe_catalog(&catalog_path, &signing_key, &["ripgrep"]);
+    fs::write(catalog_path.with_extension("toml.sig"), "00")
+        .expect("must overwrite community metadata signature with invalid value");
+
+    let err = ConfiguredRegistryIndex::open(&state_root)
+        .expect_err("must fail closed for invalid community metadata signature");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("failed validating community recipe metadata"),
+        "expected configured-index validation context, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("community recipe catalog") && rendered.contains("signature"),
+        "expected explicit community signature failure details, got: {rendered}"
+    );
+
+    let _ = fs::remove_dir_all(&state_root);
+}
+
+#[test]
+fn community_recipe_catalog_rejects_unsupported_version() {
+    let staged_root = filesystem_source_fixture();
+    let signing_key = signing_key();
+    let catalog_path = staged_root.join("community").join("recipes.toml");
+    write_signed_community_recipe_catalog_raw(
+        &catalog_path,
+        &signing_key,
+        "version = 2\n[[recipes]]\npackage = \"ripgrep\"\n",
+    );
+
+    let mut source = filesystem_source_record(
+        "local",
+        staged_root
+            .to_str()
+            .expect("filesystem source path must be valid UTF-8"),
+        sha256_hex_bytes(
+            &fs::read(staged_root.join("registry.pub")).expect("must read registry key"),
+        ),
+        0,
+    );
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+
+    let err = verify_community_recipe_catalog_policy(&staged_root, &source)
+        .expect_err("must reject unsupported community recipe catalog version");
+    assert!(
+        err.to_string()
+            .contains("unsupported community recipe catalog version"),
+        "expected unsupported-version validation error, got: {err:#}"
+    );
+
+    let _ = fs::remove_dir_all(&staged_root);
+}
+
+#[test]
+fn community_recipe_catalog_rejects_unsorted_and_duplicate_entries() {
+    let staged_root = filesystem_source_fixture();
+    let signing_key = signing_key();
+    let catalog_path = staged_root.join("community").join("recipes.toml");
+    fs::create_dir_all(staged_root.join("index").join("zsh"))
+        .expect("must create zsh package index directory");
+    write_signed_community_recipe_catalog_raw(
+        &catalog_path,
+        &signing_key,
+        concat!(
+            "version = 1\n",
+            "[[recipes]]\n",
+            "package = \"ripgrep\"\n",
+            "[[recipes]]\n",
+            "package = \"ripgrep\"\n",
+        ),
+    );
+
+    let mut source = filesystem_source_record(
+        "local",
+        staged_root
+            .to_str()
+            .expect("filesystem source path must be valid UTF-8"),
+        sha256_hex_bytes(
+            &fs::read(staged_root.join("registry.pub")).expect("must read registry key"),
+        ),
+        0,
+    );
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+
+    let duplicate_err = verify_community_recipe_catalog_policy(&staged_root, &source)
+        .expect_err("must reject duplicate package entries");
+    assert!(
+        duplicate_err
+            .to_string()
+            .contains("must be strictly sorted by package name"),
+        "expected strict-sort duplicate rejection, got: {duplicate_err:#}"
+    );
+
+    write_signed_community_recipe_catalog_raw(
+        &catalog_path,
+        &signing_key,
+        concat!(
+            "version = 1\n",
+            "[[recipes]]\n",
+            "package = \"zsh\"\n",
+            "[[recipes]]\n",
+            "package = \"ripgrep\"\n",
+        ),
+    );
+
+    let unsorted_err = verify_community_recipe_catalog_policy(&staged_root, &source)
+        .expect_err("must reject unsorted package entries");
+    assert!(
+        unsorted_err
+            .to_string()
+            .contains("must be strictly sorted by package name"),
+        "expected strict-sort unsorted rejection, got: {unsorted_err:#}"
+    );
+
+    let _ = fs::remove_dir_all(&staged_root);
+}
+
+#[test]
+fn community_recipe_catalog_rejects_empty_package_entry() {
+    let staged_root = filesystem_source_fixture();
+    let signing_key = signing_key();
+    let catalog_path = staged_root.join("community").join("recipes.toml");
+    write_signed_community_recipe_catalog_raw(
+        &catalog_path,
+        &signing_key,
+        "version = 1\n[[recipes]]\npackage = \"\"\n",
+    );
+
+    let mut source = filesystem_source_record(
+        "local",
+        staged_root
+            .to_str()
+            .expect("filesystem source path must be valid UTF-8"),
+        sha256_hex_bytes(
+            &fs::read(staged_root.join("registry.pub")).expect("must read registry key"),
+        ),
+        0,
+    );
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+
+    let err = verify_community_recipe_catalog_policy(&staged_root, &source)
+        .expect_err("must reject empty package entries");
+    assert!(
+        err.to_string().contains("contains empty package entry"),
+        "expected empty package validation error, got: {err:#}"
+    );
+
+    let _ = fs::remove_dir_all(&staged_root);
+}
+
+#[test]
+fn community_recipe_catalog_rejects_missing_index_directory_for_listed_package() {
+    let staged_root = filesystem_source_fixture();
+    let signing_key = signing_key();
+    let catalog_path = staged_root.join("community").join("recipes.toml");
+    write_signed_community_recipe_catalog_raw(
+        &catalog_path,
+        &signing_key,
+        "version = 1\n[[recipes]]\npackage = \"zsh\"\n",
+    );
+
+    let mut source = filesystem_source_record(
+        "local",
+        staged_root
+            .to_str()
+            .expect("filesystem source path must be valid UTF-8"),
+        sha256_hex_bytes(
+            &fs::read(staged_root.join("registry.pub")).expect("must read registry key"),
+        ),
+        0,
+    );
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+
+    let err = verify_community_recipe_catalog_policy(&staged_root, &source)
+        .expect_err("must reject catalog entries missing index directories");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("missing index directory"),
+        "expected missing index directory error, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("index/zsh"),
+        "expected deterministic missing directory path details, got: {rendered}"
+    );
+
+    let _ = fs::remove_dir_all(&staged_root);
+}
+
+#[test]
+fn community_recipe_catalog_rejects_invalid_package_tokens() {
+    let staged_root = filesystem_source_fixture();
+    let signing_key = signing_key();
+    let catalog_path = staged_root.join("community").join("recipes.toml");
+
+    fs::create_dir_all(staged_root.join("index").join("ripgrep").join("plugins"))
+        .expect("must create nested index path to ensure grammar check is enforced");
+
+    let mut source = filesystem_source_record(
+        "local",
+        staged_root
+            .to_str()
+            .expect("filesystem source path must be valid UTF-8"),
+        sha256_hex_bytes(
+            &fs::read(staged_root.join("registry.pub")).expect("must read registry key"),
+        ),
+        0,
+    );
+    source.community = Some(RegistrySourceCommunity {
+        recipe_catalog_path: "community/recipes.toml".to_string(),
+    });
+
+    for token in [
+        "ripgrep/plugins",
+        "..",
+        "Ripgrep",
+        "-ripgrep",
+        "ripgrep\\plugins",
+    ] {
+        let escaped_token = token.replace('\\', "\\\\");
+        write_signed_community_recipe_catalog_raw(
+            &catalog_path,
+            &signing_key,
+            &format!("version = 1\n[[recipes]]\npackage = \"{escaped_token}\"\n"),
+        );
+
+        let err = verify_community_recipe_catalog_policy(&staged_root, &source)
+            .expect_err("must reject invalid community package token");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("invalid package token"),
+            "expected invalid package token error for '{token}', got: {rendered}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&staged_root);
+}
+
+#[test]
 fn configured_index_open_fails_when_sources_file_is_unreadable() {
     let state_root = test_registry_root();
     fs::create_dir_all(state_root.join("sources.toml")).expect("must make sources path unreadable");
@@ -1150,6 +1560,48 @@ fn write_signed_manifest(package_dir: &std::path::Path, signing_key: &SigningKey
     .expect("must write signature sidecar");
 }
 
+fn write_signed_community_recipe_catalog(
+    catalog_path: &Path,
+    signing_key: &SigningKey,
+    package_names: &[&str],
+) {
+    if let Some(parent) = catalog_path.parent() {
+        fs::create_dir_all(parent).expect("must create community metadata directory");
+    }
+
+    let mut catalog = String::from("version = 1\n");
+    for package_name in package_names {
+        catalog.push_str("[[recipes]]\n");
+        catalog.push_str(&format!("package = \"{package_name}\"\n"));
+    }
+
+    fs::write(catalog_path, catalog.as_bytes()).expect("must write community recipe catalog");
+    let signature = signing_key.sign(catalog.as_bytes());
+    fs::write(
+        catalog_path.with_extension("toml.sig"),
+        hex::encode(signature.to_bytes()),
+    )
+    .expect("must write community recipe catalog signature");
+}
+
+fn write_signed_community_recipe_catalog_raw(
+    catalog_path: &Path,
+    signing_key: &SigningKey,
+    catalog: &str,
+) {
+    if let Some(parent) = catalog_path.parent() {
+        fs::create_dir_all(parent).expect("must create community metadata directory");
+    }
+
+    fs::write(catalog_path, catalog.as_bytes()).expect("must write community recipe catalog");
+    let signature = signing_key.sign(catalog.as_bytes());
+    fs::write(
+        catalog_path.with_extension("toml.sig"),
+        hex::encode(signature.to_bytes()),
+    )
+    .expect("must write community recipe catalog signature");
+}
+
 fn rewrite_signed_manifest_with_extra_field(
     manifest_path: &Path,
     signing_key: &SigningKey,
@@ -1192,6 +1644,7 @@ fn source_record(name: &str, priority: u32) -> RegistrySourceRecord {
             .to_string(),
         enabled: true,
         priority,
+        community: None,
     }
 }
 
@@ -1208,6 +1661,7 @@ fn git_source_record(
         fingerprint_sha256,
         enabled: true,
         priority,
+        community: None,
     }
 }
 
@@ -1224,6 +1678,7 @@ fn filesystem_source_record(
         fingerprint_sha256,
         enabled: true,
         priority,
+        community: None,
     }
 }
 

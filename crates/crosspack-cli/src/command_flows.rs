@@ -216,6 +216,12 @@ struct ManagedServiceRow {
     state: ManagedServiceState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredServiceRecord {
+    package: String,
+    service: ServiceDeclaration,
+}
+
 fn managed_services_state_dir(layout: &PrefixLayout) -> PathBuf {
     layout.state_dir().join("services")
 }
@@ -233,17 +239,56 @@ fn validate_service_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_service_package_installed(layout: &PrefixLayout, name: &str) -> Result<()> {
+fn declared_service_for_name(layout: &PrefixLayout, name: &str) -> Result<DeclaredServiceRecord> {
     validate_service_name(name)?;
-    let installed = read_install_receipts(layout)?
-        .iter()
-        .any(|receipt| receipt.name == name);
-    if !installed {
+    let declared = collect_declared_services(layout)?;
+    let Some(service) = declared.get(name).cloned() else {
         return Err(anyhow!(
-            "No installed package found: {name}. Install it first with `crosspack install {name}`"
+            "No declared service found: {name}. Install or upgrade a package that declares this service in its manifest (for example: `crosspack install {name}`)"
         ));
+    };
+    Ok(service)
+}
+
+fn collect_declared_services(
+    layout: &PrefixLayout,
+) -> Result<HashMap<String, DeclaredServiceRecord>> {
+    let receipts = read_install_receipts(layout)?;
+    let declared_by_package = read_all_declared_services_states(layout)?;
+
+    let mut services = HashMap::new();
+    for receipt in &receipts {
+        let Some(package_services) = declared_by_package.get(&receipt.name) else {
+            continue;
+        };
+        for service in package_services {
+            validate_service_name(&service.name)?;
+            let existing = services.insert(
+                service.name.clone(),
+                DeclaredServiceRecord {
+                    package: receipt.name.clone(),
+                    service: service.clone(),
+                },
+            );
+            if let Some(previous) = existing {
+                return Err(anyhow!(
+                    "duplicate declared service '{name}' across packages '{left}' and '{right}'",
+                    name = service.name,
+                    left = previous.package,
+                    right = receipt.name
+                ));
+            }
+        }
     }
-    Ok(())
+
+    Ok(services)
+}
+
+fn declared_service_native_id(service: &ServiceDeclaration) -> String {
+    service
+        .native_id
+        .clone()
+        .unwrap_or_else(|| service.name.clone())
 }
 
 fn read_managed_service_state(layout: &PrefixLayout, name: &str) -> Result<ManagedServiceState> {
@@ -307,57 +352,11 @@ fn write_managed_service_state(
 }
 
 fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServiceRow>> {
-    let installed = read_install_receipts(layout)?
-        .into_iter()
-        .map(|receipt| receipt.name)
-        .collect::<HashSet<_>>();
-
-    let state_root = managed_services_state_dir(layout);
-    let entries = match std::fs::read_dir(&state_root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "failed reading services state directory: {}",
-                    state_root.display()
-                )
-            })
-        }
-    };
-
+    let declared = collect_declared_services(layout)?;
     let mut rows = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| {
-            format!(
-                "failed iterating services state directory: {}",
-                state_root.display()
-            )
-        })?;
-        let file_type = entry.file_type().with_context(|| {
-            format!(
-                "failed reading service state entry metadata: {}",
-                entry.path().display()
-            )
-        })?;
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let file_name = entry.file_name();
-        let Some(name) = file_name
-            .to_str()
-            .and_then(|value| value.strip_suffix(".service"))
-        else {
-            continue;
-        };
-
-        if !installed.contains(name) {
-            continue;
-        }
-
+    for name in declared.keys() {
         rows.push(ManagedServiceRow {
-            name: name.to_string(),
+            name: name.clone(),
             state: read_managed_service_state(layout, name)?,
         });
     }
@@ -367,31 +366,101 @@ fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServ
 }
 
 fn run_service_status_command(layout: &PrefixLayout, name: &str) -> Result<()> {
-    ensure_service_package_installed(layout, name)?;
+    let declared = declared_service_for_name(layout, name)?;
+    let native_outcome = run_native_service_action(
+        NativeServiceAction::Status,
+        &declared.service.name,
+        &declared_service_native_id(&declared.service),
+    );
     let state = read_managed_service_state(layout, name)?;
-    println!("service_state name={name} state={}", state.as_str());
+    println!(
+        "{}",
+        render_service_state_line(name, state, None, &native_outcome)
+    );
     Ok(())
 }
 
 fn run_service_start_command(layout: &PrefixLayout, name: &str) -> Result<()> {
-    ensure_service_package_installed(layout, name)?;
-    write_managed_service_state(layout, name, ManagedServiceState::Running)?;
-    println!("service_state name={name} state=running action=start");
+    let declared = declared_service_for_name(layout, name)?;
+    let native_outcome = run_native_service_action(
+        NativeServiceAction::Start,
+        &declared.service.name,
+        &declared_service_native_id(&declared.service),
+    );
+    let next_state = if native_outcome.applied {
+        ManagedServiceState::Running
+    } else {
+        read_managed_service_state(layout, name)?
+    };
+    if native_outcome.applied {
+        write_managed_service_state(layout, name, next_state)?;
+    }
+    println!(
+        "{}",
+        render_service_state_line(name, next_state, Some("start"), &native_outcome)
+    );
     Ok(())
 }
 
 fn run_service_stop_command(layout: &PrefixLayout, name: &str) -> Result<()> {
-    ensure_service_package_installed(layout, name)?;
-    write_managed_service_state(layout, name, ManagedServiceState::Stopped)?;
-    println!("service_state name={name} state=stopped action=stop");
+    let declared = declared_service_for_name(layout, name)?;
+    let native_outcome = run_native_service_action(
+        NativeServiceAction::Stop,
+        &declared.service.name,
+        &declared_service_native_id(&declared.service),
+    );
+    let next_state = if native_outcome.applied {
+        ManagedServiceState::Stopped
+    } else {
+        read_managed_service_state(layout, name)?
+    };
+    if native_outcome.applied {
+        write_managed_service_state(layout, name, next_state)?;
+    }
+    println!(
+        "{}",
+        render_service_state_line(name, next_state, Some("stop"), &native_outcome)
+    );
     Ok(())
 }
 
 fn run_service_restart_command(layout: &PrefixLayout, name: &str) -> Result<()> {
-    ensure_service_package_installed(layout, name)?;
-    write_managed_service_state(layout, name, ManagedServiceState::Running)?;
-    println!("service_state name={name} state=running action=restart");
+    let declared = declared_service_for_name(layout, name)?;
+    let native_outcome = run_native_service_action(
+        NativeServiceAction::Restart,
+        &declared.service.name,
+        &declared_service_native_id(&declared.service),
+    );
+    let next_state = if native_outcome.applied {
+        ManagedServiceState::Running
+    } else {
+        read_managed_service_state(layout, name)?
+    };
+    if native_outcome.applied {
+        write_managed_service_state(layout, name, next_state)?;
+    }
+    println!(
+        "{}",
+        render_service_state_line(name, next_state, Some("restart"), &native_outcome)
+    );
     Ok(())
+}
+
+fn render_service_state_line(
+    name: &str,
+    state: ManagedServiceState,
+    action: Option<&str>,
+    native_outcome: &NativeServiceOutcome,
+) -> String {
+    let mut line = format!("service_state name={name} state={}", state.as_str());
+    if let Some(action) = action {
+        line.push_str(&format!(" action={action}"));
+    }
+    line.push_str(&format!(
+        " adapter={} applied={} reason={}",
+        native_outcome.adapter, native_outcome.applied, native_outcome.reason_code
+    ));
+    line
 }
 
 fn run_services_command(layout: &PrefixLayout, command: ServicesCommands) -> Result<()> {
@@ -794,6 +863,10 @@ fn run_upgrade_command(
                     journal_seq += 1;
 
                     let dependencies = build_dependency_receipts(package, &resolved);
+                    let mut source_build_journal = SourceBuildJournal {
+                        txid: &tx.txid,
+                        seq: &mut journal_seq,
+                    };
                     let outcome = install_resolved(
                         layout,
                         package,
@@ -806,6 +879,7 @@ fn run_upgrade_command(
                             interaction_policy,
                             install_progress_mode: current_install_progress_mode(output_style),
                         },
+                        Some(&mut source_build_journal),
                     )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         println!(
@@ -961,6 +1035,10 @@ fn run_upgrade_command(
                         journal_seq += 1;
 
                         let dependencies = build_dependency_receipts(package, resolved);
+                        let mut source_build_journal = SourceBuildJournal {
+                            txid: &tx.txid,
+                            seq: &mut journal_seq,
+                        };
                         let outcome = install_resolved(
                             layout,
                             package,
@@ -973,6 +1051,7 @@ fn run_upgrade_command(
                                 interaction_policy,
                                 install_progress_mode: current_install_progress_mode(output_style),
                             },
+                            Some(&mut source_build_journal),
                         )?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
@@ -1226,6 +1305,10 @@ fn snapshot_native_sidecar_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root.join("native").join("sidecar.state")
 }
 
+fn snapshot_declared_services_sidecar_path(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("services").join("declared.services")
+}
+
 fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifest> {
     let path = snapshot_manifest_path(snapshot_root);
     let raw = match std::fs::read_to_string(&path) {
@@ -1238,6 +1321,7 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
                 completions: Vec::new(),
                 gui_assets: Vec::new(),
                 native_sidecar_exists: false,
+                declared_services_sidecar_exists: false,
             });
         }
         Err(err) => {
@@ -1253,6 +1337,7 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
         completions: Vec::new(),
         gui_assets: Vec::new(),
         native_sidecar_exists: false,
+        declared_services_sidecar_exists: false,
     };
 
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -1274,6 +1359,8 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
             });
         } else if let Some(value) = line.strip_prefix("native_sidecar_exists=") {
             manifest.native_sidecar_exists = value == "1";
+        } else if let Some(value) = line.strip_prefix("declared_services_sidecar_exists=") {
+            manifest.declared_services_sidecar_exists = value == "1";
         }
     }
 
@@ -1303,6 +1390,14 @@ fn write_snapshot_manifest(snapshot_root: &Path, manifest: &PackageSnapshotManif
     lines.push(format!(
         "native_sidecar_exists={}",
         if manifest.native_sidecar_exists {
+            "1"
+        } else {
+            "0"
+        }
+    ));
+    lines.push(format!(
+        "declared_services_sidecar_exists={}",
+        if manifest.declared_services_sidecar_exists {
             "1"
         } else {
             "0"
@@ -1413,6 +1508,16 @@ fn capture_package_state_snapshot(
             snapshot_native_dir.display()
         )
     })?;
+    let snapshot_services_dir = snapshot_declared_services_sidecar_path(&snapshot_root)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("failed resolving rollback snapshot services state directory"))?;
+    std::fs::create_dir_all(&snapshot_services_dir).with_context(|| {
+        format!(
+            "failed creating rollback snapshot services state dir: {}",
+            snapshot_services_dir.display()
+        )
+    })?;
 
     let mut manifest = PackageSnapshotManifest {
         package_exists: false,
@@ -1421,6 +1526,7 @@ fn capture_package_state_snapshot(
         completions: Vec::new(),
         gui_assets: Vec::new(),
         native_sidecar_exists: false,
+        declared_services_sidecar_exists: false,
     };
 
     let package_root = layout.pkgs_dir().join(package_name);
@@ -1496,6 +1602,21 @@ fn capture_package_state_snapshot(
             format!(
                 "failed copying native sidecar snapshot {}",
                 snapshot_native_sidecar_path(&snapshot_root).display()
+            )
+        })?;
+    }
+
+    let declared_services_sidecar_path = layout.declared_services_state_path(package_name);
+    if declared_services_sidecar_path.exists() {
+        manifest.declared_services_sidecar_exists = true;
+        std::fs::copy(
+            &declared_services_sidecar_path,
+            snapshot_declared_services_sidecar_path(&snapshot_root),
+        )
+        .with_context(|| {
+            format!(
+                "failed copying declared services sidecar snapshot {}",
+                snapshot_declared_services_sidecar_path(&snapshot_root).display()
             )
         })?;
     }
@@ -1650,6 +1771,7 @@ fn restore_package_state_snapshot(
     }
 
     remove_file_if_exists(&layout.receipt_path(package_name))?;
+    remove_file_if_exists(&layout.declared_services_state_path(package_name))?;
 
     let Some(snapshot_root) = snapshot_root else {
         return Ok(());
@@ -1662,6 +1784,7 @@ fn restore_package_state_snapshot(
         completions,
         gui_assets,
         native_sidecar_exists,
+        declared_services_sidecar_exists,
     } = read_snapshot_manifest(snapshot_root)?;
 
     if package_exists && snapshot_package_root(snapshot_root).exists() {
@@ -1746,6 +1869,24 @@ fn restore_package_state_snapshot(
             std::fs::copy(&src, &dst).with_context(|| {
                 format!(
                     "failed restoring native sidecar state from {}",
+                    src.display()
+                )
+            })?;
+        }
+    }
+
+    if declared_services_sidecar_exists {
+        let dst = layout.declared_services_state_path(package_name);
+        let src = snapshot_declared_services_sidecar_path(snapshot_root);
+        remove_file_if_exists(&dst)?;
+        if src.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::copy(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring declared services sidecar from {}",
                     src.display()
                 )
             })?;

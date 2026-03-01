@@ -20,7 +20,7 @@ This spec does not cover:
 
 ## Goals
 
-- Keep a Homebrew-like local-first workflow with simple commands.
+- Keep a Crosspack-native local-first workflow with simple commands.
 - Add APT-like trust pinning and fail-closed metadata usage.
 - Keep package selection deterministic across sources.
 - Keep existing `search`, `info`, `install`, and `upgrade` behavior stable unless source configuration requires stricter validation.
@@ -37,6 +37,7 @@ This spec does not cover:
 - Snapshot: a verified local copy of a source at a specific revision.
 - Fingerprint: SHA-256 hex digest of the raw `registry.pub` bytes.
 - Source precedence: deterministic ordering used when the same package exists in multiple sources.
+- Community recipe catalog: optional source-scoped metadata describing community-managed recipe package names.
 
 ## Official Bootstrap Contract (SPI-26)
 
@@ -172,12 +173,16 @@ location = "https://github.com/spiritledsoftware/crosspack-registry.git"
 priority = 100
 fingerprint_sha256 = "65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2"
 enabled = true
+
+[sources.community]
+recipe_catalog_path = "community/recipes.toml"
 ```
 
 Rules:
 
 - Serializer must emit sources sorted by `(priority, name)` for deterministic diffs.
 - `enabled` defaults to `true` when missing.
+- `community` is optional; when present, `recipe_catalog_path` must be a relative `.toml` path under the source snapshot.
 - Unknown fields are ignored for forward compatibility.
 
 ### `snapshot.json`
@@ -208,8 +213,10 @@ For each targeted source, `crosspack update` performs:
    - `index/`
 3. Compute fingerprint from fetched `registry.pub` and compare against `sources.toml`.
 4. Verify metadata signature policy can be enforced (sidecar files must be present for manifests that are read by registry APIs).
-5. Atomically replace `<prefix>/state/registries/cache/<name>/`.
-6. Write `snapshot.json`.
+5. If source `community` metadata is configured, verify `recipe_catalog_path` and detached signature (`.toml.sig`) using the same pinned source trust root.
+6. Parse and validate the community recipe catalog (supported schema version, strictly sorted package names, package directories present).
+7. Atomically replace `<prefix>/state/registries/cache/<name>/`.
+8. Write `snapshot.json`.
 
 If any step fails, existing cache for that source remains unchanged.
 

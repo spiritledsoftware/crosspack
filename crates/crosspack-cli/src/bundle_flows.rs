@@ -124,7 +124,6 @@ fn run_bundle_apply_command(
     options: BundleApplyOptions<'_>,
 ) -> Result<()> {
     ensure_explain_requires_dry_run("bundle apply", options.dry_run, options.explain)?;
-    ensure_build_from_source_not_supported("bundle apply", options.build_from_source)?;
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "bundle apply")?;
     let provider_overrides = parse_provider_overrides(options.provider_values)?;
@@ -232,6 +231,10 @@ fn run_bundle_apply_command(
                 journal_seq += 1;
 
                 let dependencies = build_dependency_receipts(package, &plan.resolved);
+                let mut source_build_journal = SourceBuildJournal {
+                    txid: &tx.txid,
+                    seq: &mut journal_seq,
+                };
                 let outcome = install_resolved(
                     layout,
                     package,
@@ -244,6 +247,7 @@ fn run_bundle_apply_command(
                         interaction_policy,
                         install_progress_mode,
                     },
+                    Some(&mut source_build_journal),
                 )?;
                 print_install_outcome(&outcome, output_style);
             }

@@ -99,6 +99,10 @@ impl PrefixLayout {
             .join(format!("{name}.gui-native"))
     }
 
+    pub fn declared_services_state_path(&self, name: &str) -> PathBuf {
+        self.installed_state_dir().join(format!("{name}.services"))
+    }
+
     pub fn transactions_dir(&self) -> PathBuf {
         self.state_dir().join("transactions")
     }

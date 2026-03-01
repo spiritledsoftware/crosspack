@@ -14,13 +14,154 @@ use crate::exposure::{
 };
 use crate::fs_utils::remove_file_if_exists;
 use crate::{
-    GuiExposureAsset, GuiNativeRegistrationRecord, NativeSidecarState, NativeUninstallAction,
-    PrefixLayout,
+    GuiExposureAsset, GuiNativeRegistrationRecord, NativeServiceAction, NativeServiceOutcome,
+    NativeSidecarState, NativeUninstallAction, PrefixLayout,
 };
 
 pub(crate) const MACOS_LSREGISTER_PATH: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
 const NATIVE_SIDECAR_VERSION: u32 = 1;
+
+pub fn run_native_service_action(
+    action: NativeServiceAction,
+    service_name: &str,
+    native_id: &str,
+) -> NativeServiceOutcome {
+    run_native_service_action_with_executor(action, service_name, native_id, run_command)
+}
+
+pub(crate) fn run_native_service_action_with_executor<RunCommand>(
+    action: NativeServiceAction,
+    _service_name: &str,
+    native_id: &str,
+    mut run_command_executor: RunCommand,
+) -> NativeServiceOutcome
+where
+    RunCommand: FnMut(&mut Command, &str) -> Result<()>,
+{
+    let (adapter, mut commands): (&str, Vec<(Command, &'static str)>) = if cfg!(target_os = "linux")
+    {
+        (
+            "systemd",
+            vec![(
+                build_systemd_service_command(action, native_id),
+                "failed to execute systemd service action",
+            )],
+        )
+    } else if cfg!(target_os = "macos") {
+        (
+            "launchctl",
+            vec![(
+                build_macos_launchctl_service_command(action, native_id),
+                "failed to execute launchctl service action",
+            )],
+        )
+    } else if cfg!(windows) {
+        (
+            "windows-scm",
+            build_windows_service_commands(action, native_id),
+        )
+    } else {
+        return NativeServiceOutcome {
+            adapter: "unsupported".to_string(),
+            applied: false,
+            reason_code: "unsupported-host".to_string(),
+        };
+    };
+
+    for (command, context) in &mut commands {
+        if let Err(err) = run_command_executor(command, context) {
+            let reason_code = if error_chain_has_not_found(&err) {
+                "adapter-tool-missing"
+            } else {
+                "native-command-failed"
+            };
+            return NativeServiceOutcome {
+                adapter: adapter.to_string(),
+                applied: false,
+                reason_code: reason_code.to_string(),
+            };
+        }
+    }
+
+    NativeServiceOutcome {
+        adapter: adapter.to_string(),
+        applied: true,
+        reason_code: "native-applied".to_string(),
+    }
+}
+
+fn error_chain_has_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .map(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
+            .unwrap_or(false)
+    })
+}
+
+fn build_systemd_service_command(action: NativeServiceAction, native_id: &str) -> Command {
+    let mut command = Command::new("systemctl");
+    let verb = match action {
+        NativeServiceAction::Status => "status",
+        NativeServiceAction::Start => "start",
+        NativeServiceAction::Stop => "stop",
+        NativeServiceAction::Restart => "restart",
+    };
+    command.arg(verb).arg(native_id);
+    command
+}
+
+fn build_macos_launchctl_service_command(action: NativeServiceAction, native_id: &str) -> Command {
+    let mut command = Command::new("launchctl");
+    match action {
+        NativeServiceAction::Status => {
+            command.arg("print").arg(format!("system/{native_id}"));
+        }
+        NativeServiceAction::Start => {
+            command.arg("start").arg(native_id);
+        }
+        NativeServiceAction::Stop => {
+            command.arg("stop").arg(native_id);
+        }
+        NativeServiceAction::Restart => {
+            command
+                .arg("kickstart")
+                .arg("-k")
+                .arg(format!("system/{native_id}"));
+        }
+    }
+    command
+}
+
+fn build_windows_service_commands(
+    action: NativeServiceAction,
+    native_id: &str,
+) -> Vec<(Command, &'static str)> {
+    match action {
+        NativeServiceAction::Restart => {
+            let mut stop = Command::new("sc");
+            stop.arg("stop").arg(native_id);
+            let mut start = Command::new("sc");
+            start.arg("start").arg(native_id);
+            vec![
+                (stop, "failed to execute Windows service stop action"),
+                (start, "failed to execute Windows service start action"),
+            ]
+        }
+        _ => {
+            let mut command = Command::new("sc");
+            let verb = match action {
+                NativeServiceAction::Status => "query",
+                NativeServiceAction::Start => "start",
+                NativeServiceAction::Stop => "stop",
+                NativeServiceAction::Restart => unreachable!(),
+            };
+            command.arg(verb).arg(native_id);
+            vec![(command, "failed to execute Windows service action")]
+        }
+    }
+}
 
 pub fn write_native_sidecar_state(
     layout: &PrefixLayout,

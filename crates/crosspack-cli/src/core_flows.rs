@@ -90,6 +90,16 @@ fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
     for manifest in manifests {
         lines.push(format!("- {}", manifest.version));
 
+        if let Some(description) = manifest.description.as_deref() {
+            let trimmed = description.trim();
+            if !trimmed.is_empty() {
+                lines.push(format!(
+                    "  Description: {}",
+                    sanitize_metadata_cell(trimmed)
+                ));
+            }
+        }
+
         if !manifest.provides.is_empty() {
             lines.push(format!("  Provides: {}", manifest.provides.join(", ")));
         }
@@ -214,6 +224,17 @@ struct ResolvedInstall {
     manifest: PackageManifest,
     artifact: Artifact,
     resolved_target: String,
+    archive_type: ArchiveType,
+    source_build: Option<SourceBuildPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceBuildPlan {
+    url: String,
+    archive_sha256: String,
+    build_system: String,
+    build_commands: Vec<String>,
+    install_commands: Vec<String>,
     archive_type: ArchiveType,
 }
 
@@ -355,6 +376,7 @@ struct PackageSnapshotManifest {
     completions: Vec<String>,
     gui_assets: Vec<GuiExposureAsset>,
     native_sidecar_exists: bool,
+    declared_services_sidecar_exists: bool,
 }
 
 fn begin_transaction(
@@ -621,27 +643,24 @@ fn resolve_install_graph_with_tokens(
                 .ok_or_else(|| anyhow!("resolver selected package missing from graph: {name}"))?
                 .clone();
 
-            let artifact =
-                select_artifact_for_target(&manifest, &resolved_target, build_from_source)?;
-            let archive_type = artifact.archive_type()?;
+            let (artifact, source_build) =
+                select_install_plan_for_target(&manifest, &resolved_target, build_from_source)?;
+            let archive_type = source_build
+                .as_ref()
+                .map(|plan| plan.archive_type)
+                .unwrap_or(artifact.archive_type()?);
 
             Ok(ResolvedInstall {
                 manifest,
                 artifact,
                 resolved_target: resolved_target.clone(),
                 archive_type,
+                source_build,
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
     Ok((resolved, resolved_dependency_tokens))
-}
-
-fn ensure_build_from_source_not_supported(_operation: &str, build_from_source: bool) -> Result<()> {
-    if build_from_source {
-        return Err(source_build_not_supported_error());
-    }
-    Ok(())
 }
 
 fn ensure_explain_requires_dry_run(operation: &str, dry_run: bool, explain: bool) -> Result<()> {
@@ -651,32 +670,47 @@ fn ensure_explain_requires_dry_run(operation: &str, dry_run: bool, explain: bool
     Ok(())
 }
 
-fn source_build_not_supported_error() -> anyhow::Error {
-    anyhow!(
-        "source builds are not yet supported; remove --build-from-source and use a target with published binary artifacts"
-    )
-}
-
+#[cfg(test)]
 fn select_artifact_for_target(
     manifest: &PackageManifest,
     resolved_target: &str,
     build_from_source: bool,
 ) -> Result<Artifact> {
+    let (artifact, _) =
+        select_install_plan_for_target(manifest, resolved_target, build_from_source)?;
+    Ok(artifact)
+}
+
+fn select_install_plan_for_target(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+    build_from_source: bool,
+) -> Result<(Artifact, Option<SourceBuildPlan>)> {
+    if build_from_source {
+        let source = manifest.source_build.as_ref().ok_or_else(|| {
+            anyhow!(
+                "source build requested for {} {} on target {} but manifest has no source_build metadata",
+                manifest.name,
+                manifest.version,
+                resolved_target
+            )
+        })?;
+        let artifact = select_source_build_artifact_template(manifest, resolved_target)?;
+        let plan = validate_source_build_plan(manifest, resolved_target, source)?;
+        return Ok((artifact, Some(plan)));
+    }
+
     if let Some(artifact) = manifest
         .artifacts
         .iter()
         .find(|artifact| artifact.target == resolved_target)
     {
-        return Ok(artifact.clone());
+        return Ok((artifact.clone(), None));
     }
 
     if manifest.source_build.is_some() {
-        if build_from_source {
-            return Err(source_build_not_supported_error());
-        }
-
         return Err(anyhow!(
-            "source build required for {} {} on target {}: no binary artifact published; source builds are not yet supported",
+            "source build required for {} {} on target {}: no binary artifact published; rerun with --build-from-source",
             manifest.name,
             manifest.version,
             resolved_target
@@ -689,6 +723,132 @@ fn select_artifact_for_target(
         manifest.name,
         manifest.version
     ))
+}
+
+fn select_source_build_artifact_template(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+) -> Result<Artifact> {
+    if let Some(artifact) = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.target == resolved_target)
+    {
+        return Ok(artifact.clone());
+    }
+
+    if manifest.artifacts.len() == 1 {
+        return Ok(manifest.artifacts[0].clone());
+    }
+
+    Err(anyhow!(
+        "source build for {} {} on target {} requires deterministic artifact metadata (expected exactly one artifact template when target-specific artifact is absent)",
+        manifest.name,
+        manifest.version,
+        resolved_target
+    ))
+}
+
+fn validate_source_build_plan(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+    source: &crosspack_core::SourceBuildMetadata,
+) -> Result<SourceBuildPlan> {
+    let url = source.url.trim();
+    if url.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: url must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    let build_system = source.build_system.trim();
+    let archive_sha256 = source.archive_sha256.trim();
+    if archive_sha256.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: archive_sha256 must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if !is_valid_sha256_hex(archive_sha256) {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: archive_sha256 must be a 64-character hexadecimal SHA-256 digest",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if build_system.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: build_system must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if source.build_commands.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: build_commands must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if source.install_commands.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: install_commands must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if source
+        .build_commands
+        .iter()
+        .chain(source.install_commands.iter())
+        .any(|token| token.trim().is_empty())
+    {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: command tokens must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+
+    let archive_type = ArchiveType::infer_from_url(url).ok_or_else(|| {
+        anyhow!(
+            "invalid source_build metadata for {} {} on target {}: url '{}' must include a supported archive extension",
+            manifest.name,
+            manifest.version,
+            resolved_target,
+            url
+        )
+    })?;
+    if !matches!(
+        archive_type,
+        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarZst
+    ) {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: archive type '{}' is not supported for source builds",
+            manifest.name,
+            manifest.version,
+            resolved_target,
+            archive_type.as_str()
+        ));
+    }
+
+    Ok(SourceBuildPlan {
+        url: url.to_string(),
+        archive_sha256: archive_sha256.to_string(),
+        build_system: build_system.to_string(),
+        build_commands: source.build_commands.clone(),
+        install_commands: source.install_commands.clone(),
+        archive_type,
+    })
 }
 
 fn build_planned_package_changes(
@@ -1138,12 +1298,16 @@ fn sync_native_gui_registration_state_best_effort(
     Ok((current_records, warnings))
 }
 
-#[derive(Clone, Copy)]
 struct InstallResolvedOptions<'a> {
     snapshot_id: Option<&'a str>,
     force_redownload: bool,
     interaction_policy: InstallInteractionPolicy,
     install_progress_mode: InstallProgressMode,
+}
+
+struct SourceBuildJournal<'a> {
+    txid: &'a str,
+    seq: &'a mut u64,
 }
 
 fn install_resolved(
@@ -1153,6 +1317,7 @@ fn install_resolved(
     root_names: &[String],
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
     options: InstallResolvedOptions<'_>,
+    mut source_build_journal: Option<&mut SourceBuildJournal<'_>>,
 ) -> Result<InstallOutcome> {
     const INSTALL_PROGRESS_STEPS: usize = 7;
     let mut progress = InstallProgressRenderer::new(
@@ -1172,17 +1337,22 @@ fn install_resolved(
     let declared_completions = collect_declared_completions(&resolved.artifact)?;
     let declared_gui_apps = collect_declared_gui_apps(&resolved.artifact)?;
 
+    let download_url = if let Some(source_build) = resolved.source_build.as_ref() {
+        source_build.url.as_str()
+    } else {
+        resolved.artifact.url.as_str()
+    };
     let cache_path = resolved_artifact_cache_path(
         layout,
         &resolved.manifest.name,
         &resolved.manifest.version.to_string(),
         &resolved.resolved_target,
         resolved.archive_type,
-        &resolved.artifact.url,
+        download_url,
     )?;
     progress.update("download", 2, Some((0, None)));
     let download_status = download_artifact_with_progress(
-        &resolved.artifact.url,
+        download_url,
         &cache_path,
         options.force_redownload,
         |downloaded_bytes, total_bytes| {
@@ -1190,28 +1360,78 @@ fn install_resolved(
         },
     )?;
 
+    if let (Some(_source_build), Some(journal)) = (
+        resolved.source_build.as_ref(),
+        source_build_journal.as_deref_mut(),
+    ) {
+        append_source_build_journal_entry(
+            layout,
+            journal,
+            format!("source_fetch:{}", resolved.manifest.name),
+            Some(cache_path.display().to_string()),
+        )?;
+    }
+
     progress.update("verify", 3, None);
-    let checksum_ok = verify_sha256_file(&cache_path, &resolved.artifact.sha256)?;
+    let (expected_sha256, checksum_kind) =
+        if let Some(source_build) = resolved.source_build.as_ref() {
+            (source_build.archive_sha256.as_str(), "source archive")
+        } else {
+            (resolved.artifact.sha256.as_str(), "artifact")
+        };
+    let checksum_ok = verify_sha256_file(&cache_path, expected_sha256)?;
     if !checksum_ok {
         let _ = remove_file_if_exists(&cache_path);
         return Err(anyhow!(
-            "sha256 mismatch for {} (expected {})",
+            "{checksum_kind} sha256 mismatch for {} (expected {})",
             cache_path.display(),
-            resolved.artifact.sha256
+            expected_sha256
         ));
     }
 
     progress.update("install", 4, None);
-    let install_options = build_artifact_install_options(resolved, options.interaction_policy);
-    let selected_install_mode = install_options.install_mode;
-    let install_root = install_from_artifact(
-        layout,
-        &resolved.manifest.name,
-        &resolved.manifest.version.to_string(),
-        &cache_path,
-        resolved.archive_type,
-        install_options,
-    )?;
+    let (install_root, selected_install_mode) = if let Some(source_build) =
+        resolved.source_build.as_ref()
+    {
+        let install_root = install_from_source_archive(
+            layout,
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &cache_path,
+            source_build.archive_type,
+            &source_build.build_commands,
+            &source_build.install_commands,
+        )?;
+        if let Some(journal) = source_build_journal {
+            append_source_build_journal_entry(
+                layout,
+                journal,
+                format!(
+                    "source_build_system:{}:{}",
+                    resolved.manifest.name, source_build.build_system
+                ),
+                None,
+            )?;
+            append_source_build_journal_entry(
+                layout,
+                journal,
+                format!("source_install:{}", resolved.manifest.name),
+                Some(install_root.display().to_string()),
+            )?;
+        }
+        (install_root, InstallMode::Managed)
+    } else {
+        let install_options = build_artifact_install_options(resolved, options.interaction_policy);
+        let install_root = install_from_artifact(
+            layout,
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &cache_path,
+            resolved.archive_type,
+            install_options,
+        )?;
+        (install_root, install_options.install_mode)
+    };
 
     if let Err(err) =
         apply_replacement_handoff(layout, &replacement_receipts, planned_dependency_overrides)
@@ -1288,8 +1508,14 @@ fn install_resolved(
         version: resolved.manifest.version.to_string(),
         dependencies: dependency_receipts.to_vec(),
         target: Some(resolved.resolved_target.clone()),
-        artifact_url: Some(resolved.artifact.url.clone()),
-        artifact_sha256: Some(resolved.artifact.sha256.clone()),
+        artifact_url: Some(download_url.to_string()),
+        artifact_sha256: Some(
+            resolved
+                .source_build
+                .as_ref()
+                .map(|plan| plan.archive_sha256.clone())
+                .unwrap_or_else(|| resolved.artifact.sha256.clone()),
+        ),
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
         exposed_completions: exposed_completions.clone(),
@@ -1304,6 +1530,7 @@ fn install_resolved(
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
+    write_declared_services_state(layout, &resolved.manifest.name, &resolved.manifest.services)?;
     let receipt_path = write_install_receipt(layout, &receipt)?;
     progress.update("complete", 7, None);
     progress.finish();
@@ -1313,7 +1540,7 @@ fn install_resolved(
         version: resolved.manifest.version.to_string(),
         resolved_target: resolved.resolved_target.clone(),
         archive_type: resolved.archive_type,
-        artifact_url: resolved.artifact.url.clone(),
+        artifact_url: download_url.to_string(),
         cache_path,
         download_status,
         install_root,
@@ -1330,6 +1557,30 @@ fn install_resolved(
             .collect(),
         warnings: native_gui_warnings,
     })
+}
+
+fn append_source_build_journal_entry(
+    layout: &PrefixLayout,
+    journal: &mut SourceBuildJournal<'_>,
+    step: String,
+    path: Option<String>,
+) -> Result<()> {
+    append_transaction_journal_entry(
+        layout,
+        journal.txid,
+        &TransactionJournalEntry {
+            seq: *journal.seq,
+            step,
+            state: "done".to_string(),
+            path,
+        },
+    )?;
+    *journal.seq += 1;
+    Ok(())
+}
+
+fn is_valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 fn resolved_artifact_cache_path(

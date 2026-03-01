@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 
 use crate::{
     parse_source_state_file, read_snapshot_state, select_update_sources, sort_sources,
-    update_source, validate_source_fingerprint, validate_source_name, RegistrySourceRecord,
-    RegistrySourceStateFile, RegistrySourceWithSnapshotState, SourceUpdateResult,
-    SourceUpdateStatus,
+    update_source, validate_community_recipe_catalog_path, validate_source_fingerprint,
+    validate_source_name, RegistrySourceRecord, RegistrySourceStateFile,
+    RegistrySourceWithSnapshotState, SourceUpdateResult, SourceUpdateStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -25,6 +25,9 @@ impl RegistrySourceStore {
     pub fn add_source(&self, source: RegistrySourceRecord) -> Result<()> {
         validate_source_name(&source.name)?;
         validate_source_fingerprint(&source.fingerprint_sha256)?;
+        if let Some(community) = &source.community {
+            validate_community_recipe_catalog_path(&community.recipe_catalog_path)?;
+        }
 
         let mut state = self.load_state()?;
         if state

@@ -9,7 +9,7 @@ mod transactions;
 mod types;
 mod uninstall;
 
-pub use artifact::install_from_artifact;
+pub use artifact::{install_from_artifact, install_from_source_archive};
 pub use exposure::{
     bin_path, clear_gui_exposure_state, expose_binary, expose_completion, expose_gui_app,
     exposed_completion_path, gui_asset_path, projected_exposed_completion_path,
@@ -23,11 +23,14 @@ pub use native::{
     clear_gui_native_state, clear_native_sidecar_state, read_all_gui_native_states,
     read_all_native_sidecar_states, read_gui_native_state, read_native_sidecar_state,
     register_native_gui_app_best_effort, remove_native_gui_registration_best_effort,
-    remove_package_native_gui_registrations_best_effort, run_package_native_uninstall_actions,
-    write_gui_native_state, write_native_sidecar_state,
+    remove_package_native_gui_registrations_best_effort, run_native_service_action,
+    run_package_native_uninstall_actions, write_gui_native_state, write_native_sidecar_state,
 };
 pub use pins::{read_all_pins, read_pin, remove_pin, write_pin};
-pub use receipts::{read_install_receipts, write_install_receipt};
+pub use receipts::{
+    clear_declared_services_state, read_all_declared_services_states, read_declared_services_state,
+    read_install_receipts, write_declared_services_state, write_install_receipt,
+};
 pub use transactions::{
     append_transaction_journal_entry, clear_active_transaction, current_unix_timestamp,
     read_active_transaction, read_transaction_metadata, set_active_transaction,
@@ -35,9 +38,9 @@ pub use transactions::{
 };
 pub use types::{
     ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, NativeSidecarState,
-    NativeUninstallAction, TransactionJournalEntry, TransactionMetadata, UninstallResult,
-    UninstallStatus,
+    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, NativeServiceAction,
+    NativeServiceOutcome, NativeSidecarState, NativeUninstallAction, TransactionJournalEntry,
+    TransactionMetadata, UninstallResult, UninstallStatus,
 };
 pub use uninstall::{
     uninstall_blocked_by_roots_with_dependency_overrides,
