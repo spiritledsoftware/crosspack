@@ -6,7 +6,9 @@ param(
   [string]$CoreUrl = "https://github.com/spiritledsoftware/crosspack-registry.git",
   [string]$CoreKind = "git",
   [int]$CorePriority = 100,
-  [string]$CoreFingerprint = "65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2",
+  [string]$CoreFingerprint = "",
+  [Alias("TrustBulletinUrl")]
+  [string]$CoreRegistryPubUrl = "",
   [switch]$NoShellSetup
 )
 
@@ -14,6 +16,42 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("crosspack-install-" + [guid]::NewGuid().ToString("N"))
+
+function Test-Hex64 {
+  param([string]$Value)
+  return $Value -match '^[0-9a-fA-F]{64}$'
+}
+
+function Resolve-CoreFingerprint {
+  param(
+    [string]$Override,
+    [string]$RegistryPubUrl,
+    [string]$TempDirectory
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($Override)) {
+    if (-not (Test-Hex64 -Value $Override)) {
+      throw "-CoreFingerprint must be exactly 64 hex characters"
+    }
+    return $Override
+  }
+
+  if ([string]::IsNullOrWhiteSpace($RegistryPubUrl)) {
+    throw "Core registry.pub URL is empty"
+  }
+  if (-not $RegistryPubUrl.StartsWith('https://')) {
+    throw "Core registry.pub URL must use https: $RegistryPubUrl"
+  }
+
+  $registryPubPath = Join-Path $TempDirectory "registry.pub"
+  Invoke-WebRequest -Uri $RegistryPubUrl -OutFile $registryPubPath -UseBasicParsing
+  $fingerprint = (Get-FileHash -Algorithm SHA256 -Path $registryPubPath).Hash.ToLowerInvariant()
+  if (-not (Test-Hex64 -Value $fingerprint)) {
+    throw "computed registry key fingerprint is invalid"
+  }
+
+  return $fingerprint
+}
 
 function Update-CrosspackManagedProfileBlock {
   param(
@@ -119,6 +157,10 @@ $end
 }
 
 try {
+  if ([string]::IsNullOrWhiteSpace($CoreRegistryPubUrl)) {
+    $CoreRegistryPubUrl = "https://raw.githubusercontent.com/spiritledsoftware/crosspack-registry/main/registry.pub"
+  }
+
   if ([string]::IsNullOrWhiteSpace($Version)) {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
     $Version = $release.tag_name
@@ -163,8 +205,10 @@ try {
   Copy-Item (Join-Path $tmpDir "crosspack.exe") (Join-Path $BinDir "cpk.exe") -Force
 
   $crosspackExe = Join-Path $BinDir "crosspack.exe"
+  $resolvedCoreFingerprint = Resolve-CoreFingerprint -Override $CoreFingerprint -RegistryPubUrl $CoreRegistryPubUrl -TempDirectory $tmpDir
+
   Write-Host "==> Configuring default registry source ($CoreName)"
-  $addOutput = & $crosspackExe registry add $CoreName $CoreUrl --kind $CoreKind --priority $CorePriority --fingerprint $CoreFingerprint 2>&1
+  $addOutput = & $crosspackExe registry add $CoreName $CoreUrl --kind $CoreKind --priority $CorePriority --fingerprint $resolvedCoreFingerprint 2>&1
   if ($LASTEXITCODE -ne 0) {
     $listOutput = & $crosspackExe registry list 2>&1
     if ($LASTEXITCODE -ne 0 -or ($listOutput -notmatch [regex]::Escape($CoreName))) {

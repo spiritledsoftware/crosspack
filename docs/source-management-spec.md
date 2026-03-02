@@ -46,19 +46,17 @@ Crosspack publishes one official default source for first-run bootstrap:
 - Source name: `core`
 - Source kind: `git`
 - Source URL: `https://github.com/spiritledsoftware/crosspack-registry.git`
-- Fingerprint publication channel:
-  - `docs/trust/core-registry-fingerprint.txt` in this repository
-  - Matching GitHub Release note entry for the same `updated_at` and `key_id`
+- Fingerprint source: SHA-256 digest of `registry.pub` from `https://github.com/spiritledsoftware/crosspack-registry`
 
 Bootstrap sequence:
 
 ```text
-crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <fingerprint-from-trust-bulletin>
+crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <sha256-of-registry.pub>
 crosspack update
 crosspack registry list
 ```
 
-Users must verify both fingerprint channels match before adding or updating trusted source records.
+Users must derive or verify the fingerprint from trusted `registry.pub` bytes before adding or updating trusted source records.
 
 ## CLI Contract
 
@@ -264,13 +262,9 @@ Rotation is explicit and fail-closed. Operators must complete all steps in order
 
 1. Generate and publish new `registry.pub` in the source root at the target cutover revision.
 2. Compute new SHA-256 fingerprint from raw `registry.pub` bytes.
-3. Update `docs/trust/core-registry-fingerprint.txt` with:
-   - `fingerprint_sha256`
-   - `updated_at`
-   - `key_id`
-4. Publish a matching GitHub Release note entry with the same three values.
-5. Announce cutover window and required user action.
-6. Keep old key material available only for rollback interval; remove once cutover is complete.
+3. Publish rotation notice and required user action in release communications.
+4. Announce cutover window and required user action.
+5. Keep old key material available only for rollback interval; remove once cutover is complete.
 
 User recovery commands after announced rotation:
 

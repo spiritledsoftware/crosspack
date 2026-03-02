@@ -9,7 +9,8 @@ CORE_NAME="${CROSSPACK_CORE_NAME:-core}"
 CORE_URL="${CROSSPACK_CORE_URL:-https://github.com/spiritledsoftware/crosspack-registry.git}"
 CORE_KIND="${CROSSPACK_CORE_KIND:-git}"
 CORE_PRIORITY="${CROSSPACK_CORE_PRIORITY:-100}"
-CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2}"
+CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-}"
+CORE_REGISTRY_PUB_URL="${CROSSPACK_CORE_REGISTRY_PUB_URL:-${CROSSPACK_TRUST_BULLETIN_URL:-https://raw.githubusercontent.com/spiritledsoftware/crosspack-registry/main/registry.pub}}"
 SHELL_SETUP_OPT_OUT="${CROSSPACK_NO_SHELL_SETUP:-0}"
 
 SHELL_SETUP_BEGIN="# >>> crosspack shell setup >>>"
@@ -22,6 +23,48 @@ err() {
 
 warn() {
   echo "warning: $*" >&2
+}
+
+is_hex64() {
+  value="$1"
+  [ "${#value}" -eq 64 ] || return 1
+  normalized="$(printf "%s" "$value" | tr 'A-F' 'a-f')"
+  case "$normalized" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  return 0
+}
+
+assert_https_url() {
+  url="$1"
+  case "$url" in
+    https://*) return 0 ;;
+    *) err "registry key URL must use https: ${url}" ;;
+  esac
+}
+
+resolve_core_fingerprint() {
+  if [ -n "$CORE_FINGERPRINT" ]; then
+    if ! is_hex64 "$CORE_FINGERPRINT"; then
+      err "CROSSPACK_CORE_FINGERPRINT must be 64 hex characters"
+    fi
+    echo "$CORE_FINGERPRINT"
+    return 0
+  fi
+
+  assert_https_url "$CORE_REGISTRY_PUB_URL"
+
+  registry_pub_path="${tmp_dir}/registry.pub"
+  if ! download "$CORE_REGISTRY_PUB_URL" "$registry_pub_path"; then
+    err "failed fetching registry key from ${CORE_REGISTRY_PUB_URL}; set CROSSPACK_CORE_FINGERPRINT to override"
+  fi
+
+  computed_fingerprint="$(sha256_of "$registry_pub_path")"
+  if ! is_hex64 "$computed_fingerprint"; then
+    err "computed registry key fingerprint is invalid"
+  fi
+
+  echo "$computed_fingerprint"
 }
 
 download() {
@@ -264,7 +307,8 @@ else
 fi
 
 echo "==> Configuring default registry source (${CORE_NAME})"
-if "${BIN_DIR}/crosspack" registry add "${CORE_NAME}" "${CORE_URL}" --kind "${CORE_KIND}" --priority "${CORE_PRIORITY}" --fingerprint "${CORE_FINGERPRINT}" >/dev/null 2>&1; then
+resolved_core_fingerprint="$(resolve_core_fingerprint)"
+if "${BIN_DIR}/crosspack" registry add "${CORE_NAME}" "${CORE_URL}" --kind "${CORE_KIND}" --priority "${CORE_PRIORITY}" --fingerprint "${resolved_core_fingerprint}" >/dev/null 2>&1; then
   echo "Added registry source '${CORE_NAME}'"
 else
   if "${BIN_DIR}/crosspack" registry list 2>/dev/null | grep -q "${CORE_NAME}"; then

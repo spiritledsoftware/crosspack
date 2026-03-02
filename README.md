@@ -114,13 +114,10 @@ cargo run -p crosspack-cli -- --help
 
 ### 2) Bootstrap the trusted default source (`core`)
 
-Before first metadata use, verify the published fingerprint in both channels:
-
-- `docs/trust/core-registry-fingerprint.txt` in this repository.
-- Matching GitHub Release note entry for the same `updated_at` and `key_id`.
+Before first metadata use, derive the source fingerprint from trusted `registry.pub` bytes in the official registry repository.
 
 ```bash
-cargo run -p crosspack-cli -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint 65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2
+cargo run -p crosspack-cli -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <sha256-of-registry.pub>
 cargo run -p crosspack-cli -- update
 cargo run -p crosspack-cli -- registry list
 ```
@@ -228,7 +225,7 @@ Crosspack verifies both metadata and artifacts:
 
 - Official default source name: `core`.
 - Official source kind and URL: `git` at `https://github.com/spiritledsoftware/crosspack-registry.git`.
-- Official fingerprint distribution channel: `docs/trust/core-registry-fingerprint.txt` plus a matching GitHub Release note entry.
+- Official fingerprint source: SHA-256 digest of `registry.pub` from the official registry repository.
 - Bootstrap and rotation troubleshooting: `docs/registry-bootstrap-runbook.md`.
 
 Trust boundary note:
