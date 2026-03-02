@@ -1366,7 +1366,7 @@ fn community_recipe_catalog_rejects_missing_index_directory_for_listed_package()
         "expected missing index directory error, got: {rendered}"
     );
     assert!(
-        rendered.contains("index/zsh"),
+        rendered.contains(&format!("index{}zsh", std::path::MAIN_SEPARATOR)),
         "expected deterministic missing directory path details, got: {rendered}"
     );
 
