@@ -6298,8 +6298,10 @@ description = "   \n\t"
     fn search_uses_configured_sources_without_registry_root() {
         let layout = test_layout();
         let state_root = registry_state_root(&layout);
-        std::fs::create_dir_all(state_root.join("cache/official/index/ripgrep"))
+        std::fs::create_dir_all(state_root.join("cache/official/releases/ripgrep"))
             .expect("must create source cache structure");
+        std::fs::create_dir_all(state_root.join("cache/official/packages"))
+            .expect("must create package template cache structure");
         std::fs::write(
             state_root.join("sources.toml"),
             concat!(
@@ -6439,7 +6441,7 @@ sha256 = "abc"
             registry_state_root(&layout)
                 .join("cache")
                 .join("official")
-                .join("index")
+                .join("releases")
                 .join("ripgrep"),
         )
         .expect("must create package directory");
@@ -8286,7 +8288,8 @@ sha256 = "abc"
         let mut path = std::env::temp_dir();
         let nanos = current_unix_nanos();
         path.push(format!("crosspack-cli-test-registry-{name}-{nanos}"));
-        std::fs::create_dir_all(path.join("index")).expect("must create index dir");
+        std::fs::create_dir_all(path.join("packages")).expect("must create packages dir");
+        std::fs::create_dir_all(path.join("releases")).expect("must create releases dir");
         if with_registry_pub {
             std::fs::write(path.join("registry.pub"), "test-key\n")
                 .expect("must write registry key");
@@ -8351,8 +8354,13 @@ sha256 = "abc"
         let cache_root = registry_state_root(layout)
             .join("cache")
             .join(spec.source_name);
-        let package_dir = cache_root.join("index").join(spec.package_name);
+        let package_template_path = cache_root
+            .join("packages")
+            .join(format!("{}.toml", spec.package_name));
+        let package_dir = cache_root.join("releases").join(spec.package_name);
         std::fs::create_dir_all(&package_dir).expect("must create package directory");
+        std::fs::create_dir_all(cache_root.join("packages"))
+            .expect("must create package template directory");
 
         let signing_key = test_signing_key();
         std::fs::write(
@@ -8360,6 +8368,15 @@ sha256 = "abc"
             public_key_hex(&signing_key),
         )
         .expect("must write registry key");
+        let package_template = format!("name = \"{}\"\n", spec.package_name);
+        std::fs::write(&package_template_path, package_template.as_bytes())
+            .expect("must write package template");
+        let package_signature = signing_key.sign(package_template.as_bytes());
+        std::fs::write(
+            package_template_path.with_extension("toml.sig"),
+            hex::encode(package_signature.to_bytes()),
+        )
+        .expect("must write package template signature");
 
         let manifest = manifest_toml(
             spec.package_name,
@@ -8388,8 +8405,13 @@ sha256 = "abc"
         artifact_target: &str,
     ) {
         let cache_root = registry_state_root(layout).join("cache").join(source_name);
-        let package_dir = cache_root.join("index").join(package_name);
+        let package_template_path = cache_root
+            .join("packages")
+            .join(format!("{package_name}.toml"));
+        let package_dir = cache_root.join("releases").join(package_name);
         std::fs::create_dir_all(&package_dir).expect("must create package directory");
+        std::fs::create_dir_all(cache_root.join("packages"))
+            .expect("must create package template directory");
 
         let signing_key = test_signing_key();
         std::fs::write(
@@ -8397,6 +8419,15 @@ sha256 = "abc"
             public_key_hex(&signing_key),
         )
         .expect("must write registry key");
+        let package_template = format!("name = \"{package_name}\"\n");
+        std::fs::write(&package_template_path, package_template.as_bytes())
+            .expect("must write package template");
+        let package_signature = signing_key.sign(package_template.as_bytes());
+        std::fs::write(
+            package_template_path.with_extension("toml.sig"),
+            hex::encode(package_signature.to_bytes()),
+        )
+        .expect("must write package template signature");
 
         let manifest = format!(
             r#"
@@ -8493,8 +8524,13 @@ install_commands = ["sh", "-c", "{install_script}"]
         );
 
         let cache_root = registry_state_root(layout).join("cache").join(source_name);
-        let package_dir = cache_root.join("index").join(package_name);
+        let package_template_path = cache_root
+            .join("packages")
+            .join(format!("{package_name}.toml"));
+        let package_dir = cache_root.join("releases").join(package_name);
         std::fs::create_dir_all(&package_dir).expect("must create package directory");
+        std::fs::create_dir_all(cache_root.join("packages"))
+            .expect("must create package template directory");
 
         let signing_key = test_signing_key();
         std::fs::write(
@@ -8502,6 +8538,15 @@ install_commands = ["sh", "-c", "{install_script}"]
             public_key_hex(&signing_key),
         )
         .expect("must write registry key");
+        let package_template = format!("name = \"{package_name}\"\n");
+        std::fs::write(&package_template_path, package_template.as_bytes())
+            .expect("must write package template");
+        let package_signature = signing_key.sign(package_template.as_bytes());
+        std::fs::write(
+            package_template_path.with_extension("toml.sig"),
+            hex::encode(package_signature.to_bytes()),
+        )
+        .expect("must write package template signature");
 
         let manifest_path = package_dir.join(format!("{version}.toml"));
         std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");

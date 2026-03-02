@@ -641,7 +641,8 @@ fn update_filesystem_source_writes_ready_snapshot() {
 
     let cache_root = root.join("cache").join("local");
     assert!(cache_root.join("registry.pub").exists());
-    assert!(cache_root.join("index").exists());
+    assert!(cache_root.join("packages").exists());
+    assert!(cache_root.join("releases").exists());
 
     let snapshot_path = cache_root.join("snapshot.json");
     let snapshot_content = fs::read_to_string(&snapshot_path).expect("must write snapshot.json");
@@ -710,6 +711,183 @@ fn update_filesystem_source_accepts_uppercase_configured_fingerprint() {
     let results = store.update_sources(&[]).expect("must update source");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, SourceUpdateStatus::Updated);
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_packages_root_is_missing() {
+    let root = test_registry_root();
+    let source_root = test_registry_root();
+    fs::create_dir_all(source_root.join("releases")).expect("must create releases root");
+
+    let signing_key = signing_key();
+    fs::write(
+        source_root.join("registry.pub"),
+        public_key_hex(&signing_key),
+    )
+    .expect("must write registry public key");
+
+    let store = RegistrySourceStore::new(&root);
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    assert!(
+        results[0]
+            .error
+            .as_deref()
+            .expect("must include error message")
+            .contains("missing packages/"),
+        "expected missing packages root error, got: {:?}",
+        results[0].error
+    );
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_releases_root_is_missing() {
+    let root = test_registry_root();
+    let source_root = test_registry_root();
+    fs::create_dir_all(source_root.join("packages")).expect("must create packages root");
+
+    let signing_key = signing_key();
+    fs::write(
+        source_root.join("registry.pub"),
+        public_key_hex(&signing_key),
+    )
+    .expect("must write registry public key");
+
+    let store = RegistrySourceStore::new(&root);
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    assert!(
+        results[0]
+            .error
+            .as_deref()
+            .expect("must include error message")
+            .contains("missing releases/"),
+        "expected missing releases root error, got: {:?}",
+        results[0].error
+    );
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_orphaned_package_template_exists() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    write_signed_package_template(
+        &source_root,
+        &signing_key(),
+        "zsh",
+        &package_template_toml("zsh"),
+    );
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    assert!(
+        results[0]
+            .error
+            .as_deref()
+            .expect("must include error message")
+            .contains("orphaned package template"),
+        "expected orphaned package template failure, got: {:?}",
+        results[0].error
+    );
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_orphaned_package_template_signature_is_missing() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    fs::create_dir_all(source_root.join("packages")).expect("must create packages root");
+    fs::write(
+        source_root.join("packages").join("zsh.toml"),
+        package_template_toml("zsh"),
+    )
+    .expect("must write orphaned package template without signature");
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    let rendered = results[0]
+        .error
+        .as_deref()
+        .expect("must include error message");
+    assert!(
+        rendered.contains("packages") && rendered.contains(".sig"),
+        "expected package signature verification failure, got: {rendered}"
+    );
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -788,7 +966,7 @@ fn update_filesystem_source_preserves_existing_cache_on_failure() {
 
     fs::remove_file(
         source_root
-            .join("index")
+            .join("releases")
             .join("ripgrep")
             .join("14.1.0.toml.sig"),
     )
@@ -802,7 +980,7 @@ fn update_filesystem_source_preserves_existing_cache_on_failure() {
     let cached_signature = root
         .join("cache")
         .join("local")
-        .join("index")
+        .join("releases")
         .join("ripgrep")
         .join("14.1.0.toml.sig");
     assert!(
@@ -840,7 +1018,7 @@ fn update_filesystem_source_reports_updated_when_manifest_changes_with_same_key(
 
     rewrite_signed_manifest_with_extra_field(
         &source_root
-            .join("index")
+            .join("releases")
             .join("ripgrep")
             .join("14.1.0.toml"),
         &signing_key(),
@@ -881,7 +1059,8 @@ fn update_git_source_clones_and_records_snapshot_id() {
 
     let cache_root = root.join("cache").join("origin");
     assert!(cache_root.join("registry.pub").exists());
-    assert!(cache_root.join("index").exists());
+    assert!(cache_root.join("packages").exists());
+    assert!(cache_root.join("releases").exists());
     assert_eq!(git_head_short(&cache_root), expected_snapshot_id);
 
     let _ = fs::remove_dir_all(&source_root);
@@ -912,7 +1091,7 @@ fn update_git_source_fetches_new_commit() {
 
     rewrite_signed_manifest_with_extra_field(
         &source_root
-            .join("index")
+            .join("releases")
             .join("ripgrep")
             .join("14.1.0.toml"),
         &signing_key(),
@@ -930,7 +1109,7 @@ fn update_git_source_fetches_new_commit() {
     let cached_manifest = fs::read_to_string(
         root.join("cache")
             .join("origin")
-            .join("index")
+            .join("releases")
             .join("ripgrep")
             .join("14.1.0.toml"),
     )
@@ -1038,13 +1217,10 @@ fn update_unknown_source_returns_source_not_found() {
 #[test]
 fn search_names_fails_when_registry_public_key_is_missing() {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
-    fs::write(
-        package_dir.join("14.1.0.toml"),
-        manifest_toml("ripgrep", "14.1.0"),
-    )
-    .expect("must write manifest");
+    fs::write(package_dir.join("14.1.0.toml"), release_toml("14.1.0"))
+        .expect("must write manifest");
 
     let index = RegistryIndex::open(&root);
     let err = index
@@ -1237,8 +1413,8 @@ fn community_recipe_catalog_rejects_unsorted_and_duplicate_entries() {
     let staged_root = filesystem_source_fixture();
     let signing_key = signing_key();
     let catalog_path = staged_root.join("community").join("recipes.toml");
-    fs::create_dir_all(staged_root.join("index").join("zsh"))
-        .expect("must create zsh package index directory");
+    fs::create_dir_all(staged_root.join("releases").join("zsh"))
+        .expect("must create zsh package release directory");
     write_signed_community_recipe_catalog_raw(
         &catalog_path,
         &signing_key,
@@ -1334,7 +1510,7 @@ fn community_recipe_catalog_rejects_empty_package_entry() {
 }
 
 #[test]
-fn community_recipe_catalog_rejects_missing_index_directory_for_listed_package() {
+fn community_recipe_catalog_rejects_missing_release_directory_for_listed_package() {
     let staged_root = filesystem_source_fixture();
     let signing_key = signing_key();
     let catalog_path = staged_root.join("community").join("recipes.toml");
@@ -1359,14 +1535,14 @@ fn community_recipe_catalog_rejects_missing_index_directory_for_listed_package()
     });
 
     let err = verify_community_recipe_catalog_policy(&staged_root, &source)
-        .expect_err("must reject catalog entries missing index directories");
+        .expect_err("must reject catalog entries missing release directories");
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("missing index directory"),
-        "expected missing index directory error, got: {rendered}"
+        rendered.contains("missing release directory"),
+        "expected missing release directory error, got: {rendered}"
     );
     assert!(
-        rendered.contains(&format!("index{}zsh", std::path::MAIN_SEPARATOR)),
+        rendered.contains(&format!("releases{}zsh", std::path::MAIN_SEPARATOR)),
         "expected deterministic missing directory path details, got: {rendered}"
     );
 
@@ -1379,8 +1555,8 @@ fn community_recipe_catalog_rejects_invalid_package_tokens() {
     let signing_key = signing_key();
     let catalog_path = staged_root.join("community").join("recipes.toml");
 
-    fs::create_dir_all(staged_root.join("index").join("ripgrep").join("plugins"))
-        .expect("must create nested index path to ensure grammar check is enforced");
+    fs::create_dir_all(staged_root.join("releases").join("ripgrep").join("plugins"))
+        .expect("must create nested release path to ensure grammar check is enforced");
 
     let mut source = filesystem_source_record(
         "local",
@@ -1439,7 +1615,7 @@ fn configured_index_open_fails_when_sources_file_is_unreadable() {
 #[test]
 fn search_names_returns_matching_package_with_valid_signed_manifests() {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
 
     let signing_key = signing_key();
@@ -1459,10 +1635,22 @@ fn search_names_returns_matching_package_with_valid_signed_manifests() {
 #[test]
 fn package_versions_fails_when_registry_public_key_is_missing() {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
-    let manifest_path = package_dir.join("14.1.0.toml");
-    fs::write(&manifest_path, manifest_toml("ripgrep", "14.1.0")).expect("must write manifest");
+
+    let signing_key = signing_key();
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "ripgrep",
+        &package_template_toml("ripgrep"),
+    );
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "14.1.0",
+        &release_toml("14.1.0"),
+    );
 
     let index = RegistryIndex::open(&root);
     let err = index
@@ -1474,39 +1662,120 @@ fn package_versions_fails_when_registry_public_key_is_missing() {
 }
 
 #[test]
-fn package_versions_fails_when_manifest_signature_is_missing() {
+fn package_versions_fails_when_package_signature_is_missing() {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
-    let manifest_path = package_dir.join("14.1.0.toml");
-    fs::write(&manifest_path, manifest_toml("ripgrep", "14.1.0")).expect("must write manifest");
 
     let signing_key = signing_key();
     fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
         .expect("must write registry public key");
+    let package_manifest_path = root.join("packages").join("ripgrep.toml");
+    fs::create_dir_all(root.join("packages")).expect("must create packages dir");
+    fs::write(
+        &package_manifest_path,
+        package_template_toml("ripgrep").as_bytes(),
+    )
+    .expect("must write unsigned package template");
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "14.1.0",
+        &release_toml("14.1.0"),
+    );
 
     let index = RegistryIndex::open(&root);
     let err = index
         .package_versions("ripgrep")
-        .expect_err("must fail when signature sidecar is missing");
+        .expect_err("must fail when package signature sidecar is missing");
+    assert!(err.to_string().contains("packages"));
     assert!(err.to_string().contains(".sig"));
 
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
-fn package_versions_fails_when_manifest_signature_is_invalid() {
+fn package_versions_fails_when_package_signature_is_invalid() {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
 
-    let manifest = manifest_toml("ripgrep", "14.1.0");
+    let signing_key = signing_key();
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+    let package_manifest_path = root.join("packages").join("ripgrep.toml");
+    fs::create_dir_all(root.join("packages")).expect("must create packages dir");
+    fs::write(
+        &package_manifest_path,
+        package_template_toml("ripgrep").as_bytes(),
+    )
+    .expect("must write package template");
+    fs::write(package_manifest_path.with_extension("toml.sig"), "00")
+        .expect("must write invalid package signature");
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "14.1.0",
+        &release_toml("14.1.0"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let err = index
+        .package_versions("ripgrep")
+        .expect_err("must fail when package signature is invalid");
+    assert!(err.to_string().contains("packages"));
+    assert!(err.to_string().contains("signature"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn package_versions_fails_when_release_signature_is_missing() {
+    let root = test_registry_root();
+    let package_dir = root.join("releases").join("ripgrep");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+
+    let release_manifest_path = package_dir.join("14.1.0.toml");
+    fs::write(&release_manifest_path, release_toml("14.1.0")).expect("must write manifest");
+
+    let signing_key = signing_key();
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "ripgrep",
+        &package_template_toml("ripgrep"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let err = index
+        .package_versions("ripgrep")
+        .expect_err("must fail when release signature sidecar is missing");
+    assert!(err.to_string().contains(".sig"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn package_versions_fails_when_release_signature_is_invalid() {
+    let root = test_registry_root();
+    let package_dir = root.join("releases").join("ripgrep");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+
+    let manifest = release_toml("14.1.0");
     let manifest_path = package_dir.join("14.1.0.toml");
     fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
 
     let signing_key = signing_key();
     fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
         .expect("must write registry public key");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "ripgrep",
+        &package_template_toml("ripgrep"),
+    );
 
     fs::write(manifest_path.with_extension("toml.sig"), "00")
         .expect("must write invalid signature");
@@ -1523,12 +1792,18 @@ fn package_versions_fails_when_manifest_signature_is_invalid() {
 #[test]
 fn package_versions_succeeds_with_valid_signatures_and_descending_sort() {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
 
     let signing_key = signing_key();
     fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
         .expect("must write registry public key");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "ripgrep",
+        &package_template_toml_with_license("ripgrep", "MIT"),
+    );
 
     write_signed_manifest(&package_dir, &signing_key, "14.0.0");
     write_signed_manifest(&package_dir, &signing_key, "14.1.0");
@@ -1543,21 +1818,80 @@ fn package_versions_succeeds_with_valid_signatures_and_descending_sort() {
         .map(|manifest| manifest.version.to_string())
         .collect();
     assert_eq!(versions, vec!["14.1.0", "14.0.0"]);
+    assert_eq!(manifests[0].name, "ripgrep");
+    assert_eq!(manifests[0].license.as_deref(), Some("MIT"));
 
     let _ = fs::remove_dir_all(&root);
 }
 
 fn write_signed_manifest(package_dir: &std::path::Path, signing_key: &SigningKey, version: &str) {
-    let manifest_path = package_dir.join(format!("{version}.toml"));
-    let manifest = manifest_toml("ripgrep", version);
-    fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
+    let package_name = package_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("release package directory must end with package name");
+    let registry_root = package_dir
+        .parent()
+        .and_then(|parent| parent.parent())
+        .expect("release package directory must be nested under <registry>/releases/");
 
-    let signature = signing_key.sign(manifest.as_bytes());
+    let package_template_path = registry_root
+        .join("packages")
+        .join(format!("{package_name}.toml"));
+    if !package_template_path.exists() {
+        write_signed_package_template(
+            registry_root,
+            signing_key,
+            package_name,
+            &package_template_toml(package_name),
+        );
+    }
+
+    write_signed_release_manifest(package_dir, signing_key, version, &release_toml(version));
+}
+
+fn write_signed_package_template(
+    registry_root: &Path,
+    signing_key: &SigningKey,
+    package_name: &str,
+    template: &str,
+) {
+    let packages_root = registry_root.join("packages");
+    fs::create_dir_all(&packages_root).expect("must create packages dir");
+    let package_path = packages_root.join(format!("{package_name}.toml"));
+    write_signed_toml_file(&package_path, signing_key, template);
+}
+
+fn write_signed_release_manifest(
+    package_dir: &Path,
+    signing_key: &SigningKey,
+    version: &str,
+    release_manifest: &str,
+) {
+    fs::create_dir_all(package_dir).expect("must create release package dir");
+    let manifest_path = package_dir.join(format!("{version}.toml"));
+    write_signed_toml_file(&manifest_path, signing_key, release_manifest);
+}
+
+fn write_signed_toml_file(path: &Path, signing_key: &SigningKey, content: &str) {
+    fs::write(path, content.as_bytes()).expect("must write manifest");
+    let signature = signing_key.sign(content.as_bytes());
     fs::write(
-        manifest_path.with_extension("toml.sig"),
+        path.with_extension("toml.sig"),
         hex::encode(signature.to_bytes()),
     )
     .expect("must write signature sidecar");
+}
+
+fn package_template_toml(name: &str) -> String {
+    format!("name = \"{name}\"\n")
+}
+
+fn package_template_toml_with_license(name: &str, license: &str) -> String {
+    format!("name = \"{name}\"\nlicense = \"{license}\"\n")
+}
+
+fn release_toml(version: &str) -> String {
+    format!("version = \"{version}\"\n")
 }
 
 fn write_signed_community_recipe_catalog(
@@ -1619,14 +1953,6 @@ fn rewrite_signed_manifest_with_extra_field(
     .expect("must rewrite signature sidecar");
 }
 
-fn manifest_toml(name: &str, version: &str) -> String {
-    format!(
-        r#"name = "{name}"
-version = "{version}"
-"#
-    )
-}
-
 fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7u8; 32])
 }
@@ -1684,7 +2010,7 @@ fn filesystem_source_record(
 
 fn filesystem_source_fixture() -> PathBuf {
     let root = test_registry_root();
-    let package_dir = root.join("index").join("ripgrep");
+    let package_dir = root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package dir");
 
     let signing_key = signing_key();
@@ -1778,7 +2104,7 @@ fn write_ready_snapshot_cache(
     versions: &[&str],
 ) {
     let cache_root = state_root.join("cache").join(source_name);
-    let package_dir = cache_root.join("index").join("ripgrep");
+    let package_dir = cache_root.join("releases").join("ripgrep");
     fs::create_dir_all(&package_dir).expect("must create package directory in cache");
     fs::write(cache_root.join("registry.pub"), public_key_hex(signing_key))
         .expect("must write registry key for cache source");
