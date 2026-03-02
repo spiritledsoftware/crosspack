@@ -212,3 +212,23 @@ fn render_progress_line(
         suffix
     ))
 }
+
+fn install_detail_status_label(status: &str) -> &'static str {
+    match status {
+        "ok" => "OK",
+        "warn" => "WARN",
+        "error" => "ERR",
+        "step" => "STEP",
+        _ => "INFO",
+    }
+}
+
+fn render_rich_install_detail_row(status: &str, key: &str, value: &str) -> String {
+    let key_label = format!("{key}:");
+    format!(
+        "{:<4} | {:<18} | {}",
+        install_detail_status_label(status),
+        key_label,
+        value
+    )
+}

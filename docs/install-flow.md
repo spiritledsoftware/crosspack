@@ -69,12 +69,16 @@
 - no transaction metadata, receipts, package files, or binaries are mutated.
 
 For non-dry-run lifecycle output, Crosspack auto-selects output mode:
-- interactive terminal: enhanced terminal UX (section hierarchy, semantic color, and progress indicators) for human readability,
+- interactive terminal: enhanced terminal UX (section hierarchy, semantic color, progress indicators, and rich install detail rows),
 - non-interactive/piped output: plain deterministic lines.
 
 Interactive rich mode also renders live download telemetry during the download phase:
 - when HTTP `Content-Length` is available, progress includes downloaded bytes and percent,
 - when total size is unknown, progress includes downloaded bytes only.
+
+In interactive mode, install detail rows are rendered in a dedicated rich shape:
+- `STATUS | key: | value`
+- no plain status badge tokens (`[OK]`, `[..]`, `[ERR]`, `[WARN]`) are used in install outcome detail rows.
 
 Plain mode keeps existing deterministic line contracts unchanged (no live byte/percent progress frames).
 
