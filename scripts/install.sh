@@ -9,7 +9,8 @@ CORE_NAME="${CROSSPACK_CORE_NAME:-core}"
 CORE_URL="${CROSSPACK_CORE_URL:-https://github.com/spiritledsoftware/crosspack-registry.git}"
 CORE_KIND="${CROSSPACK_CORE_KIND:-git}"
 CORE_PRIORITY="${CROSSPACK_CORE_PRIORITY:-100}"
-CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2}"
+CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-}"
+TRUST_BULLETIN_URL="${CROSSPACK_TRUST_BULLETIN_URL:-https://raw.githubusercontent.com/${REPO}/main/docs/trust/core-registry-fingerprint.txt}"
 SHELL_SETUP_OPT_OUT="${CROSSPACK_NO_SHELL_SETUP:-0}"
 
 SHELL_SETUP_BEGIN="# >>> crosspack shell setup >>>"
@@ -22,6 +23,78 @@ err() {
 
 warn() {
   echo "warning: $*" >&2
+}
+
+is_hex64() {
+  value="$1"
+  [ "${#value}" -eq 64 ] || return 1
+  normalized="$(printf "%s" "$value" | tr 'A-F' 'a-f')"
+  case "$normalized" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  return 0
+}
+
+assert_https_url() {
+  url="$1"
+  case "$url" in
+    https://*) return 0 ;;
+    *) err "trust bulletin URL must use https: ${url}" ;;
+  esac
+}
+
+read_bulletin_value() {
+  key="$1"
+  file="$2"
+  awk -F '=' -v key="$key" '
+    {
+      raw_key = $1
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", raw_key)
+      if (raw_key == key) {
+        value = $2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        gsub(/^"|"$/, "", value)
+        print value
+        found += 1
+      }
+    }
+    END {
+      if (found != 1) {
+        exit 1
+      }
+    }
+  ' "$file"
+}
+
+resolve_core_fingerprint() {
+  if [ -n "$CORE_FINGERPRINT" ]; then
+    if ! is_hex64 "$CORE_FINGERPRINT"; then
+      err "CROSSPACK_CORE_FINGERPRINT must be 64 hex characters"
+    fi
+    echo "$CORE_FINGERPRINT"
+    return 0
+  fi
+
+  assert_https_url "$TRUST_BULLETIN_URL"
+
+  bulletin_path="${tmp_dir}/core-registry-fingerprint.txt"
+  if ! download "$TRUST_BULLETIN_URL" "$bulletin_path"; then
+    err "failed fetching trust bulletin from ${TRUST_BULLETIN_URL}; set CROSSPACK_CORE_FINGERPRINT to override"
+  fi
+
+  bulletin_source="$(read_bulletin_value source "$bulletin_path")" || err "trust bulletin is missing a unique 'source' key"
+  bulletin_kind="$(read_bulletin_value kind "$bulletin_path")" || err "trust bulletin is missing a unique 'kind' key"
+  bulletin_url="$(read_bulletin_value url "$bulletin_path")" || err "trust bulletin is missing a unique 'url' key"
+  bulletin_fingerprint="$(read_bulletin_value fingerprint_sha256 "$bulletin_path")" || err "trust bulletin is missing a unique 'fingerprint_sha256' key"
+
+  [ "$bulletin_source" = "$CORE_NAME" ] || err "trust bulletin source mismatch (expected ${CORE_NAME}, got ${bulletin_source})"
+  [ "$bulletin_kind" = "$CORE_KIND" ] || err "trust bulletin kind mismatch (expected ${CORE_KIND}, got ${bulletin_kind})"
+  [ "$bulletin_url" = "$CORE_URL" ] || err "trust bulletin URL mismatch (expected ${CORE_URL}, got ${bulletin_url})"
+  if ! is_hex64 "$bulletin_fingerprint"; then
+    err "trust bulletin fingerprint must be 64 hex characters"
+  fi
+
+  echo "$bulletin_fingerprint"
 }
 
 download() {
@@ -264,7 +337,8 @@ else
 fi
 
 echo "==> Configuring default registry source (${CORE_NAME})"
-if "${BIN_DIR}/crosspack" registry add "${CORE_NAME}" "${CORE_URL}" --kind "${CORE_KIND}" --priority "${CORE_PRIORITY}" --fingerprint "${CORE_FINGERPRINT}" >/dev/null 2>&1; then
+resolved_core_fingerprint="$(resolve_core_fingerprint)"
+if "${BIN_DIR}/crosspack" registry add "${CORE_NAME}" "${CORE_URL}" --kind "${CORE_KIND}" --priority "${CORE_PRIORITY}" --fingerprint "${resolved_core_fingerprint}" >/dev/null 2>&1; then
   echo "Added registry source '${CORE_NAME}'"
 else
   if "${BIN_DIR}/crosspack" registry list 2>/dev/null | grep -q "${CORE_NAME}"; then

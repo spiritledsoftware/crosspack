@@ -120,7 +120,7 @@ Before first metadata use, verify the published fingerprint in both channels:
 - Matching GitHub Release note entry for the same `updated_at` and `key_id`.
 
 ```bash
-cargo run -p crosspack-cli -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint 65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2
+cargo run -p crosspack-cli -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <fingerprint_sha256-from-docs/trust/core-registry-fingerprint.txt>
 cargo run -p crosspack-cli -- update
 cargo run -p crosspack-cli -- registry list
 ```

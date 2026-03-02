@@ -27,6 +27,14 @@ crosspack registry list
 
 Expected state: `core` appears with `snapshot=ready:<snapshot-id>`.
 
+## Installer Behavior
+
+- `scripts/install.sh` and `scripts/install.ps1` fetch `docs/trust/core-registry-fingerprint.txt` at install time and use that value for `registry add`.
+- Installers validate bulletin shape and fail closed on fetch/parse/validation errors.
+- Override only when needed for controlled/offline operations:
+  - Unix: `CROSSPACK_CORE_FINGERPRINT=<64-hex>`
+  - Windows: `-CoreFingerprint <64-hex>`
+
 ## Fingerprint and Key Rotation (Operator Procedure)
 
 1. Prepare new signing keypair and stage new `registry.pub` at planned cutover revision.
