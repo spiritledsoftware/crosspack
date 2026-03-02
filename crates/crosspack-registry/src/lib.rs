@@ -10,7 +10,7 @@ mod source_types;
 pub use registry_index::{ConfiguredRegistryIndex, RegistryIndex};
 pub use source_store::RegistrySourceStore;
 pub use source_types::{
-    RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState,
+    RegistrySourceCommunity, RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState,
     RegistrySourceWithSnapshotState, RegistrySourceWithSnapshotStatus, SourceUpdateResult,
     SourceUpdateStatus,
 };
@@ -24,10 +24,12 @@ pub(crate) use snapshot_state::{
     read_snapshot_id, read_snapshot_state, source_has_ready_snapshot, write_snapshot_file,
 };
 pub(crate) use source_state::{
-    parse_source_state_file, select_update_sources, sort_sources, validate_source_fingerprint,
-    validate_source_name, RegistrySourceStateFile,
+    parse_source_state_file, select_update_sources, sort_sources,
+    validate_community_recipe_catalog_path, validate_source_fingerprint, validate_source_name,
+    RegistrySourceStateFile,
 };
 pub(crate) use source_sync::update_source;
+pub(crate) use source_sync::verify_community_recipe_catalog_policy;
 
 #[cfg(test)]
 pub(crate) use git_ops::derive_snapshot_id_from_full_git_sha;

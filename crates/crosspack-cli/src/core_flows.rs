@@ -90,6 +90,16 @@ fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
     for manifest in manifests {
         lines.push(format!("- {}", manifest.version));
 
+        if let Some(description) = manifest.description.as_deref() {
+            let trimmed = description.trim();
+            if !trimmed.is_empty() {
+                lines.push(format!(
+                    "  Description: {}",
+                    sanitize_metadata_cell(trimmed)
+                ));
+            }
+        }
+
         if !manifest.provides.is_empty() {
             lines.push(format!("  Provides: {}", manifest.provides.join(", ")));
         }
@@ -110,6 +120,18 @@ fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
                 .map(|(name, req)| format!("{}({})", name, req))
                 .collect::<Vec<_>>();
             lines.push(format!("  Replaces: {}", replaces.join(", ")));
+        }
+
+        if !manifest.provides.is_empty()
+            || !manifest.conflicts.is_empty()
+            || !manifest.replaces.is_empty()
+        {
+            lines.push(format!(
+                "  Policy: provides={} conflicts={} replaces={}",
+                manifest.provides.len(),
+                manifest.conflicts.len(),
+                manifest.replaces.len()
+            ));
         }
     }
 
@@ -203,6 +225,17 @@ struct ResolvedInstall {
     artifact: Artifact,
     resolved_target: String,
     archive_type: ArchiveType,
+    source_build: Option<SourceBuildPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceBuildPlan {
+    url: String,
+    archive_sha256: String,
+    build_system: String,
+    build_commands: Vec<String>,
+    install_commands: Vec<String>,
+    archive_type: ArchiveType,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +303,37 @@ struct TransactionPreview {
     risk_flags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct DependencyPolicyExplainability {
+    provider_substitutions: Vec<PolicyProviderSubstitution>,
+    replacement_removals: Vec<PolicyReplacementRemoval>,
+    conflict_constraints: Vec<PolicyConflictConstraint>,
+}
+
+#[derive(Debug, Clone)]
+struct PolicyProviderSubstitution {
+    capability: String,
+    selected_package: String,
+    selected_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct PolicyReplacementRemoval {
+    selected_package: String,
+    selected_version: String,
+    removed_package: String,
+    removed_version: String,
+    replacement_requirement: String,
+}
+
+#[derive(Debug, Clone)]
+struct PolicyConflictConstraint {
+    selected_package: String,
+    selected_version: String,
+    conflict_package: String,
+    conflict_requirement: String,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TransactionPreviewMode {
     DryRun,
@@ -312,6 +376,7 @@ struct PackageSnapshotManifest {
     completions: Vec<String>,
     gui_assets: Vec<GuiExposureAsset>,
     native_sidecar_exists: bool,
+    declared_services_sidecar_exists: bool,
 }
 
 fn begin_transaction(
@@ -516,6 +581,7 @@ fn resolve_install_graph(
     roots: &[RootInstallRequest],
     requested_target: Option<&str>,
     provider_overrides: &BTreeMap<String, String>,
+    build_from_source: bool,
 ) -> Result<Vec<ResolvedInstall>> {
     let (resolved, _) = resolve_install_graph_with_tokens(
         layout,
@@ -524,6 +590,7 @@ fn resolve_install_graph(
         requested_target,
         provider_overrides,
         true,
+        build_from_source,
     )?;
     Ok(resolved)
 }
@@ -535,6 +602,7 @@ fn resolve_install_graph_with_tokens(
     requested_target: Option<&str>,
     provider_overrides: &BTreeMap<String, String>,
     validate_overrides: bool,
+    build_from_source: bool,
 ) -> Result<(Vec<ResolvedInstall>, HashSet<String>)> {
     let mut pins = BTreeMap::new();
     for (name, raw_req) in read_all_pins(layout)? {
@@ -575,31 +643,212 @@ fn resolve_install_graph_with_tokens(
                 .ok_or_else(|| anyhow!("resolver selected package missing from graph: {name}"))?
                 .clone();
 
-            let artifact = manifest
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.target == resolved_target)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "no artifact available for target {} in {} {}",
-                        resolved_target,
-                        manifest.name,
-                        manifest.version
-                    )
-                })?
-                .clone();
-            let archive_type = artifact.archive_type()?;
+            let (artifact, source_build) =
+                select_install_plan_for_target(&manifest, &resolved_target, build_from_source)?;
+            let archive_type = source_build
+                .as_ref()
+                .map(|plan| plan.archive_type)
+                .unwrap_or(artifact.archive_type()?);
 
             Ok(ResolvedInstall {
                 manifest,
                 artifact,
                 resolved_target: resolved_target.clone(),
                 archive_type,
+                source_build,
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
     Ok((resolved, resolved_dependency_tokens))
+}
+
+fn ensure_explain_requires_dry_run(operation: &str, dry_run: bool, explain: bool) -> Result<()> {
+    if explain && !dry_run {
+        return Err(anyhow!("--explain requires --dry-run for '{}'", operation));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn select_artifact_for_target(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+    build_from_source: bool,
+) -> Result<Artifact> {
+    let (artifact, _) =
+        select_install_plan_for_target(manifest, resolved_target, build_from_source)?;
+    Ok(artifact)
+}
+
+fn select_install_plan_for_target(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+    build_from_source: bool,
+) -> Result<(Artifact, Option<SourceBuildPlan>)> {
+    if build_from_source {
+        let source = manifest.source_build.as_ref().ok_or_else(|| {
+            anyhow!(
+                "source build requested for {} {} on target {} but manifest has no source_build metadata",
+                manifest.name,
+                manifest.version,
+                resolved_target
+            )
+        })?;
+        let artifact = select_source_build_artifact_template(manifest, resolved_target)?;
+        let plan = validate_source_build_plan(manifest, resolved_target, source)?;
+        return Ok((artifact, Some(plan)));
+    }
+
+    if let Some(artifact) = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.target == resolved_target)
+    {
+        return Ok((artifact.clone(), None));
+    }
+
+    if manifest.source_build.is_some() {
+        return Err(anyhow!(
+            "source build required for {} {} on target {}: no binary artifact published; rerun with --build-from-source",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+
+    Err(anyhow!(
+        "no artifact available for target {} in {} {}",
+        resolved_target,
+        manifest.name,
+        manifest.version
+    ))
+}
+
+fn select_source_build_artifact_template(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+) -> Result<Artifact> {
+    if let Some(artifact) = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.target == resolved_target)
+    {
+        return Ok(artifact.clone());
+    }
+
+    if manifest.artifacts.len() == 1 {
+        return Ok(manifest.artifacts[0].clone());
+    }
+
+    Err(anyhow!(
+        "source build for {} {} on target {} requires deterministic artifact metadata (expected exactly one artifact template when target-specific artifact is absent)",
+        manifest.name,
+        manifest.version,
+        resolved_target
+    ))
+}
+
+fn validate_source_build_plan(
+    manifest: &PackageManifest,
+    resolved_target: &str,
+    source: &crosspack_core::SourceBuildMetadata,
+) -> Result<SourceBuildPlan> {
+    let url = source.url.trim();
+    if url.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: url must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    let build_system = source.build_system.trim();
+    let archive_sha256 = source.archive_sha256.trim();
+    if archive_sha256.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: archive_sha256 must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if !is_valid_sha256_hex(archive_sha256) {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: archive_sha256 must be a 64-character hexadecimal SHA-256 digest",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if build_system.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: build_system must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if source.build_commands.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: build_commands must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if source.install_commands.is_empty() {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: install_commands must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+    if source
+        .build_commands
+        .iter()
+        .chain(source.install_commands.iter())
+        .any(|token| token.trim().is_empty())
+    {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: command tokens must not be empty",
+            manifest.name,
+            manifest.version,
+            resolved_target
+        ));
+    }
+
+    let archive_type = ArchiveType::infer_from_url(url).ok_or_else(|| {
+        anyhow!(
+            "invalid source_build metadata for {} {} on target {}: url '{}' must include a supported archive extension",
+            manifest.name,
+            manifest.version,
+            resolved_target,
+            url
+        )
+    })?;
+    if !matches!(
+        archive_type,
+        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarZst
+    ) {
+        return Err(anyhow!(
+            "invalid source_build metadata for {} {} on target {}: archive type '{}' is not supported for source builds",
+            manifest.name,
+            manifest.version,
+            resolved_target,
+            archive_type.as_str()
+        ));
+    }
+
+    Ok(SourceBuildPlan {
+        url: url.to_string(),
+        archive_sha256: archive_sha256.to_string(),
+        build_system: build_system.to_string(),
+        build_commands: source.build_commands.clone(),
+        install_commands: source.install_commands.clone(),
+        archive_type,
+    })
 }
 
 fn build_planned_package_changes(
@@ -769,6 +1018,158 @@ fn render_transaction_preview_lines(
     lines
 }
 
+fn build_dependency_policy_explainability(
+    resolved: &[ResolvedInstall],
+    receipts: &[InstallReceipt],
+    roots: &[RootInstallRequest],
+) -> Result<DependencyPolicyExplainability> {
+    let mut explainability = DependencyPolicyExplainability::default();
+
+    let mut requested_tokens = roots
+        .iter()
+        .map(|root| root.name.clone())
+        .collect::<BTreeSet<_>>();
+    for package in resolved {
+        requested_tokens.extend(package.manifest.dependencies.keys().cloned());
+    }
+
+    for capability in requested_tokens {
+        let mut provider_candidates = resolved
+            .iter()
+            .filter(|package| {
+                package.manifest.name == capability
+                    || package
+                        .manifest
+                        .provides
+                        .iter()
+                        .any(|provided| provided == &capability)
+            })
+            .collect::<Vec<_>>();
+
+        if provider_candidates
+            .iter()
+            .any(|candidate| candidate.manifest.name == capability)
+        {
+            continue;
+        }
+
+        provider_candidates.sort_by(|left, right| {
+            left.manifest
+                .name
+                .cmp(&right.manifest.name)
+                .then_with(|| right.manifest.version.cmp(&left.manifest.version))
+        });
+
+        for selected in provider_candidates {
+            explainability
+                .provider_substitutions
+                .push(PolicyProviderSubstitution {
+                    capability: capability.clone(),
+                    selected_package: selected.manifest.name.clone(),
+                    selected_version: selected.manifest.version.to_string(),
+                });
+        }
+    }
+
+    let mut ordered_resolved = resolved.iter().collect::<Vec<_>>();
+    ordered_resolved.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
+
+    for package in &ordered_resolved {
+        let replacement_receipts = collect_replacement_receipts(&package.manifest, receipts)?;
+        for replacement in replacement_receipts {
+            if let Some(requirement) = package.manifest.replaces.get(&replacement.name) {
+                explainability
+                    .replacement_removals
+                    .push(PolicyReplacementRemoval {
+                        selected_package: package.manifest.name.clone(),
+                        selected_version: package.manifest.version.to_string(),
+                        removed_package: replacement.name,
+                        removed_version: replacement.version,
+                        replacement_requirement: requirement.to_string(),
+                    });
+            }
+        }
+
+        for (conflict_package, conflict_requirement) in &package.manifest.conflicts {
+            explainability
+                .conflict_constraints
+                .push(PolicyConflictConstraint {
+                    selected_package: package.manifest.name.clone(),
+                    selected_version: package.manifest.version.to_string(),
+                    conflict_package: conflict_package.clone(),
+                    conflict_requirement: conflict_requirement.to_string(),
+                });
+        }
+    }
+
+    Ok(explainability)
+}
+
+fn merge_dependency_policy_explainability(
+    destination: &mut DependencyPolicyExplainability,
+    mut source: DependencyPolicyExplainability,
+) {
+    destination
+        .provider_substitutions
+        .append(&mut source.provider_substitutions);
+    destination
+        .replacement_removals
+        .append(&mut source.replacement_removals);
+    destination
+        .conflict_constraints
+        .append(&mut source.conflict_constraints);
+}
+
+fn render_dependency_policy_explainability_lines(
+    explainability: &DependencyPolicyExplainability,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for substitution in &explainability.provider_substitutions {
+        lines.push(format!(
+            "explain_provider capability={} selected={}@{}",
+            substitution.capability, substitution.selected_package, substitution.selected_version
+        ));
+    }
+
+    for replacement in &explainability.replacement_removals {
+        lines.push(format!(
+            "explain_replacement selected={}@{} removes={}@{} declared={}",
+            replacement.selected_package,
+            replacement.selected_version,
+            replacement.removed_package,
+            replacement.removed_version,
+            replacement.replacement_requirement
+        ));
+    }
+
+    for conflict in &explainability.conflict_constraints {
+        lines.push(format!(
+            "explain_conflict selected={}@{} conflicts={}({})",
+            conflict.selected_package,
+            conflict.selected_version,
+            conflict.conflict_package,
+            conflict.conflict_requirement
+        ));
+    }
+
+    lines
+}
+
+fn render_dry_run_output_lines(
+    preview: &TransactionPreview,
+    mode: TransactionPreviewMode,
+    explainability: Option<&DependencyPolicyExplainability>,
+) -> Vec<String> {
+    let mut lines = render_transaction_preview_lines(preview, mode);
+    if let Some(explainability) = explainability {
+        lines.extend(render_dependency_policy_explainability_lines(
+            explainability,
+        ));
+    }
+    lines
+}
+
 fn validate_install_preflight_for_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
@@ -897,12 +1298,16 @@ fn sync_native_gui_registration_state_best_effort(
     Ok((current_records, warnings))
 }
 
-#[derive(Clone, Copy)]
 struct InstallResolvedOptions<'a> {
     snapshot_id: Option<&'a str>,
     force_redownload: bool,
     interaction_policy: InstallInteractionPolicy,
     install_progress_mode: InstallProgressMode,
+}
+
+struct SourceBuildJournal<'a> {
+    txid: &'a str,
+    seq: &'a mut u64,
 }
 
 fn install_resolved(
@@ -912,6 +1317,7 @@ fn install_resolved(
     root_names: &[String],
     planned_dependency_overrides: &HashMap<String, Vec<String>>,
     options: InstallResolvedOptions<'_>,
+    mut source_build_journal: Option<&mut SourceBuildJournal<'_>>,
 ) -> Result<InstallOutcome> {
     const INSTALL_PROGRESS_STEPS: usize = 7;
     let mut progress = InstallProgressRenderer::new(
@@ -931,17 +1337,22 @@ fn install_resolved(
     let declared_completions = collect_declared_completions(&resolved.artifact)?;
     let declared_gui_apps = collect_declared_gui_apps(&resolved.artifact)?;
 
+    let download_url = if let Some(source_build) = resolved.source_build.as_ref() {
+        source_build.url.as_str()
+    } else {
+        resolved.artifact.url.as_str()
+    };
     let cache_path = resolved_artifact_cache_path(
         layout,
         &resolved.manifest.name,
         &resolved.manifest.version.to_string(),
         &resolved.resolved_target,
         resolved.archive_type,
-        &resolved.artifact.url,
+        download_url,
     )?;
     progress.update("download", 2, Some((0, None)));
     let download_status = download_artifact_with_progress(
-        &resolved.artifact.url,
+        download_url,
         &cache_path,
         options.force_redownload,
         |downloaded_bytes, total_bytes| {
@@ -949,28 +1360,78 @@ fn install_resolved(
         },
     )?;
 
+    if let (Some(_source_build), Some(journal)) = (
+        resolved.source_build.as_ref(),
+        source_build_journal.as_deref_mut(),
+    ) {
+        append_source_build_journal_entry(
+            layout,
+            journal,
+            format!("source_fetch:{}", resolved.manifest.name),
+            Some(cache_path.display().to_string()),
+        )?;
+    }
+
     progress.update("verify", 3, None);
-    let checksum_ok = verify_sha256_file(&cache_path, &resolved.artifact.sha256)?;
+    let (expected_sha256, checksum_kind) =
+        if let Some(source_build) = resolved.source_build.as_ref() {
+            (source_build.archive_sha256.as_str(), "source archive")
+        } else {
+            (resolved.artifact.sha256.as_str(), "artifact")
+        };
+    let checksum_ok = verify_sha256_file(&cache_path, expected_sha256)?;
     if !checksum_ok {
         let _ = remove_file_if_exists(&cache_path);
         return Err(anyhow!(
-            "sha256 mismatch for {} (expected {})",
+            "{checksum_kind} sha256 mismatch for {} (expected {})",
             cache_path.display(),
-            resolved.artifact.sha256
+            expected_sha256
         ));
     }
 
     progress.update("install", 4, None);
-    let install_options = build_artifact_install_options(resolved, options.interaction_policy);
-    let selected_install_mode = install_options.install_mode;
-    let install_root = install_from_artifact(
-        layout,
-        &resolved.manifest.name,
-        &resolved.manifest.version.to_string(),
-        &cache_path,
-        resolved.archive_type,
-        install_options,
-    )?;
+    let (install_root, selected_install_mode) = if let Some(source_build) =
+        resolved.source_build.as_ref()
+    {
+        let install_root = install_from_source_archive(
+            layout,
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &cache_path,
+            source_build.archive_type,
+            &source_build.build_commands,
+            &source_build.install_commands,
+        )?;
+        if let Some(journal) = source_build_journal {
+            append_source_build_journal_entry(
+                layout,
+                journal,
+                format!(
+                    "source_build_system:{}:{}",
+                    resolved.manifest.name, source_build.build_system
+                ),
+                None,
+            )?;
+            append_source_build_journal_entry(
+                layout,
+                journal,
+                format!("source_install:{}", resolved.manifest.name),
+                Some(install_root.display().to_string()),
+            )?;
+        }
+        (install_root, InstallMode::Managed)
+    } else {
+        let install_options = build_artifact_install_options(resolved, options.interaction_policy);
+        let install_root = install_from_artifact(
+            layout,
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &cache_path,
+            resolved.archive_type,
+            install_options,
+        )?;
+        (install_root, install_options.install_mode)
+    };
 
     if let Err(err) =
         apply_replacement_handoff(layout, &replacement_receipts, planned_dependency_overrides)
@@ -1047,8 +1508,14 @@ fn install_resolved(
         version: resolved.manifest.version.to_string(),
         dependencies: dependency_receipts.to_vec(),
         target: Some(resolved.resolved_target.clone()),
-        artifact_url: Some(resolved.artifact.url.clone()),
-        artifact_sha256: Some(resolved.artifact.sha256.clone()),
+        artifact_url: Some(download_url.to_string()),
+        artifact_sha256: Some(
+            resolved
+                .source_build
+                .as_ref()
+                .map(|plan| plan.archive_sha256.clone())
+                .unwrap_or_else(|| resolved.artifact.sha256.clone()),
+        ),
         cache_path: Some(cache_path.display().to_string()),
         exposed_bins: exposed_bins.clone(),
         exposed_completions: exposed_completions.clone(),
@@ -1063,6 +1530,7 @@ fn install_resolved(
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
+    write_declared_services_state(layout, &resolved.manifest.name, &resolved.manifest.services)?;
     let receipt_path = write_install_receipt(layout, &receipt)?;
     progress.update("complete", 7, None);
     progress.finish();
@@ -1072,7 +1540,7 @@ fn install_resolved(
         version: resolved.manifest.version.to_string(),
         resolved_target: resolved.resolved_target.clone(),
         archive_type: resolved.archive_type,
-        artifact_url: resolved.artifact.url.clone(),
+        artifact_url: download_url.to_string(),
         cache_path,
         download_status,
         install_root,
@@ -1089,6 +1557,30 @@ fn install_resolved(
             .collect(),
         warnings: native_gui_warnings,
     })
+}
+
+fn append_source_build_journal_entry(
+    layout: &PrefixLayout,
+    journal: &mut SourceBuildJournal<'_>,
+    step: String,
+    path: Option<String>,
+) -> Result<()> {
+    append_transaction_journal_entry(
+        layout,
+        journal.txid,
+        &TransactionJournalEntry {
+            seq: *journal.seq,
+            step,
+            state: "done".to_string(),
+            path,
+        },
+    )?;
+    *journal.seq += 1;
+    Ok(())
+}
+
+fn is_valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 fn resolved_artifact_cache_path(

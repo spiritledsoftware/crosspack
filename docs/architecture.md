@@ -39,7 +39,7 @@ Default user prefixes:
 
 - `search` and `info` query the local registry index.
 - `search <query>` returns deterministic rows with `name`, short description fallback, latest version, and source; match order is exact name, then prefix, then keyword.
-- Manifest metadata currently has no dedicated description field, so `search` short description falls back to manifest `provides`, then `license`, then `homepage` (or `-` when none are present).
+- `search` short description prefers manifest `description`, then falls back to `provides`, `license`, and `homepage` (or `-` when none are present).
 - Metadata command backend selection is:
   - if `--registry-root` is set, read directly from that registry root (legacy single-root mode),
   - otherwise read from configured snapshots under `<prefix>/state/registries/cache/`.
@@ -49,6 +49,7 @@ Default user prefixes:
 - `registry remove <name> [--purge-cache]` removes a source and optionally deletes its cached snapshot.
 - `update [--registry <name>]...` refreshes all or selected sources and prints per-source status plus `update summary: updated=<n> up-to-date=<n> failed=<n>`.
 - `self-update [--dry-run] [--force-redownload]` refreshes configured source snapshots and then installs the latest `crosspack` package for the current host target.
+- Source records support an optional `community` metadata block with a signed `recipe_catalog_path`; validation is fail-closed during update and again when opening configured snapshots.
 - Lifecycle-oriented commands use automatic output mode selection: an enhanced interactive terminal renderer (section hierarchy + semantic color + progress indicators) on interactive terminals, plain deterministic output for non-interactive/piped usage.
 - Registry metadata is trusted only when signature verification succeeds with `registry.pub` at the registry root, which acts as the local trust anchor for that registry snapshot or mirror.
 - Every version manifest requires a detached hex signature sidecar at `<version>.toml.sig`.
@@ -79,10 +80,17 @@ Default user prefixes:
 - Output determinism contract remains fixed for machine-oriented lines (`transaction_preview`, `transaction_summary`, `risk_flags`, ordered `change_*`, and `update summary: updated=<n> up-to-date=<n> failed=<n>`).
 - Interactive rendering is additive only and must continue to route through centralized renderer/formatter/progress helpers so plain-mode contracts remain unchanged.
 - `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
+- `outdated` compares installed receipt versions with latest available metadata versions and reports upgrade candidates.
+- `depends <name>`, `uses <name>`, and `why <name>` provide deterministic dependency introspection from installed receipts.
+- `bundle export` writes deterministic root+pin environment bundles; `bundle apply` replays bundle roots through standard resolve/install flows.
+- `services list|status|start|stop|restart` resolves service names from manifest-declared service state persisted under `<prefix>/state/installed/<name>.services` and tracks deterministic state files under `<prefix>/state/services/`.
+- Service actions integrate host-native adapters (`systemd` on Linux, `launchctl` on macOS, `sc` on Windows) with deterministic reason-coded fallback (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) when native actions are unavailable or fail.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - `upgrade --dry-run` performs full planning and emits the same deterministic transaction preview format without mutating install state.
+- `install`, `upgrade`, and `bundle apply` support `--explain` in dry-run mode only; explainability lines are additive and deterministic (`explain_provider`, `explain_replacement`, `explain_conflict`).
 - Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
 - `install` and `upgrade` persist `install_mode` in receipts (`managed` or `native`, derived from artifact-kind defaults).
+- `--build-from-source` is supported for `install` and `bundle apply` when manifests provide valid `source_build` metadata (including `archive_sha256`); invalid metadata, checksum mismatch, and command/tool failures fail closed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
 - `install` and `upgrade` persist GUI asset ownership in optional `<prefix>/state/installed/<name>.gui` sidecars for deterministic stale cleanup and uninstall removal.
@@ -90,6 +98,7 @@ Default user prefixes:
 - Native GUI registration is best-effort: on macOS, adapters attempt system-scope registration first and fall back to user-scope; on other platforms, registration remains user-scope only. Adapter failures produce warning lines and do not fail otherwise successful installs/upgrades/uninstalls.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
+- `cache list`, `cache gc`, and `cache prune` provide explicit artifact cache lifecycle controls.
 - Transaction recovery commands are shipped and operational:
   - `rollback [txid]` replays rollback for eligible failed/incomplete transactions.
   - `repair` clears stale transaction markers and reconciles interrupted state.

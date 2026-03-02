@@ -36,6 +36,8 @@ Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** pa
 ## Current capabilities
 
 - Search and inspect package metadata from verified local snapshots.
+- Explain installed dependency relationships with `depends`, `uses`, and `why`.
+- Audit available upgrades with `outdated`.
 - Configure multiple registry sources with deterministic precedence.
 - Install packages with transitive dependency resolution and target selection.
 - Install package-declared shell completion files (bash/zsh/fish/powershell) into Crosspack-managed completion directories.
@@ -43,6 +45,7 @@ Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** pa
 - Enforce per-package version pins.
 - Upgrade single packages or all installed roots.
 - Uninstall with dependency-aware blocking and orphan pruning.
+- Manage artifact cache lifecycle with `cache list`, `cache gc`, and `cache prune`.
 - Recover transaction state with `rollback`, `repair`, and `doctor`.
 
 ## Prerequisites
@@ -175,11 +178,25 @@ cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
 |---|---|
 | `search <query>` | Search package names. |
 | `info <name>` | Show versions and policy metadata for a package. |
-| `install <name[@constraint]> [--target <triple>] [--dry-run] [--force-redownload] [--provider <capability=package>]` | Resolve and install a package graph. `--dry-run` prints a deterministic transaction preview without mutating state. |
-| `upgrade [name[@constraint]] [--dry-run] [--provider <capability=package>]` | Upgrade one package or all installed root packages. `--dry-run` prints a deterministic transaction preview without mutating state. |
+| `install <name[@constraint]> [--target <triple>] [--dry-run] [--explain] [--build-from-source] [--force-redownload] [--provider <capability=package>]` | Resolve and install a package graph. `--dry-run` prints deterministic transaction preview lines; `--explain` adds deterministic policy explainability lines in dry-run mode only. `--build-from-source` is currently a guarded non-GA flag and fails closed. |
+| `upgrade [name[@constraint]] [--dry-run] [--explain] [--provider <capability=package>]` | Upgrade one package or all installed root packages. `--dry-run` prints deterministic transaction preview lines; `--explain` adds deterministic policy explainability lines in dry-run mode only. |
 | `pin <name@constraint>` | Pin a package version constraint. |
+| `outdated` | Show installed packages with newer versions available in configured metadata snapshots. |
+| `depends <name>` | Show recorded dependency names for an installed package. |
+| `uses <name>` | Show installed packages that currently depend on a package. |
+| `why <name>` | Explain why an installed package exists by showing a root dependency path when applicable. |
+| `bundle export [--output <path>]` | Export a deterministic environment bundle from installed roots and pins. |
+| `bundle apply [--file <path>] [--dry-run] [--explain] [--build-from-source] [--force-redownload] [--provider <capability=package>]` | Apply a bundle as install roots. `--dry-run` preserves transaction preview contracts; `--explain` is additive in dry-run mode only. `--build-from-source` is currently a guarded non-GA flag and fails closed. |
 | `uninstall <name>` | Remove a package when not required by remaining roots and prune orphan dependencies. |
 | `list` | List installed packages. |
+| `services list` | List managed service states for installed packages with Crosspack service-state records. |
+| `services status <name>` | Show managed service state (`running`/`stopped`) for an installed package. |
+| `services start <name>` | Set managed service state to `running` for an installed package. |
+| `services stop <name>` | Set managed service state to `stopped` for an installed package. |
+| `services restart <name>` | Set managed service state to `running` for an installed package. |
+| `cache list` | List cached artifact files and sizes. |
+| `cache gc` | Remove unreferenced artifact cache files while retaining receipt-referenced files. |
+| `cache prune` | Remove all artifact cache files. |
 | `registry add <name> <location> --kind <git\|filesystem> --priority <u32> --fingerprint <64-hex>` | Add a trusted source. |
 | `registry list` | List configured sources and snapshot state. |
 | `registry remove <name> [--purge-cache]` | Remove a source and optionally purge cached snapshots. |

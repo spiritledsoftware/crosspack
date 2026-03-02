@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -13,23 +13,28 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use crosspack_core::{
     ArchiveType, Artifact, ArtifactCompletionShell, ArtifactGuiApp, PackageManifest,
+    ServiceDeclaration,
 };
+#[cfg(test)]
+use crosspack_installer::read_declared_services_state;
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, expose_completion, expose_gui_app, exposed_completion_path,
-    gui_asset_path, install_from_artifact, projected_exposed_completion_path, projected_gui_assets,
-    read_active_transaction, read_all_gui_exposure_states, read_all_pins, read_gui_exposure_state,
-    read_gui_native_state, read_install_receipts, read_transaction_metadata,
-    register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
-    remove_exposed_gui_asset, remove_file_if_exists, remove_native_gui_registration_best_effort,
+    gui_asset_path, install_from_artifact, install_from_source_archive,
+    projected_exposed_completion_path, projected_gui_assets, read_active_transaction,
+    read_all_declared_services_states, read_all_gui_exposure_states, read_all_pins,
+    read_gui_exposure_state, read_gui_native_state, read_install_receipts,
+    read_transaction_metadata, register_native_gui_app_best_effort, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_file_if_exists,
+    remove_native_gui_registration_best_effort, run_native_service_action,
     run_package_native_uninstall_actions, set_active_transaction,
     uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
     uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
-    write_gui_exposure_state, write_gui_native_state, write_install_receipt, write_pin,
-    write_transaction_metadata, ArtifactInstallOptions, GuiExposureAsset,
-    GuiNativeRegistrationRecord, InstallInteractionPolicy, InstallMode, InstallReason,
-    InstallReceipt, PrefixLayout, TransactionJournalEntry, TransactionMetadata, UninstallResult,
-    UninstallStatus,
+    write_declared_services_state, write_gui_exposure_state, write_gui_native_state,
+    write_install_receipt, write_pin, write_transaction_metadata, ArtifactInstallOptions,
+    GuiExposureAsset, GuiNativeRegistrationRecord, InstallInteractionPolicy, InstallMode,
+    InstallReason, InstallReceipt, NativeServiceAction, NativeServiceOutcome, PrefixLayout,
+    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
@@ -39,6 +44,7 @@ use crosspack_registry::{
 use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
 use crosspack_security::verify_sha256_file;
 use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Parser, Debug)]
@@ -454,6 +460,10 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
+        explain: bool,
+        #[arg(long)]
+        build_from_source: bool,
+        #[arg(long)]
         force_redownload: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
@@ -464,6 +474,10 @@ enum Commands {
         spec: Option<String>,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long)]
+        explain: bool,
+        #[arg(long)]
+        build_from_source: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
         #[command(flatten)]
@@ -486,6 +500,28 @@ enum Commands {
     List,
     Pin {
         spec: String,
+    },
+    Outdated,
+    Depends {
+        name: String,
+    },
+    Uses {
+        name: String,
+    },
+    Why {
+        name: String,
+    },
+    Services {
+        #[command(subcommand)]
+        command: ServicesCommands,
+    },
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommands,
     },
     Registry {
         #[command(subcommand)]
@@ -531,6 +567,44 @@ enum RegistryCommands {
         name: String,
         #[arg(long)]
         purge_cache: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheCommands {
+    List,
+    Prune,
+    Gc,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServicesCommands {
+    List,
+    Status { name: String },
+    Start { name: String },
+    Stop { name: String },
+    Restart { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum BundleCommands {
+    Export {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Apply {
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        explain: bool,
+        #[arg(long)]
+        build_from_source: bool,
+        #[arg(long)]
+        force_redownload: bool,
+        #[arg(long = "provider", value_name = "capability=package")]
+        provider: Vec<String>,
     },
 }
 
@@ -603,5 +677,7 @@ include!("render.rs");
 include!("command_flows.rs");
 
 include!("core_flows.rs");
+
+include!("bundle_flows.rs");
 
 include!("tests.rs");

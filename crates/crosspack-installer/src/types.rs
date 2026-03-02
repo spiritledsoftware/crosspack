@@ -170,3 +170,18 @@ pub struct UninstallResult {
     pub pruned_dependencies: Vec<String>,
     pub blocked_by_roots: Vec<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeServiceAction {
+    Status,
+    Start,
+    Stop,
+    Restart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeServiceOutcome {
+    pub adapter: String,
+    pub applied: bool,
+    pub reason_code: String,
+}

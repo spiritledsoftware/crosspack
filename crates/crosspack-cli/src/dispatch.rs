@@ -27,12 +27,15 @@ fn run_cli(cli: Cli) -> Result<()> {
             spec,
             target,
             dry_run,
+            explain,
+            build_from_source,
             force_redownload,
             provider,
             escalation,
         } => {
             let (name, requirement) = parse_spec(&spec)?;
             let provider_overrides = parse_provider_overrides(&provider)?;
+            ensure_explain_requires_dry_run("install", dry_run, explain)?;
             let escalation_policy = resolve_escalation_policy(escalation);
             let interaction_policy = install_interaction_policy(escalation_policy);
             let output_style = current_output_style();
@@ -56,6 +59,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                     &roots,
                     target.as_deref(),
                     &provider_overrides,
+                    build_from_source,
                 )?;
                 let receipts = read_install_receipts(&layout)?;
                 for package in &resolved {
@@ -63,9 +67,18 @@ fn run_cli(cli: Cli) -> Result<()> {
                 }
                 let planned_changes = build_planned_package_changes(&resolved, &receipts)?;
                 let preview = build_transaction_preview("install", &planned_changes);
-                for line in
-                    render_transaction_preview_lines(&preview, TransactionPreviewMode::DryRun)
-                {
+                let explainability = if explain {
+                    Some(build_dependency_policy_explainability(
+                        &resolved, &receipts, &roots,
+                    )?)
+                } else {
+                    None
+                };
+                for line in render_dry_run_output_lines(
+                    &preview,
+                    TransactionPreviewMode::DryRun,
+                    explainability.as_ref(),
+                ) {
                     println!("{line}");
                 }
                 return Ok(());
@@ -84,6 +97,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                     &roots,
                     target.as_deref(),
                     &provider_overrides,
+                    build_from_source,
                 )?;
 
                 append_transaction_journal_entry(
@@ -132,6 +146,10 @@ fn run_cli(cli: Cli) -> Result<()> {
                     journal_seq += 1;
 
                     let dependencies = build_dependency_receipts(package, &resolved);
+                    let mut source_build_journal = SourceBuildJournal {
+                        txid: &tx.txid,
+                        seq: &mut journal_seq,
+                    };
                     let outcome = install_resolved(
                         &layout,
                         package,
@@ -144,6 +162,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                             interaction_policy,
                             install_progress_mode,
                         },
+                        Some(&mut source_build_journal),
                     )?;
                     print_install_outcome(&outcome, output_style);
                 }
@@ -168,6 +187,8 @@ fn run_cli(cli: Cli) -> Result<()> {
         Commands::Upgrade {
             spec,
             dry_run,
+            explain,
+            build_from_source,
             provider,
             escalation,
         } => {
@@ -180,9 +201,13 @@ fn run_cli(cli: Cli) -> Result<()> {
                 &layout,
                 cli.registry_root.as_deref(),
                 spec,
-                dry_run,
-                &provider_overrides,
-                interaction_policy,
+                UpgradeCommandOptions {
+                    dry_run,
+                    explain,
+                    build_from_source,
+                    provider_overrides: &provider_overrides,
+                    interaction_policy,
+                },
             )?;
         }
         Commands::Rollback { txid, escalation } => {
@@ -224,6 +249,41 @@ fn run_cli(cli: Cli) -> Result<()> {
             println!("pinned {name} to {requirement}");
             println!("pin: {}", pin_path.display());
         }
+        Commands::Outdated => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_outdated_command(&layout, cli.registry_root.as_deref())?;
+        }
+        Commands::Depends { name } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_depends_command(&layout, &name)?;
+        }
+        Commands::Uses { name } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_uses_command(&layout, &name)?;
+        }
+        Commands::Why { name } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_why_command(&layout, &name)?;
+        }
+        Commands::Services { command } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_services_command(&layout, command)?;
+        }
+        Commands::Cache { command } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_cache_command(&layout, command)?;
+        }
+        Commands::Bundle { command } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_bundle_command(&layout, cli.registry_root.as_deref(), command)?;
+        }
         Commands::Registry { command } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -249,6 +309,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                         fingerprint_sha256: fingerprint,
                         enabled: true,
                         priority,
+                        community: None,
                     })?;
                     for line in output_lines {
                         println!("{line}");

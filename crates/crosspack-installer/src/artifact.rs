@@ -60,6 +60,144 @@ pub fn install_from_artifact(
     Ok(dst)
 }
 
+pub fn install_from_source_archive(
+    layout: &PrefixLayout,
+    name: &str,
+    version: &str,
+    source_archive_path: &Path,
+    source_archive_type: ArchiveType,
+    build_commands: &[String],
+    install_commands: &[String],
+) -> Result<PathBuf> {
+    if !matches!(
+        source_archive_type,
+        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarZst
+    ) {
+        return Err(anyhow!(
+            "unsupported source build archive type '{}': expected one of zip, tar.gz, tar.zst",
+            source_archive_type.as_str()
+        ));
+    }
+
+    if build_commands.is_empty() {
+        return Err(anyhow!(
+            "source build metadata requires non-empty build_commands"
+        ));
+    }
+    if install_commands.is_empty() {
+        return Err(anyhow!(
+            "source build metadata requires non-empty install_commands"
+        ));
+    }
+
+    let install_tmp = make_tmp_dir(layout, "source-build")?;
+    let source_raw_dir = install_tmp.join("source-raw");
+    let staged_dir = install_tmp.join("staged");
+    fs::create_dir_all(&source_raw_dir)
+        .with_context(|| format!("failed to create {}", source_raw_dir.display()))?;
+    fs::create_dir_all(&staged_dir)
+        .with_context(|| format!("failed to create {}", staged_dir.display()))?;
+
+    stage_artifact_payload(
+        source_archive_path,
+        &source_raw_dir,
+        source_archive_type,
+        0,
+        None,
+        InstallMode::Managed,
+        InstallInteractionPolicy::default(),
+    )?;
+
+    let source_root = infer_source_root(&source_raw_dir)?;
+    run_source_build_command("build", build_commands, &source_root, &staged_dir)?;
+    run_source_build_command("install", install_commands, &source_root, &staged_dir)?;
+
+    let dst = layout.package_dir(name, version);
+    if dst.exists() {
+        fs::remove_dir_all(&dst)
+            .with_context(|| format!("failed to remove existing package dir: {}", dst.display()))?;
+    }
+    move_dir_or_copy(&staged_dir, &dst)?;
+
+    let _ = fs::remove_dir_all(&install_tmp);
+    Ok(dst)
+}
+
+fn infer_source_root(source_raw_dir: &Path) -> Result<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut has_non_dir_entries = false;
+    for entry in fs::read_dir(source_raw_dir)
+        .with_context(|| format!("failed to read {}", source_raw_dir.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to iterate source build extraction root: {}",
+                source_raw_dir.display()
+            )
+        })?;
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "failed to inspect source build extraction entry: {}",
+                entry.path().display()
+            )
+        })?;
+        if file_type.is_dir() {
+            dirs.push(entry.path());
+        } else {
+            has_non_dir_entries = true;
+        }
+    }
+
+    dirs.sort();
+    if dirs.len() == 1 && !has_non_dir_entries {
+        return Ok(dirs.remove(0));
+    }
+    Ok(source_raw_dir.to_path_buf())
+}
+
+fn run_source_build_command(
+    phase: &str,
+    command_tokens: &[String],
+    source_root: &Path,
+    staged_dir: &Path,
+) -> Result<()> {
+    let program = command_tokens
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    if program.is_empty() {
+        return Err(anyhow!(
+            "source build metadata contains an empty program token in {phase}_commands"
+        ));
+    }
+    if command_tokens.iter().any(|token| token.trim().is_empty()) {
+        return Err(anyhow!(
+            "source build metadata contains empty command tokens in {phase}_commands"
+        ));
+    }
+
+    let mut command = Command::new(program);
+    if command_tokens.len() > 1 {
+        command.args(&command_tokens[1..]);
+    }
+    command
+        .current_dir(source_root)
+        .env("CROSSPACK_SOURCE_ROOT", source_root)
+        .env("CROSSPACK_STAGE_DIR", staged_dir);
+
+    let context_message = format!("source build {phase} command failed");
+    run_command(&mut command, &context_message).map_err(|err| {
+        if error_chain_has_not_found(&err) {
+            return anyhow!(
+                "source build {phase} command failed: required tool '{}' was not found on PATH",
+                program
+            );
+        }
+        err
+    })
+}
+
 fn make_tmp_dir(layout: &PrefixLayout, prefix: &str) -> Result<PathBuf> {
     let mut dir = layout.tmp_state_dir();
     dir.push(format!(

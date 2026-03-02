@@ -34,6 +34,7 @@ Legacy compatibility path when `--registry-root` is provided:
 - Refresh snapshots via `crosspack update` (all sources by default, or selected via repeated `--registry <name>`).
 - Read manifests from local verified snapshots on disk.
 - Keep cached snapshots for deterministic resolution and source precedence.
+- If a source defines optional community metadata in `sources.toml`, verify the configured recipe catalog path and signature before snapshot acceptance.
 
 ## Version Discovery
 
@@ -49,7 +50,16 @@ Legacy compatibility path when `--registry-root` is provided:
 - Each manifest must have a detached signature sidecar at `<version>.toml.sig`.
 - The sidecar format is hex-encoded detached signature bytes.
 - Operations that rely on registry metadata fail closed on signature or key errors.
+- Optional community recipe metadata is signed and validated with the same source trust root (`registry.pub`) and fails closed on missing/invalid signatures or invalid catalog content.
 - If the entire registry root content is compromised (including `registry.pub`), this model does not provide authenticity guarantees for that compromised root.
+
+## Optional Community Recipe Metadata
+
+- Source records may include an optional `community` block in `sources.toml`.
+- `community.recipe_catalog_path` points to a relative `.toml` file within the source snapshot (for example: `community/recipes.toml`).
+- The recipe catalog requires a detached signature at `<recipe_catalog_path>.sig` and must verify against the source `registry.pub` key.
+- Catalog schema currently supports `version = 1` and `[[recipes]] package = "<name>"` entries.
+- Recipe entries must be strictly sorted by package name and each package must exist under `index/<package>/`.
 
 ## Source Management Commands
 

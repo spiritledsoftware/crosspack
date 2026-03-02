@@ -17,6 +17,13 @@ pub struct RegistrySourceRecord {
     #[serde(default = "crate::source_types::source_enabled_default")]
     pub enabled: bool,
     pub priority: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<RegistrySourceCommunity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrySourceCommunity {
+    pub recipe_catalog_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

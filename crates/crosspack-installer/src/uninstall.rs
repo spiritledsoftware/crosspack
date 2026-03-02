@@ -12,7 +12,7 @@ use crate::native::{
     clear_native_sidecar_state, remove_package_native_gui_registrations_best_effort,
     run_package_native_uninstall_actions,
 };
-use crate::receipts::read_install_receipts;
+use crate::receipts::{clear_declared_services_state, read_install_receipts};
 use crate::{
     InstallMode, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
 };
@@ -265,6 +265,7 @@ fn remove_receipt_artifacts(
             receipt_path.display()
         )
     })?;
+    clear_declared_services_state(layout, &receipt.name)?;
 
     Ok(if package_existed {
         UninstallStatus::Uninstalled

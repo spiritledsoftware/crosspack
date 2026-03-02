@@ -105,6 +105,12 @@ fn classify_search_match(name: &str, query: &str) -> Option<SearchMatchKind> {
 }
 
 fn best_available_short_description(manifest: &PackageManifest) -> Option<String> {
+    if let Some(description) = &manifest.description {
+        let trimmed = description.trim();
+        if !trimmed.is_empty() {
+            return Some(sanitize_metadata_cell(trimmed));
+        }
+    }
     if !manifest.provides.is_empty() {
         return Some(format!("provides: {}", manifest.provides.join(", ")));
     }
@@ -115,6 +121,15 @@ fn best_available_short_description(manifest: &PackageManifest) -> Option<String
         return Some(format!("homepage: {homepage}"));
     }
     None
+}
+
+fn sanitize_metadata_cell(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| match ch {
+            '\t' | '\n' | '\r' => ' ',
+            other => other,
+        })
+        .collect::<String>()
 }
 
 fn format_search_results(results: &[SearchResult], query: &str) -> Vec<String> {
@@ -320,4 +335,3 @@ fn update_failure_reason_code(error: Option<&str>) -> String {
 
     "unknown".to_string()
 }
-

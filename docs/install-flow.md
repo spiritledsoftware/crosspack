@@ -13,41 +13,53 @@
    - merge dependency constraints transitively,
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
-3. Select artifact for each resolved package for requested target (`--target` or host triple).
+3. Select install plan for each resolved package for requested target (`--target` or host triple):
+   - binary artifact path when target artifact is available,
+   - source-build path when `--build-from-source` is set and validated `source_build` metadata is present.
 4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `bin`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`.
    - Extensionless final URL path segments infer to `bin`.
    - Pre-1.0 scope reset: `deb` and `rpm` are removed from the supported artifact contract and are rejected.
 5. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
-6. Download artifact if needed (or if `--force-redownload`).
+6. Download selected payload if needed (or if `--force-redownload`):
+   - binary artifact URL for binary installs,
+   - `source_build.url` for source installs.
    - backend selection env var: `CROSSPACK_DOWNLOAD_BACKEND` supports `in-process` (default) or `external`.
    - default (`in-process`) uses reqwest with bounded retry (up to 3 attempts) and falls back to external backend on failure.
    - `external` forces external downloader backend and skips in-process attempts.
    - external backend is cross-platform (`curl`/`wget` with Windows PowerShell support).
-7. Verify artifact SHA-256 against manifest `sha256`.
-8. Stage artifact payload into temporary state directory with deterministic adapters:
+7. Verify SHA-256 before execution:
+   - binary installs verify artifact bytes against manifest `sha256`,
+   - source installs verify source archive bytes against `source_build.archive_sha256`.
+8. Stage payload into temporary state directory with deterministic adapters:
    - managed mode adapters: `zip`, `tar.gz`, `tar.zst` (archive extraction), `bin` (copy payload using the cached file name; requires `strip_components=0` and no `artifact_root`), `dmg` (attach/copy/detach extraction on macOS), `appimage` (copy payload as `artifact.appimage` on Linux; requires `strip_components=0` and no `artifact_root`),
    - native mode defaults: `pkg` on macOS, `exe`/`msi`/`msix`/`appx` on Windows,
    - native mode still uses deterministic non-UI adapter execution; vendor installer fallback is not attempted.
-9. Apply `strip_components` during staging copy where supported.
-10. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
-11. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
-12. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
-13. Expose declared binaries:
+9. Source-build path (when selected):
+    - extract source archive,
+    - run deterministic `build_commands`,
+    - run deterministic `install_commands`,
+    - install staged output from `CROSSPACK_STAGE_DIR` into `<prefix>/pkgs/<name>/<version>/`.
+10. Apply `strip_components` during staging copy where supported (binary artifact path).
+11. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
+12. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
+13. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
+14. Expose declared binaries:
     - Unix: symlink `<prefix>/bin/<name>` to installed package path.
     - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
-14. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
-15. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
-16. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
+15. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
+16. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
+17. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
     - macOS `.app` registration uses bundle-copy deployment and tries `/Applications/<App>.app` before `~/Applications/<App>.app`.
     - Existing unmanaged app bundles at either macOS destination are not overwritten; registration emits warnings and continues.
-17. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
-18. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+18. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
+19. Persist declared manifest services to `<prefix>/state/installed/<name>.services` for service-command lookup.
+20. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
       - persist `install_mode=managed|native` from artifact-kind defaults,
       - set `install_reason=root` for requested roots,
       - set `install_reason=dependency` for transitive-only packages,
       - preserve existing `install_reason=root` when upgrading already-rooted packages.
-19. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
+21. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
 `crosspack install --dry-run` executes the same planning and emits deterministic, script-friendly preview lines:
 - `transaction_preview operation=... mode=dry-run`
@@ -94,6 +106,7 @@ Crosspack executes install/upgrade/uninstall mutations under a transaction state
 Rollback snapshot/replay contract (current behavior):
 
 - per-package snapshots include package tree, receipt, exposed binaries, exposed package completions, exposed GUI assets, and optional native sidecar state,
+- source-build package application journals explicit source phase steps (`source_fetch:*`, `source_build_system:*`, `source_install:*`) in addition to package apply steps, with `source_build_system:*` recorded only after successful source build execution,
 - rollback replays compensating package steps in reverse journal order, including native step names (`install_native_package:<name>`, `upgrade_native_package:<name>`),
 - native uninstall actions are replayed before managed snapshot restore for native package steps.
 
@@ -123,6 +136,7 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - `install_mode` (`managed` or `native`; legacy receipts default to `managed`)
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
 - `state/installed/<name>.gui-native` sidecar (optional): native uninstall action records (`key`, `kind`, `path`) for deterministic uninstall/rollback cleanup.
+- `state/installed/<name>.services` sidecar (optional): declared service records (`name`, optional `native_id`) for deterministic service command routing.
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
@@ -142,6 +156,7 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - Completion collision: install fails if a projected package completion file is already owned by another package or exists unmanaged in Crosspack completion storage.
 - GUI asset collision: install fails if a projected GUI ownership key is already owned by another package or a projected GUI asset path already exists unmanaged.
 - Native GUI registration failures (including macOS destination prepare/write failures and unmanaged overwrite protection): install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
+- Native service adapter failures for `services status|start|stop|restart`: commands return deterministic fallback reason codes (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) while preserving deterministic plain output shape.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 - Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
 
