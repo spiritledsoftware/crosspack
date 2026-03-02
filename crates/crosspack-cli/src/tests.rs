@@ -5293,7 +5293,24 @@ requirement = "^14"
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
         configure_ready_source(&layout, "official");
-        write_signed_test_manifest(&layout, "official", "ripgrep", "14.1.0", None, None, &[]);
+        let primary_target = host_target_triple();
+        let secondary_target = if primary_target == "x86_64-unknown-linux-gnu" {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        write_signed_test_manifest_with_targets(
+            &layout,
+            TestManifestSpec {
+                source_name: "official",
+                package_name: "ripgrep",
+                version: "14.1.0",
+                license: None,
+                homepage: None,
+                provides: &[],
+                targets: &[primary_target, secondary_target],
+            },
+        );
 
         let backend = select_metadata_backend(None, &layout).expect("backend must load");
         let bundle = BundleDocument {
@@ -5302,12 +5319,12 @@ requirement = "^14"
             roots: vec![
                 BundleRoot {
                     name: "ripgrep".to_string(),
-                    target: None,
+                    target: Some(primary_target.to_string()),
                     requirement: Some("^14".to_string()),
                 },
                 BundleRoot {
                     name: "ripgrep".to_string(),
-                    target: Some("x86_64-unknown-linux-gnu".to_string()),
+                    target: Some(secondary_target.to_string()),
                     requirement: Some("^14".to_string()),
                 },
             ],
@@ -8213,8 +8230,35 @@ sha256 = "abc"
         homepage: Option<&str>,
         provides: &[&str],
     ) {
-        let cache_root = registry_state_root(layout).join("cache").join(source_name);
-        let package_dir = cache_root.join("index").join(package_name);
+        write_signed_test_manifest_with_targets(
+            layout,
+            TestManifestSpec {
+                source_name,
+                package_name,
+                version,
+                license,
+                homepage,
+                provides,
+                targets: &["x86_64-unknown-linux-gnu"],
+            },
+        );
+    }
+
+    struct TestManifestSpec<'a> {
+        source_name: &'a str,
+        package_name: &'a str,
+        version: &'a str,
+        license: Option<&'a str>,
+        homepage: Option<&'a str>,
+        provides: &'a [&'a str],
+        targets: &'a [&'a str],
+    }
+
+    fn write_signed_test_manifest_with_targets(layout: &PrefixLayout, spec: TestManifestSpec<'_>) {
+        let cache_root = registry_state_root(layout)
+            .join("cache")
+            .join(spec.source_name);
+        let package_dir = cache_root.join("index").join(spec.package_name);
         std::fs::create_dir_all(&package_dir).expect("must create package directory");
 
         let signing_key = test_signing_key();
@@ -8224,8 +8268,15 @@ sha256 = "abc"
         )
         .expect("must write registry key");
 
-        let manifest = manifest_toml(package_name, version, license, homepage, provides);
-        let manifest_path = package_dir.join(format!("{version}.toml"));
+        let manifest = manifest_toml(
+            spec.package_name,
+            spec.version,
+            spec.license,
+            spec.homepage,
+            spec.provides,
+            spec.targets,
+        );
+        let manifest_path = package_dir.join(format!("{}.toml", spec.version));
         std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
 
         let signature = signing_key.sign(manifest.as_bytes());
@@ -8381,6 +8432,7 @@ install_commands = ["sh", "-c", "{install_script}"]
         license: Option<&str>,
         homepage: Option<&str>,
         provides: &[&str],
+        targets: &[&str],
     ) -> String {
         let mut manifest = format!("name = \"{package_name}\"\nversion = \"{version}\"\n");
         if let Some(license) = license {
@@ -8397,12 +8449,12 @@ install_commands = ["sh", "-c", "{install_script}"]
                 .join(", ");
             manifest.push_str(&format!("provides = [{joined}]\n"));
         }
-        manifest.push_str(concat!(
-            "[[artifacts]]\n",
-            "target = \"x86_64-unknown-linux-gnu\"\n",
-            "url = \"https://example.test/artifact.tar.zst\"\n",
-            "sha256 = \"abc\"\n"
-        ));
+        for target in targets {
+            manifest.push_str("[[artifacts]]\n");
+            manifest.push_str(&format!("target = \"{target}\"\n"));
+            manifest.push_str("url = \"https://example.test/artifact.tar.zst\"\n");
+            manifest.push_str("sha256 = \"abc\"\n");
+        }
         manifest
     }
 }
