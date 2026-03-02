@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/spiritledsoftware/crosspack/compare/v0.9.0...v0.10.0) (2026-03-02)
+
+
+### Features
+
+* **registry:** adopt packages/releases snapshot layout ([#82](https://github.com/spiritledsoftware/crosspack/issues/82)) ([7d0b923](https://github.com/spiritledsoftware/crosspack/commit/7d0b923cbc68f282008db609ddac79eec2d126d6))
+
 ## [0.9.0](https://github.com/spiritledsoftware/crosspack/compare/v0.8.1...v0.9.0) (2026-03-02)
 
 
