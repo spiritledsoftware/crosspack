@@ -213,6 +213,18 @@ fn merge_manifest_documents(package_template: &Table, release_document: &Table) 
 
 fn merge_tables(base: &mut Table, overlay: &Table) {
     for (key, overlay_value) in overlay {
+        if key == "artifacts" {
+            if let (Some(Value::Array(base_array)), Value::Array(overlay_array)) =
+                (base.get(key), overlay_value)
+            {
+                base.insert(
+                    key.clone(),
+                    Value::Array(merge_artifacts(base_array, overlay_array)),
+                );
+                continue;
+            }
+        }
+
         if let Some(Value::Table(base_table)) = base.get_mut(key) {
             if let Value::Table(overlay_table) = overlay_value {
                 merge_tables(base_table, overlay_table);
@@ -221,6 +233,36 @@ fn merge_tables(base: &mut Table, overlay: &Table) {
         }
         base.insert(key.clone(), overlay_value.clone());
     }
+}
+
+fn merge_artifacts(base: &[Value], overlay: &[Value]) -> Vec<Value> {
+    overlay
+        .iter()
+        .map(|overlay_value| {
+            let Some(overlay_table) = overlay_value.as_table() else {
+                return overlay_value.clone();
+            };
+            let Some(target) = overlay_table.get("target").and_then(Value::as_str) else {
+                return overlay_value.clone();
+            };
+
+            let Some(base_table) = base.iter().find_map(|base_value| {
+                let base_table = base_value.as_table()?;
+                let base_target = base_table.get("target")?.as_str()?;
+                if base_target == target {
+                    Some(base_table)
+                } else {
+                    None
+                }
+            }) else {
+                return overlay_value.clone();
+            };
+
+            let mut merged = base_table.clone();
+            merge_tables(&mut merged, overlay_table);
+            Value::Table(merged)
+        })
+        .collect()
 }
 
 impl ConfiguredRegistryIndex {

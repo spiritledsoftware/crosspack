@@ -1824,6 +1824,66 @@ fn package_versions_succeeds_with_valid_signatures_and_descending_sort() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn package_versions_merges_release_artifacts_with_package_template_fields() {
+    let root = test_registry_root();
+    let package_dir = root.join("releases").join("ripgrep");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+
+    let signing_key = signing_key();
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "ripgrep",
+        r#"name = "ripgrep"
+license = "MIT"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+archive = "tar.gz"
+strip_components = 1
+
+[[artifacts.binaries]]
+name = "rg"
+path = "rg"
+"#,
+    );
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "14.1.0",
+        r#"version = "14.1.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.invalid/ripgrep-14.1.0-linux.tar.gz"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#,
+    );
+
+    let index = RegistryIndex::open(&root);
+    let manifests = index
+        .package_versions("ripgrep")
+        .expect("must load merged manifest");
+
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].version.to_string(), "14.1.0");
+    assert_eq!(manifests[0].artifacts.len(), 1);
+    assert_eq!(
+        manifests[0].artifacts[0].url,
+        "https://example.invalid/ripgrep-14.1.0-linux.tar.gz"
+    );
+    assert_eq!(manifests[0].artifacts[0].archive.as_deref(), Some("tar.gz"));
+    assert_eq!(manifests[0].artifacts[0].strip_components, Some(1));
+    assert_eq!(manifests[0].artifacts[0].binaries.len(), 1);
+    assert_eq!(manifests[0].artifacts[0].binaries[0].name, "rg");
+    assert_eq!(manifests[0].artifacts[0].binaries[0].path, "rg");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 fn write_signed_manifest(package_dir: &std::path::Path, signing_key: &SigningKey, version: &str) {
     let package_name = package_dir
         .file_name()
