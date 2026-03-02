@@ -8035,6 +8035,7 @@ sha256 = "abc"
 
     static TEST_LAYOUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(unix)]
     fn home_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -8072,10 +8073,12 @@ sha256 = "abc"
         }
     }
 
+    #[cfg(unix)]
     struct HomeEnvGuard {
         previous: Option<String>,
     }
 
+    #[cfg(unix)]
     impl HomeEnvGuard {
         fn set(home: &Path) -> Self {
             let previous = std::env::var("HOME").ok();
@@ -8086,6 +8089,7 @@ sha256 = "abc"
         }
     }
 
+    #[cfg(unix)]
     impl Drop for HomeEnvGuard {
         fn drop(&mut self) {
             match self.previous.as_deref() {
@@ -8106,6 +8110,7 @@ sha256 = "abc"
             .as_nanos()
     }
 
+    #[cfg(unix)]
     fn with_test_home_layout<T>(home_root: &Path, run: impl FnOnce(&PrefixLayout) -> T) -> T {
         let _home_lock = home_env_lock()
             .lock()
@@ -8115,6 +8120,7 @@ sha256 = "abc"
         run(&layout)
     }
 
+    #[cfg(unix)]
     fn single_transaction_txid(layout: &PrefixLayout) -> String {
         let mut txids = std::fs::read_dir(layout.transactions_dir())
             .expect("must read transactions dir")
@@ -8230,6 +8236,7 @@ sha256 = "abc"
         .expect("must write signature");
     }
 
+    #[cfg(unix)]
     fn write_signed_source_build_manifest(
         layout: &PrefixLayout,
         source_name: &str,
@@ -8254,11 +8261,13 @@ sha256 = "abc"
         );
     }
 
+    #[cfg(unix)]
     struct SourceBuildScripts {
         build: String,
         install: String,
     }
 
+    #[cfg(unix)]
     fn write_signed_source_build_manifest_with_commands(
         layout: &PrefixLayout,
         source_name: &str,
@@ -8314,6 +8323,7 @@ install_commands = ["sh", "-c", "{install_script}"]
         .expect("must write signature");
     }
 
+    #[cfg(unix)]
     fn seed_source_build_tar_gz_cache(
         layout: &PrefixLayout,
         package_name: &str,
