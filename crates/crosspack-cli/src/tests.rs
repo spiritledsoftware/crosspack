@@ -7060,6 +7060,21 @@ sha256 = "abc"
     }
 
     #[test]
+    fn render_rich_install_detail_row_is_structured_and_badge_free() {
+        let line = render_rich_install_detail_row("step", "archive", "tar.zst");
+        let columns = line.split('|').map(str::trim).collect::<Vec<_>>();
+
+        assert_eq!(columns, vec!["STEP", "archive:", "tar.zst"]);
+        assert!(
+            !line.contains("[OK]")
+                && !line.contains("[..]")
+                && !line.contains("[ERR]")
+                && !line.contains("[WARN]"),
+            "rich install detail row must avoid plain status badges: {line}"
+        );
+    }
+
+    #[test]
     fn format_update_output_lines_plain_preserves_contract_lines() {
         let report = sample_update_report();
         assert_eq!(
@@ -7082,18 +7097,68 @@ sha256 = "abc"
         let outcome = sample_install_outcome();
         let lines = format_install_outcome_lines(&outcome, OutputStyle::Plain);
         assert_eq!(
-            lines[0],
-            "resolved ripgrep 14.1.0 for x86_64-unknown-linux-gnu"
+            lines,
+            vec![
+                "resolved ripgrep 14.1.0 for x86_64-unknown-linux-gnu".to_string(),
+                "archive: tar.zst".to_string(),
+                "artifact: https://example.test/ripgrep-14.1.0.tar.zst".to_string(),
+                "cache: /tmp/crosspack/cache/ripgrep/14.1.0/artifact.tar.zst (downloaded)"
+                    .to_string(),
+                "install_root: /tmp/crosspack/pkgs/ripgrep/14.1.0".to_string(),
+                "exposed_bins: rg".to_string(),
+                "exposed_completions: bash:rg".to_string(),
+                "exposed_gui_assets: app:dev.ripgrep.viewer".to_string(),
+                "native_gui_records: app:dev.ripgrep.viewer".to_string(),
+                "receipt: /tmp/crosspack/state/installed/ripgrep.receipt".to_string(),
+            ]
         );
-        assert_eq!(lines[1], "archive: tar.zst");
+    }
+
+    #[test]
+    fn format_rich_install_outcome_lines_are_structured_and_badge_free() {
+        let mut outcome = sample_install_outcome();
+        outcome
+            .warnings
+            .push("native registration skipped".to_string());
+
+        let lines = format_rich_install_outcome_lines(&outcome);
+
+        assert!(
+            lines.iter().all(|line| line.contains('|')),
+            "rich install detail rows must use status/key/value columns: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| {
+                !line.contains("[OK]")
+                    && !line.contains("[..]")
+                    && !line.contains("[ERR]")
+                    && !line.contains("[WARN]")
+            }),
+            "rich install detail rows must avoid plain status badges: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("WARN")),
+            "rich install detail rows must preserve warning severity: {lines:?}"
+        );
     }
 
     #[test]
     fn format_install_outcome_lines_rich_adds_step_indicators() {
         let outcome = sample_install_outcome();
         let lines = format_install_outcome_lines(&outcome, OutputStyle::Rich);
-        assert!(lines[0].starts_with("[OK] "));
         assert!(lines.iter().any(|line| line.contains("receipt: ")));
+    }
+
+    #[test]
+    fn format_install_outcome_lines_rich_does_not_include_plain_status_badges() {
+        let outcome = sample_install_outcome();
+        let lines = format_install_outcome_lines(&outcome, OutputStyle::Rich);
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("[OK]") && !line.contains("[..]")),
+            "rich install outcome details must avoid plain status badges: {lines:?}"
+        );
     }
 
     #[test]

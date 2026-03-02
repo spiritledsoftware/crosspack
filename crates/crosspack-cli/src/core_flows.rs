@@ -1616,9 +1616,15 @@ fn bin_cache_file_name_from_url(artifact_url: &str) -> Result<String> {
 }
 
 fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) -> Vec<String> {
+    let detail_style = if style == OutputStyle::Rich {
+        OutputStyle::Plain
+    } else {
+        style
+    };
+
     let mut lines = vec![
         render_status_line(
-            style,
+            detail_style,
             "ok",
             &format!(
                 "resolved {} {} for {}",
@@ -1626,17 +1632,17 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
             ),
         ),
         render_status_line(
-            style,
+            detail_style,
             "step",
             &format!("archive: {}", outcome.archive_type.as_str()),
         ),
         render_status_line(
-            style,
+            detail_style,
             "step",
             &format!("artifact: {}", outcome.artifact_url),
         ),
         render_status_line(
-            style,
+            detail_style,
             "step",
             &format!(
                 "cache: {} ({})",
@@ -1645,7 +1651,7 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
             ),
         ),
         render_status_line(
-            style,
+            detail_style,
             "step",
             &format!("install_root: {}", outcome.install_root.display()),
         ),
@@ -1653,14 +1659,14 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
 
     if !outcome.exposed_bins.is_empty() {
         lines.push(render_status_line(
-            style,
+            detail_style,
             "step",
             &format!("exposed_bins: {}", outcome.exposed_bins.join(", ")),
         ));
     }
     if !outcome.exposed_completions.is_empty() {
         lines.push(render_status_line(
-            style,
+            detail_style,
             "step",
             &format!(
                 "exposed_completions: {}",
@@ -1670,7 +1676,7 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
     }
     if !outcome.exposed_gui_assets.is_empty() {
         lines.push(render_status_line(
-            style,
+            detail_style,
             "step",
             &format!(
                 "exposed_gui_assets: {}",
@@ -1680,7 +1686,7 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
     }
     if !outcome.native_gui_records.is_empty() {
         lines.push(render_status_line(
-            style,
+            detail_style,
             "step",
             &format!(
                 "native_gui_records: {}",
@@ -1690,15 +1696,83 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
     }
     for warning in &outcome.warnings {
         lines.push(render_status_line(
-            style,
+            detail_style,
             "warn",
             &format!("warning: {warning}"),
         ));
     }
     lines.push(render_status_line(
-        style,
+        detail_style,
         "step",
         &format!("receipt: {}", outcome.receipt_path.display()),
+    ));
+
+    lines
+}
+
+fn format_rich_install_outcome_lines(outcome: &InstallOutcome) -> Vec<String> {
+    let mut lines = vec![
+        render_rich_install_detail_row(
+            "ok",
+            "resolved",
+            &format!(
+                "{} {} for {}",
+                outcome.name, outcome.version, outcome.resolved_target
+            ),
+        ),
+        render_rich_install_detail_row("step", "archive", outcome.archive_type.as_str()),
+        render_rich_install_detail_row("step", "artifact", &outcome.artifact_url),
+        render_rich_install_detail_row(
+            "step",
+            "cache",
+            &format!(
+                "{} ({})",
+                outcome.cache_path.display(),
+                outcome.download_status
+            ),
+        ),
+        render_rich_install_detail_row(
+            "step",
+            "install_root",
+            &outcome.install_root.display().to_string(),
+        ),
+    ];
+
+    if !outcome.exposed_bins.is_empty() {
+        lines.push(render_rich_install_detail_row(
+            "step",
+            "exposed_bins",
+            &outcome.exposed_bins.join(", "),
+        ));
+    }
+    if !outcome.exposed_completions.is_empty() {
+        lines.push(render_rich_install_detail_row(
+            "step",
+            "exposed_completions",
+            &outcome.exposed_completions.join(", "),
+        ));
+    }
+    if !outcome.exposed_gui_assets.is_empty() {
+        lines.push(render_rich_install_detail_row(
+            "step",
+            "exposed_gui_assets",
+            &outcome.exposed_gui_assets.join(", "),
+        ));
+    }
+    if !outcome.native_gui_records.is_empty() {
+        lines.push(render_rich_install_detail_row(
+            "step",
+            "native_gui_records",
+            &outcome.native_gui_records.join(", "),
+        ));
+    }
+    for warning in &outcome.warnings {
+        lines.push(render_rich_install_detail_row("warn", "warning", warning));
+    }
+    lines.push(render_rich_install_detail_row(
+        "step",
+        "receipt",
+        &outcome.receipt_path.display().to_string(),
     ));
 
     lines
@@ -1707,7 +1781,11 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
 fn print_install_outcome(outcome: &InstallOutcome, style: OutputStyle) {
     let renderer = TerminalRenderer::from_style(style);
     renderer.print_section(&format!("Installed {} {}", outcome.name, outcome.version));
-    renderer.print_lines(&format_install_outcome_lines(outcome, style));
+    let lines = match style {
+        OutputStyle::Plain => format_install_outcome_lines(outcome, OutputStyle::Plain),
+        OutputStyle::Rich => format_rich_install_outcome_lines(outcome),
+    };
+    renderer.print_lines(&lines);
 }
 
 fn collect_declared_binaries(artifact: &Artifact) -> Result<Vec<String>> {
