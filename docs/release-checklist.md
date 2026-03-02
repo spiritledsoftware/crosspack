@@ -12,7 +12,7 @@
 1. Confirm repository variable `CROSSPACK_BOT_APP_ID` and repository secret `CROSSPACK_BOT_APP_PRIVATE_KEY` are configured for `.github/workflows/release-please.yml`.
 2. Confirm registry sync configuration for `.github/workflows/registry-sync.yml`:
    - repository variable `CROSSPACK_REGISTRY_REPOSITORY` (default `spiritledsoftware/crosspack-registry`) or `CROSSPACK_REGISTRY_REPOSITORY_NAME`
-   - repository secret `CROSSPACK_REGISTRY_SIGNING_PRIVATE_KEY_PEM` (Ed25519 private key PEM used to sign `index/crosspack/<version>.toml`)
+   - repository secret `CROSSPACK_REGISTRY_SIGNING_PRIVATE_KEY_PEM` (Ed25519 private key PEM used to sign `packages/crosspack.toml` and `releases/crosspack/<version>.toml`)
    - GitHub App installation has `contents:write` on the registry repository
 3. Verify merged commits on `main` follow Conventional Commits:
    - `fix:` -> patch bump

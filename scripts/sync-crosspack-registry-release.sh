@@ -93,16 +93,25 @@ registry_dir="$workdir/registry"
 echo "cloning registry repository: ${REGISTRY_REPOSITORY}"
 gh repo clone "$REGISTRY_REPOSITORY" "$registry_dir" -- --depth 1
 
-manifest_dir="$registry_dir/index/crosspack"
-mkdir -p "$manifest_dir"
-manifest_path="$manifest_dir/${VERSION}.toml"
-sig_path="$manifest_path.sig"
+package_dir="$registry_dir/packages"
+release_dir="$registry_dir/releases/crosspack"
+mkdir -p "$package_dir" "$release_dir"
+
+package_path="$package_dir/crosspack.toml"
+package_sig_path="$package_path.sig"
+release_path="$release_dir/${VERSION}.toml"
+release_sig_path="$release_path.sig"
 
 {
   echo 'name = "crosspack"'
-  echo "version = \"${VERSION}\""
   echo 'license = "MIT"'
   echo "homepage = \"${HOME_URL}\""
+  echo
+  echo '[source]'
+  echo 'provider = "github"'
+  echo "repo = \"${RELEASE_REPOSITORY}\""
+  echo 'tag_prefix = "v"'
+  echo 'include_prereleases = false'
 
   for target in "${targets[@]}"; do
     if [[ "$target" == "x86_64-pc-windows-msvc" ]]; then
@@ -113,20 +122,12 @@ sig_path="$manifest_path.sig"
       binary_path="crosspack"
     fi
 
-    asset="crosspack-${RELEASE_TAG}-${target}.${archive}"
-    sha256="$(checksum_for_asset "$asset")"
-    if [ -z "$sha256" ]; then
-      echo "checksum not found for release asset: ${asset}" >&2
-      exit 1
-    fi
-
-    url="${HOME_URL}/releases/download/${RELEASE_TAG}/${asset}"
+    asset_template="crosspack-v{version}-${target}.${archive}"
 
     echo
     echo '[[artifacts]]'
     echo "target = \"${target}\""
-    echo "url = \"${url}\""
-    echo "sha256 = \"${sha256}\""
+    echo "asset = \"${asset_template}\""
     echo "archive = \"${archive}\""
     echo 'strip_components = 0'
     echo
@@ -141,19 +142,53 @@ sig_path="$manifest_path.sig"
       echo "path = \"${binary_path}\""
     fi
   done
-} > "$manifest_path"
+} > "$package_path"
+
+{
+  echo 'name = "crosspack"'
+  echo "version = \"${VERSION}\""
+
+  for target in "${targets[@]}"; do
+    if [[ "$target" == "x86_64-pc-windows-msvc" ]]; then
+      archive="zip"
+    else
+      archive="tar.gz"
+    fi
+
+    asset="crosspack-${RELEASE_TAG}-${target}.${archive}"
+    sha256="$(checksum_for_asset "$asset")"
+    if [ -z "$sha256" ]; then
+      echo "checksum not found for release asset: ${asset}" >&2
+      exit 1
+    fi
+    url="${HOME_URL}/releases/download/${RELEASE_TAG}/${asset}"
+
+    echo
+    echo '[[artifacts]]'
+    echo "target = \"${target}\""
+    echo "url = \"${url}\""
+    echo "sha256 = \"${sha256}\""
+  done
+} > "$release_path"
 
 key_path="$workdir/registry-signing.key"
 printf '%s' "$REGISTRY_SIGNING_PRIVATE_KEY_PEM" > "$key_path"
 chmod 600 "$key_path"
 
-sig_bin_path="$workdir/signature.bin"
-openssl pkeyutl -sign -rawin -inkey "$key_path" -in "$manifest_path" -out "$sig_bin_path"
-xxd -p -c 9999 "$sig_bin_path" | tr -d '\n' > "$sig_path"
-printf '\n' >> "$sig_path"
+sign_manifest() {
+  local manifest_path="$1"
+  local signature_path="$2"
+  local sig_bin_path="$workdir/signature.bin"
+  openssl pkeyutl -sign -rawin -inkey "$key_path" -in "$manifest_path" -out "$sig_bin_path"
+  xxd -p -c 9999 "$sig_bin_path" | tr -d '\n' > "$signature_path"
+  printf '\n' >> "$signature_path"
+}
+
+sign_manifest "$package_path" "$package_sig_path"
+sign_manifest "$release_path" "$release_sig_path"
 
 pushd "$registry_dir" >/dev/null
-if [ -z "$(git status --porcelain -- "index/crosspack/${VERSION}.toml" "index/crosspack/${VERSION}.toml.sig")" ]; then
+if [ -z "$(git status --porcelain -- "packages/crosspack.toml" "packages/crosspack.toml.sig" "releases/crosspack/${VERSION}.toml" "releases/crosspack/${VERSION}.toml.sig")" ]; then
   echo "registry metadata already up to date for crosspack@${VERSION}"
   exit 0
 fi
@@ -165,7 +200,7 @@ if [ -n "${GH_TOKEN:-}" ]; then
   git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REGISTRY_REPOSITORY}.git"
 fi
 
-git add "index/crosspack/${VERSION}.toml" "index/crosspack/${VERSION}.toml.sig"
+git add "packages/crosspack.toml" "packages/crosspack.toml.sig" "releases/crosspack/${VERSION}.toml" "releases/crosspack/${VERSION}.toml.sig"
 git commit -m "chore(registry): add crosspack@${VERSION}"
 git push origin HEAD:main
 popd >/dev/null

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -151,7 +152,7 @@ fn finalize_staged_source_update(
         verify_metadata_signature_policy(&staged_root, &source.name)?;
         verify_community_recipe_catalog_policy(&staged_root, source)?;
 
-        let manifest_count = count_manifest_files(&staged_root.join("index"))?;
+        let manifest_count = count_manifest_files(&staged_root.join("releases"))?;
         let existing_snapshot_id = read_snapshot_id(
             &store
                 .state_root
@@ -339,13 +340,13 @@ pub(crate) fn verify_community_recipe_catalog_policy(
             );
         }
 
-        let package_index_dir = staged_root.join("index").join(&entry.package);
-        if !package_index_dir.is_dir() {
+        let package_release_dir = staged_root.join("releases").join(&entry.package);
+        if !package_release_dir.is_dir() {
             anyhow::bail!(
-                "source-metadata-invalid: source '{}' community recipe '{}' missing index directory {}",
+                "source-metadata-invalid: source '{}' community recipe '{}' missing release directory {}",
                 source.name,
                 entry.package,
-                package_index_dir.display()
+                package_release_dir.display()
             );
         }
 
@@ -367,12 +368,29 @@ pub(crate) fn verify_metadata_signature_policy(
     staged_root: &Path,
     source_name: &str,
 ) -> Result<()> {
-    let index_root = staged_root.join("index");
-    for entry in fs::read_dir(&index_root).with_context(|| {
+    let index = RegistryIndex::open(staged_root);
+    let package_names = collect_metadata_packages(staged_root, source_name)?;
+
+    for package in package_names {
+        index.package_versions(&package).with_context(|| {
+            format!(
+                "source-metadata-invalid: source '{}' package '{}' failed metadata signature validation",
+                source_name, package
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn collect_metadata_packages(staged_root: &Path, source_name: &str) -> Result<BTreeSet<String>> {
+    let mut packages = BTreeSet::new();
+    let releases_root = staged_root.join("releases");
+    for entry in fs::read_dir(&releases_root).with_context(|| {
         format!(
-            "source-metadata-invalid: source '{}' failed reading index {}",
+            "source-metadata-invalid: source '{}' failed reading releases {}",
             source_name,
-            index_root.display()
+            releases_root.display()
         )
     })? {
         let entry = entry?;
@@ -380,17 +398,42 @@ pub(crate) fn verify_metadata_signature_policy(
             continue;
         }
         let package = entry.file_name().to_string_lossy().to_string();
-        RegistryIndex::open(staged_root)
-            .package_versions(&package)
-            .with_context(|| {
-                format!(
-                    "source-metadata-invalid: source '{}' package '{}' failed signature validation",
-                    source_name, package
-                )
-            })?;
+        packages.insert(package);
     }
 
-    Ok(())
+    let packages_root = staged_root.join("packages");
+    for entry in fs::read_dir(&packages_root).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed reading packages {}",
+            source_name,
+            packages_root.display()
+        )
+    })? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+            continue;
+        }
+
+        let package = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "source-metadata-invalid: source '{}' has non-utf8 package template filename {}",
+                    source_name,
+                    path.display()
+                )
+            })?;
+
+        packages.insert(package.to_string());
+    }
+
+    Ok(packages)
 }
 
 pub(crate) fn combine_replace_restore_errors(

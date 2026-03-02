@@ -1,10 +1,10 @@
 source = core
 kind = git
 url = https://github.com/spiritledsoftware/crosspack-registry.git
-fingerprint_sha256 = 65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2
-updated_at = 2026-02-23T16:15:00Z
-key_id = core-registry-ed25519-2026-02-23
-release = https://github.com/spiritledsoftware/crosspack-registry/releases/tag/trust-core-2026-02-23
+fingerprint_sha256 = 87085672ad174b59ec6e8cfac8cfffebf84568ba08917426fd9e82b310780a52
+updated_at = 2026-03-02T12:00:00Z
+key_id = core-registry-ed25519-2026-03-02
+release = https://github.com/spiritledsoftware/crosspack-registry/releases/tag/trust-core-2026-03-02
 
 Verification:
 - Cross-check these exact values against the matching GitHub Release note entry.

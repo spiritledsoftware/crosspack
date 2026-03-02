@@ -91,10 +91,19 @@ pub(crate) fn validate_staged_registry_layout(staged_root: &Path, source_name: &
         );
     }
 
-    let index_root = staged_root.join("index");
-    if !index_root.is_dir() {
+    let packages_root = staged_root.join("packages");
+    if !packages_root.is_dir() {
         anyhow::bail!(
-            "source-snapshot-missing: source '{}' missing index/ in {}",
+            "source-snapshot-missing: source '{}' missing packages/ in {}",
+            source_name,
+            staged_root.display()
+        );
+    }
+
+    let releases_root = staged_root.join("releases");
+    if !releases_root.is_dir() {
+        anyhow::bail!(
+            "source-snapshot-missing: source '{}' missing releases/ in {}",
             source_name,
             staged_root.display()
         );
@@ -103,14 +112,14 @@ pub(crate) fn validate_staged_registry_layout(staged_root: &Path, source_name: &
     Ok(())
 }
 
-pub(crate) fn count_manifest_files(index_root: &Path) -> Result<u64> {
+pub(crate) fn count_manifest_files(releases_root: &Path) -> Result<u64> {
     let mut count = 0_u64;
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
-    queue.push_back(index_root.to_path_buf());
+    queue.push_back(releases_root.to_path_buf());
 
     while let Some(dir) = queue.pop_front() {
         for entry in fs::read_dir(&dir)
-            .with_context(|| format!("failed reading index directory {}", dir.display()))?
+            .with_context(|| format!("failed reading release directory {}", dir.display()))?
         {
             let entry = entry?;
             let path = entry.path();

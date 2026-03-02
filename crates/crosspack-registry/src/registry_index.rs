@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use crosspack_core::PackageManifest;
 use crosspack_security::verify_ed25519_signature_hex;
+use toml::value::Table;
+use toml::Value;
 
 use crate::{
     parse_source_state_file, sort_sources, source_has_ready_snapshot,
@@ -37,13 +39,13 @@ impl RegistryIndex {
     }
 
     pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
-        let index_root = self.root.join("index");
-        if !index_root.exists() {
+        let releases_root = self.root.join("releases");
+        if !releases_root.exists() {
             return Ok(Vec::new());
         }
 
         let mut names = Vec::new();
-        for entry in fs::read_dir(index_root).context("failed to read registry index")? {
+        for entry in fs::read_dir(releases_root).context("failed to read registry releases")? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -61,8 +63,11 @@ impl RegistryIndex {
     }
 
     pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
-        let package_dir = self.root.join("index").join(package);
-        if !package_dir.exists() {
+        let release_dir = self.root.join("releases").join(package);
+        let package_template_path = self.root.join("packages").join(format!("{package}.toml"));
+        let has_release_dir = release_dir.exists();
+        let has_package_template = package_template_path.exists();
+        if !has_release_dir && !has_package_template {
             return Ok(Vec::new());
         }
 
@@ -76,9 +81,35 @@ impl RegistryIndex {
         let trusted_public_key_hex = trusted_public_key_hex.trim();
         let key_identifier: String = trusted_public_key_hex.chars().take(16).collect();
 
+        let package_template_bytes = fs::read(&package_template_path).with_context(|| {
+            format!(
+                "failed reading package template: {}",
+                package_template_path.display()
+            )
+        })?;
+        verify_signed_toml_document(
+            &package_template_path,
+            &package_template_bytes,
+            trusted_public_key_hex,
+            &key_identifier,
+        )?;
+        let package_template = parse_toml_table(
+            &package_template_bytes,
+            &package_template_path,
+            "package template",
+        )?;
+
+        if !has_release_dir {
+            anyhow::bail!(
+                "orphaned package template without releases directory: package template {}, expected release directory {}",
+                package_template_path.display(),
+                release_dir.display()
+            );
+        }
+
         let mut manifests = Vec::new();
-        for entry in fs::read_dir(&package_dir)
-            .with_context(|| format!("failed to read package directory: {package}"))?
+        for entry in fs::read_dir(&release_dir)
+            .with_context(|| format!("failed to read release directory: {package}"))?
         {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -90,50 +121,148 @@ impl RegistryIndex {
                 continue;
             }
 
-            let manifest_bytes = fs::read(&path)
-                .with_context(|| format!("failed reading manifest: {}", path.display()))?;
-
-            let signature_path = path.with_extension("toml.sig");
-            let signature_hex = fs::read_to_string(&signature_path).with_context(|| {
-                format!(
-                    "failed reading manifest signature for key {}: {}",
-                    key_identifier,
-                    signature_path.display()
-                )
-            })?;
-            let signature_hex = signature_hex.trim();
-
-            let signature_is_valid = verify_ed25519_signature_hex(
-                &manifest_bytes,
+            let release_bytes = fs::read(&path)
+                .with_context(|| format!("failed reading release file: {}", path.display()))?;
+            verify_signed_toml_document(
+                &path,
+                &release_bytes,
                 trusted_public_key_hex,
-                signature_hex,
-            )
-            .with_context(|| {
+                &key_identifier,
+            )?;
+            let release_document = parse_toml_table(&release_bytes, &path, "release metadata")?;
+            let merged_document = merge_manifest_documents(&package_template, &release_document);
+            let merged_manifest =
+                toml::to_string(&Value::Table(merged_document)).with_context(|| {
+                    format!(
+                        "failed serializing merged manifest: package template {}, release {}",
+                        package_template_path.display(),
+                        path.display()
+                    )
+                })?;
+            let manifest = PackageManifest::from_toml_str(&merged_manifest).with_context(|| {
                 format!(
-                    "failed verifying manifest signature for key {}: {}",
-                    key_identifier,
-                    signature_path.display()
+                    "failed parsing merged manifest: package template {}, release {}",
+                    package_template_path.display(),
+                    path.display()
                 )
             })?;
-            if !signature_is_valid {
-                anyhow::bail!(
-                    "invalid manifest signature for key {}: manifest {}, signature {}",
-                    key_identifier,
-                    path.display(),
-                    signature_path.display()
-                );
-            }
-
-            let content = String::from_utf8(manifest_bytes)
-                .with_context(|| format!("manifest is not valid UTF-8: {}", path.display()))?;
-            let manifest = PackageManifest::from_toml_str(&content)
-                .with_context(|| format!("failed parsing manifest: {}", path.display()))?;
             manifests.push(manifest);
         }
 
         manifests.sort_by(|a, b| b.version.cmp(&a.version));
         Ok(manifests)
     }
+}
+
+fn verify_signed_toml_document(
+    document_path: &Path,
+    document_bytes: &[u8],
+    trusted_public_key_hex: &str,
+    key_identifier: &str,
+) -> Result<()> {
+    let signature_path = document_path.with_extension("toml.sig");
+    let signature_hex = fs::read_to_string(&signature_path).with_context(|| {
+        format!(
+            "failed reading metadata signature for trusted key {}: {}",
+            key_identifier,
+            signature_path.display()
+        )
+    })?;
+    let signature_hex = signature_hex.trim();
+
+    let signature_is_valid =
+        verify_ed25519_signature_hex(document_bytes, trusted_public_key_hex, signature_hex)
+            .with_context(|| {
+                format!(
+                    "failed verifying metadata signature for trusted key {}: {}",
+                    key_identifier,
+                    signature_path.display()
+                )
+            })?;
+    if !signature_is_valid {
+        anyhow::bail!(
+            "invalid metadata signature for trusted key {}: document {}, signature {}",
+            key_identifier,
+            document_path.display(),
+            signature_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_toml_table(document_bytes: &[u8], document_path: &Path, kind: &str) -> Result<Table> {
+    let content = String::from_utf8(document_bytes.to_vec())
+        .with_context(|| format!("{kind} is not valid UTF-8: {}", document_path.display()))?;
+    let value: Value = toml::from_str(&content)
+        .with_context(|| format!("failed parsing {kind}: {}", document_path.display()))?;
+    let Value::Table(table) = value else {
+        anyhow::bail!(
+            "failed parsing {kind}: expected TOML table at root in {}",
+            document_path.display()
+        );
+    };
+    Ok(table)
+}
+
+fn merge_manifest_documents(package_template: &Table, release_document: &Table) -> Table {
+    let mut merged = package_template.clone();
+    merge_tables(&mut merged, release_document);
+    merged
+}
+
+fn merge_tables(base: &mut Table, overlay: &Table) {
+    for (key, overlay_value) in overlay {
+        if key == "artifacts" {
+            if let (Some(Value::Array(base_array)), Value::Array(overlay_array)) =
+                (base.get(key), overlay_value)
+            {
+                base.insert(
+                    key.clone(),
+                    Value::Array(merge_artifacts(base_array, overlay_array)),
+                );
+                continue;
+            }
+        }
+
+        if let Some(Value::Table(base_table)) = base.get_mut(key) {
+            if let Value::Table(overlay_table) = overlay_value {
+                merge_tables(base_table, overlay_table);
+                continue;
+            }
+        }
+        base.insert(key.clone(), overlay_value.clone());
+    }
+}
+
+fn merge_artifacts(base: &[Value], overlay: &[Value]) -> Vec<Value> {
+    overlay
+        .iter()
+        .map(|overlay_value| {
+            let Some(overlay_table) = overlay_value.as_table() else {
+                return overlay_value.clone();
+            };
+            let Some(target) = overlay_table.get("target").and_then(Value::as_str) else {
+                return overlay_value.clone();
+            };
+
+            let Some(base_table) = base.iter().find_map(|base_value| {
+                let base_table = base_value.as_table()?;
+                let base_target = base_table.get("target")?.as_str()?;
+                if base_target == target {
+                    Some(base_table)
+                } else {
+                    None
+                }
+            }) else {
+                return overlay_value.clone();
+            };
+
+            let mut merged = base_table.clone();
+            merge_tables(&mut merged, overlay_table);
+            Value::Table(merged)
+        })
+        .collect()
 }
 
 impl ConfiguredRegistryIndex {

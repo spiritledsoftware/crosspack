@@ -8,15 +8,15 @@ Registry source state, snapshot lifecycle, and manifest signature enforcement li
 - `RegistrySourceRecord`: source contract (`name`, `kind`, `location`, `fingerprint_sha256`, `enabled`, `priority`).
 - `update_sources` + `finalize_staged_source_update`: stage, validate, atomically swap cache, then write `snapshot.json`.
 - `RegistrySourceSnapshotState`: per-source cache health (`None`, `Ready`, `Error` with reason code).
-- `RegistryIndex`: reads `index/<package>/*.toml`, verifies `*.toml.sig`, parses manifests.
+- `RegistryIndex`: reads `packages/<package>.toml` and `releases/<package>/*.toml`, verifies `*.toml.sig`, merges/parses manifests.
 - `ConfiguredRegistryIndex`: loads enabled sources with ready snapshots only; resolves in source priority order.
 
 ## TRUST MODEL
 - Trust root is per-source `registry.pub`; expected key fingerprint is pinned in `sources.toml`.
 - Updates fail closed if computed key fingerprint mismatches `fingerprint_sha256`.
-- Metadata validity requires both signed manifest bytes and parseable TOML payload.
+- Metadata validity requires signed package/release bytes and parseable merged TOML payload.
 - Signature verification uses `verify_ed25519_signature_hex` from `crosspack-security`.
-- Layout is mandatory: staged source must contain `registry.pub` and `index/` before acceptance.
+- Layout is mandatory: staged source must contain `registry.pub`, `packages/`, and `releases/` before acceptance.
 - Snapshot readiness gate is explicit: only `snapshot.json` with `status == "ready"` is eligible for configured reads.
 
 ## CHANGE IMPACT

@@ -1,6 +1,6 @@
-# Source Management and Metadata Update Specification (Draft v0.3)
+# Source Management and Metadata Update Specification (Draft v0.4)
 
-This document defines the v0.3 source-management feature set for Crosspack. It introduces a multi-registry model with explicit trust pinning, snapshot updates, and deterministic source precedence.
+This document defines the v0.4 source-management feature set for Crosspack. It introduces a multi-registry model with explicit trust pinning, snapshot updates, and deterministic source precedence.
 
 ## Scope
 
@@ -10,7 +10,7 @@ This spec covers:
 - CLI commands for adding, listing, removing, and updating sources.
 - Snapshot fetch and trust verification rules.
 - How query and install commands read from multiple sources.
-- Required tests and backward compatibility constraints.
+- Required tests and fail-closed migration constraints.
 
 This spec does not cover:
 
@@ -157,7 +157,8 @@ All source state is under the Crosspack prefix.
   cache/
     <name>/
       registry.pub
-      index/
+      packages/
+      releases/
       snapshot.json
 ```
 
@@ -171,7 +172,7 @@ name = "core"
 kind = "git"
 location = "https://github.com/spiritledsoftware/crosspack-registry.git"
 priority = 100
-fingerprint_sha256 = "65149d198a39db9ecfea6f63d098858ed3b06c118c1f455f84ab571106b830c2"
+fingerprint_sha256 = "87085672ad174b59ec6e8cfac8cfffebf84568ba08917426fd9e82b310780a52"
 enabled = true
 
 [sources.community]
@@ -210,11 +211,12 @@ For each targeted source, `crosspack update` performs:
 1. Sync source into a temporary directory.
 2. Validate required files:
    - `registry.pub`
-   - `index/`
+   - `packages/`
+   - `releases/`
 3. Compute fingerprint from fetched `registry.pub` and compare against `sources.toml`.
 4. Verify metadata signature policy can be enforced (sidecar files must be present for manifests that are read by registry APIs).
 5. If source `community` metadata is configured, verify `recipe_catalog_path` and detached signature (`.toml.sig`) using the same pinned source trust root.
-6. Parse and validate the community recipe catalog (supported schema version, strictly sorted package names, package directories present).
+6. Parse and validate the community recipe catalog (supported schema version, strictly sorted package names, `releases/<package>/` directories present).
 7. Atomically replace `<prefix>/state/registries/cache/<name>/`.
 8. Write `snapshot.json`.
 
@@ -228,7 +230,7 @@ Rules:
 
 - Commands never read directly from remote sources.
 - If no verified snapshot exists for any enabled source, metadata-dependent commands fail.
-- Each manifest still requires detached signature verification (`<version>.toml.sig`) and trusted key (`registry.pub`) in the source snapshot.
+- Package and release documents each require detached signature verification and trusted key (`registry.pub`) in the source snapshot.
 
 ## Source Precedence and Package Selection
 
@@ -260,7 +262,7 @@ Errors must include source name and actionable context.
 
 Rotation is explicit and fail-closed. Operators must complete all steps in order:
 
-1. Generate and publish new `registry.pub` in the source index at the target cutover revision.
+1. Generate and publish new `registry.pub` in the source root at the target cutover revision.
 2. Compute new SHA-256 fingerprint from raw `registry.pub` bytes.
 3. Update `docs/trust/core-registry-fingerprint.txt` with:
    - `fingerprint_sha256`
@@ -280,13 +282,12 @@ crosspack update
 
 If local cache is suspected stale, users may use `crosspack registry remove core --purge-cache` before re-adding.
 
-## Backward Compatibility
+## Backward Compatibility and Migration
 
-- Existing single-root usage via `--registry_root` remains valid for development and tests.
-- If `sources.toml` is absent, commands behave as follows:
-  - with `--registry_root`: current behavior.
-  - without `--registry_root`: fail with guidance to run the official `core` bootstrap flow and then `crosspack update`.
-- Receipt format remains backward compatible in v0.3, but new optional fields may be added in later versions.
+- Legacy `index/` layout support is removed in v0.4.
+- `--registry-root` requires `registry.pub`, `packages/`, and `releases/`.
+- If `sources.toml` is absent and `--registry-root` is not provided, metadata-dependent commands fail with bootstrap guidance.
+- Receipt format remains backward compatible; registry metadata layout is intentionally non-backward-compatible pre-1.0.
 
 ## Testing Requirements
 
