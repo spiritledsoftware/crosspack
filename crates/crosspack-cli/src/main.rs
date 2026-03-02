@@ -476,6 +476,8 @@ enum Commands {
         dry_run: bool,
         #[arg(long)]
         explain: bool,
+        #[arg(long)]
+        build_from_source: bool,
         #[arg(long = "provider", value_name = "capability=package")]
         provider: Vec<String>,
         #[command(flatten)]

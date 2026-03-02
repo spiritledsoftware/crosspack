@@ -149,10 +149,13 @@ mod tests {
             &layout,
             None,
             None,
-            false,
-            false,
-            &BTreeMap::new(),
-            InstallInteractionPolicy::default(),
+            UpgradeCommandOptions {
+                dry_run: false,
+                explain: false,
+                build_from_source: false,
+                provider_overrides: &BTreeMap::new(),
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
         )
         .expect_err("active transaction should block upgrade command");
         assert!(
@@ -4116,6 +4119,21 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn cli_parses_upgrade_with_build_from_source_flag() {
+        let cli = Cli::try_parse_from(["crosspack", "upgrade", "ripgrep", "--build-from-source"])
+            .expect("command must parse");
+
+        match cli.command {
+            Commands::Upgrade {
+                build_from_source, ..
+            } => {
+                assert!(build_from_source);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn cli_parses_bundle_export_with_optional_output_flag() {
         let cli = Cli::try_parse_from([
             "crosspack",
@@ -7437,6 +7455,81 @@ install_commands = ["cargo", "install", "--path", "."]
     }
 
     #[test]
+    fn upgrade_build_from_source_opt_in_unblocks_source_only_upgrade_resolution() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+
+        let host_target = host_target_triple();
+        let other_target = if host_target == "x86_64-unknown-linux-gnu" {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        write_signed_source_build_metadata_manifest(
+            &layout,
+            "official",
+            "demo",
+            "2.0.0",
+            other_target,
+        );
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some(host_target.to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write installed receipt");
+
+        let err = run_upgrade_command(
+            &layout,
+            None,
+            Some("demo".to_string()),
+            UpgradeCommandOptions {
+                dry_run: true,
+                explain: false,
+                build_from_source: false,
+                provider_overrides: &BTreeMap::new(),
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
+        )
+        .expect_err("upgrade should require explicit source-build opt-in");
+        assert!(
+            err.to_string().contains("rerun with --build-from-source"),
+            "unexpected error: {err}"
+        );
+
+        run_upgrade_command(
+            &layout,
+            None,
+            Some("demo".to_string()),
+            UpgradeCommandOptions {
+                dry_run: true,
+                explain: false,
+                build_from_source: true,
+                provider_overrides: &BTreeMap::new(),
+                interaction_policy: InstallInteractionPolicy::default(),
+            },
+        )
+        .expect("upgrade dry-run should resolve source-build install plan when opted in");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn source_build_metadata_rejects_unknown_fields_fail_closed() {
         let err = PackageManifest::from_toml_str(
             r#"
@@ -8277,6 +8370,53 @@ sha256 = "abc"
             spec.targets,
         );
         let manifest_path = package_dir.join(format!("{}.toml", spec.version));
+        std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
+
+        let signature = signing_key.sign(manifest.as_bytes());
+        std::fs::write(
+            manifest_path.with_extension("toml.sig"),
+            hex::encode(signature.to_bytes()),
+        )
+        .expect("must write signature");
+    }
+
+    fn write_signed_source_build_metadata_manifest(
+        layout: &PrefixLayout,
+        source_name: &str,
+        package_name: &str,
+        version: &str,
+        artifact_target: &str,
+    ) {
+        let cache_root = registry_state_root(layout).join("cache").join(source_name);
+        let package_dir = cache_root.join("index").join(package_name);
+        std::fs::create_dir_all(&package_dir).expect("must create package directory");
+
+        let signing_key = test_signing_key();
+        std::fs::write(
+            cache_root.join("registry.pub"),
+            public_key_hex(&signing_key),
+        )
+        .expect("must write registry key");
+
+        let manifest = format!(
+            r#"
+name = "{package_name}"
+version = "{version}"
+
+[[artifacts]]
+target = "{artifact_target}"
+url = "https://example.test/{package_name}-{version}-{artifact_target}.tar.zst"
+sha256 = "abc123"
+
+[source_build]
+url = "https://example.test/{package_name}-{version}-src.tar.gz"
+archive_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+build_system = "cargo"
+build_commands = ["cargo", "build", "--release"]
+install_commands = ["cargo", "install", "--path", "."]
+"#
+        );
+        let manifest_path = package_dir.join(format!("{version}.toml"));
         std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
 
         let signature = signing_key.sign(manifest.as_bytes());

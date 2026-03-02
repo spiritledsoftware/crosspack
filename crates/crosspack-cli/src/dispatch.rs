@@ -188,6 +188,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             spec,
             dry_run,
             explain,
+            build_from_source,
             provider,
             escalation,
         } => {
@@ -200,10 +201,13 @@ fn run_cli(cli: Cli) -> Result<()> {
                 &layout,
                 cli.registry_root.as_deref(),
                 spec,
-                dry_run,
-                explain,
-                &provider_overrides,
-                interaction_policy,
+                UpgradeCommandOptions {
+                    dry_run,
+                    explain,
+                    build_from_source,
+                    provider_overrides: &provider_overrides,
+                    interaction_policy,
+                },
             )?;
         }
         Commands::Rollback { txid, escalation } => {

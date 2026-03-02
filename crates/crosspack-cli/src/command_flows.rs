@@ -626,16 +626,21 @@ fn collect_cache_files_recursive(
     Ok(())
 }
 
+struct UpgradeCommandOptions<'a> {
+    dry_run: bool,
+    explain: bool,
+    build_from_source: bool,
+    provider_overrides: &'a BTreeMap<String, String>,
+    interaction_policy: InstallInteractionPolicy,
+}
+
 fn run_upgrade_command(
     layout: &PrefixLayout,
     registry_root: Option<&Path>,
     spec: Option<String>,
-    dry_run: bool,
-    explain: bool,
-    provider_overrides: &BTreeMap<String, String>,
-    interaction_policy: InstallInteractionPolicy,
+    options: UpgradeCommandOptions<'_>,
 ) -> Result<()> {
-    ensure_explain_requires_dry_run("upgrade", dry_run, explain)?;
+    ensure_explain_requires_dry_run("upgrade", options.dry_run, options.explain)?;
     let output_style = current_output_style();
     let renderer = TerminalRenderer::from_style(output_style);
     ensure_upgrade_command_ready(layout)?;
@@ -652,7 +657,7 @@ fn run_upgrade_command(
         None => Some(resolve_transaction_snapshot_id(layout, "upgrade")?),
     };
 
-    if dry_run {
+    if options.dry_run {
         let mut planned_changes = Vec::new();
         let mut explainability = DependencyPolicyExplainability::default();
 
@@ -674,15 +679,15 @@ fn run_upgrade_command(
                     &backend,
                     &roots,
                     installed_receipt.target.as_deref(),
-                    provider_overrides,
-                    false,
+                    options.provider_overrides,
+                    options.build_from_source,
                 )?;
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
                 for package in &resolved {
                     validate_install_preflight_for_resolved(layout, package, &receipts)?;
                 }
                 planned_changes.extend(build_planned_package_changes(&resolved, &receipts)?);
-                if explain {
+                if options.explain {
                     merge_dependency_policy_explainability(
                         &mut explainability,
                         build_dependency_policy_explainability(&resolved, &receipts, &roots)?,
@@ -704,13 +709,13 @@ fn run_upgrade_command(
                         &backend,
                         &plan.roots,
                         plan.target.as_deref(),
-                        provider_overrides,
+                        options.provider_overrides,
                         false,
-                        false,
+                        options.build_from_source,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
                     resolved_dependency_tokens.extend(plan_tokens);
-                    if explain {
+                    if options.explain {
                         merge_dependency_policy_explainability(
                             &mut explainability,
                             build_dependency_policy_explainability(
@@ -723,7 +728,10 @@ fn run_upgrade_command(
                     grouped_resolved.push(resolved);
                 }
 
-                validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
+                validate_provider_overrides_used(
+                    options.provider_overrides,
+                    &resolved_dependency_tokens,
+                )?;
 
                 let overlap_check = grouped_resolved
                     .iter()
@@ -753,7 +761,7 @@ fn run_upgrade_command(
         for line in render_dry_run_output_lines(
             &preview,
             TransactionPreviewMode::DryRun,
-            explain.then_some(&explainability),
+            options.explain.then_some(&explainability),
         ) {
             println!("{line}");
         }
@@ -788,8 +796,8 @@ fn run_upgrade_command(
                     &backend,
                     &roots,
                     installed_receipt.target.as_deref(),
-                    provider_overrides,
-                    false,
+                    options.provider_overrides,
+                    options.build_from_source,
                 )?;
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
@@ -876,7 +884,7 @@ fn run_upgrade_command(
                         InstallResolvedOptions {
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload: false,
-                            interaction_policy,
+                            interaction_policy: options.interaction_policy,
                             install_progress_mode: current_install_progress_mode(output_style),
                         },
                         Some(&mut source_build_journal),
@@ -922,9 +930,9 @@ fn run_upgrade_command(
                         &backend,
                         &plan.roots,
                         plan.target.as_deref(),
-                        provider_overrides,
+                        options.provider_overrides,
                         false,
-                        false,
+                        options.build_from_source,
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
 
@@ -947,7 +955,10 @@ fn run_upgrade_command(
                     grouped_resolved.push(resolved);
                 }
 
-                validate_provider_overrides_used(provider_overrides, &resolved_dependency_tokens)?;
+                validate_provider_overrides_used(
+                    options.provider_overrides,
+                    &resolved_dependency_tokens,
+                )?;
 
                 let overlap_check = grouped_resolved
                     .iter()
@@ -1048,7 +1059,7 @@ fn run_upgrade_command(
                             InstallResolvedOptions {
                                 snapshot_id: snapshot_id.as_deref(),
                                 force_redownload: false,
-                                interaction_policy,
+                                interaction_policy: options.interaction_policy,
                                 install_progress_mode: current_install_progress_mode(output_style),
                             },
                             Some(&mut source_build_journal),
