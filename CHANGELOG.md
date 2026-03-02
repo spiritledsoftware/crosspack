@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/spiritledsoftware/crosspack/compare/v0.10.0...v0.10.1) (2026-03-02)
+
+
+### Bug Fixes
+
+* **cli:** separate rich install outcome rendering from plain contracts ([#85](https://github.com/spiritledsoftware/crosspack/issues/85)) ([0ff5555](https://github.com/spiritledsoftware/crosspack/commit/0ff5555b75ac95385664b6bbec3b7374b7f86143))
+
 ## [0.10.0](https://github.com/spiritledsoftware/crosspack/compare/v0.9.0...v0.10.0) (2026-03-02)
 
 
