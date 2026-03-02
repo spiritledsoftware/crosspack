@@ -10,7 +10,7 @@ CORE_URL="${CROSSPACK_CORE_URL:-https://github.com/spiritledsoftware/crosspack-r
 CORE_KIND="${CROSSPACK_CORE_KIND:-git}"
 CORE_PRIORITY="${CROSSPACK_CORE_PRIORITY:-100}"
 CORE_FINGERPRINT="${CROSSPACK_CORE_FINGERPRINT:-}"
-TRUST_BULLETIN_URL="${CROSSPACK_TRUST_BULLETIN_URL:-https://raw.githubusercontent.com/${REPO}/main/docs/trust/core-registry-fingerprint.txt}"
+CORE_REGISTRY_PUB_URL="${CROSSPACK_CORE_REGISTRY_PUB_URL:-${CROSSPACK_TRUST_BULLETIN_URL:-https://raw.githubusercontent.com/spiritledsoftware/crosspack-registry/main/registry.pub}}"
 SHELL_SETUP_OPT_OUT="${CROSSPACK_NO_SHELL_SETUP:-0}"
 
 SHELL_SETUP_BEGIN="# >>> crosspack shell setup >>>"
@@ -39,31 +39,8 @@ assert_https_url() {
   url="$1"
   case "$url" in
     https://*) return 0 ;;
-    *) err "trust bulletin URL must use https: ${url}" ;;
+    *) err "registry key URL must use https: ${url}" ;;
   esac
-}
-
-read_bulletin_value() {
-  key="$1"
-  file="$2"
-  awk -F '=' -v key="$key" '
-    {
-      raw_key = $1
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", raw_key)
-      if (raw_key == key) {
-        value = $2
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-        gsub(/^"|"$/, "", value)
-        print value
-        found += 1
-      }
-    }
-    END {
-      if (found != 1) {
-        exit 1
-      }
-    }
-  ' "$file"
 }
 
 resolve_core_fingerprint() {
@@ -75,26 +52,19 @@ resolve_core_fingerprint() {
     return 0
   fi
 
-  assert_https_url "$TRUST_BULLETIN_URL"
+  assert_https_url "$CORE_REGISTRY_PUB_URL"
 
-  bulletin_path="${tmp_dir}/core-registry-fingerprint.txt"
-  if ! download "$TRUST_BULLETIN_URL" "$bulletin_path"; then
-    err "failed fetching trust bulletin from ${TRUST_BULLETIN_URL}; set CROSSPACK_CORE_FINGERPRINT to override"
+  registry_pub_path="${tmp_dir}/registry.pub"
+  if ! download "$CORE_REGISTRY_PUB_URL" "$registry_pub_path"; then
+    err "failed fetching registry key from ${CORE_REGISTRY_PUB_URL}; set CROSSPACK_CORE_FINGERPRINT to override"
   fi
 
-  bulletin_source="$(read_bulletin_value source "$bulletin_path")" || err "trust bulletin is missing a unique 'source' key"
-  bulletin_kind="$(read_bulletin_value kind "$bulletin_path")" || err "trust bulletin is missing a unique 'kind' key"
-  bulletin_url="$(read_bulletin_value url "$bulletin_path")" || err "trust bulletin is missing a unique 'url' key"
-  bulletin_fingerprint="$(read_bulletin_value fingerprint_sha256 "$bulletin_path")" || err "trust bulletin is missing a unique 'fingerprint_sha256' key"
-
-  [ "$bulletin_source" = "$CORE_NAME" ] || err "trust bulletin source mismatch (expected ${CORE_NAME}, got ${bulletin_source})"
-  [ "$bulletin_kind" = "$CORE_KIND" ] || err "trust bulletin kind mismatch (expected ${CORE_KIND}, got ${bulletin_kind})"
-  [ "$bulletin_url" = "$CORE_URL" ] || err "trust bulletin URL mismatch (expected ${CORE_URL}, got ${bulletin_url})"
-  if ! is_hex64 "$bulletin_fingerprint"; then
-    err "trust bulletin fingerprint must be 64 hex characters"
+  computed_fingerprint="$(sha256_of "$registry_pub_path")"
+  if ! is_hex64 "$computed_fingerprint"; then
+    err "computed registry key fingerprint is invalid"
   fi
 
-  echo "$bulletin_fingerprint"
+  echo "$computed_fingerprint"
 }
 
 download() {

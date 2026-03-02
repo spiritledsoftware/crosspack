@@ -7,7 +7,8 @@ param(
   [string]$CoreKind = "git",
   [int]$CorePriority = 100,
   [string]$CoreFingerprint = "",
-  [string]$TrustBulletinUrl = "",
+  [Alias("TrustBulletinUrl")]
+  [string]$CoreRegistryPubUrl = "",
   [switch]$NoShellSetup
 )
 
@@ -21,34 +22,11 @@ function Test-Hex64 {
   return $Value -match '^[0-9a-fA-F]{64}$'
 }
 
-function Parse-TrustBulletin {
-  param([string]$Content)
-
-  $data = @{}
-  foreach ($line in ($Content -split "`r?`n")) {
-    if ($line -match '^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$') {
-      $key = $matches[1]
-      $value = $matches[2].Trim()
-      if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
-        $value = $value.Substring(1, $value.Length - 2)
-      }
-      if ($data.ContainsKey($key)) {
-        throw "trust bulletin contains duplicate key '$key'"
-      }
-      $data[$key] = $value
-    }
-  }
-
-  return $data
-}
-
 function Resolve-CoreFingerprint {
   param(
     [string]$Override,
-    [string]$BulletinUrl,
-    [string]$ExpectedSource,
-    [string]$ExpectedKind,
-    [string]$ExpectedUrl
+    [string]$RegistryPubUrl,
+    [string]$TempDirectory
   )
 
   if (-not [string]::IsNullOrWhiteSpace($Override)) {
@@ -58,36 +36,21 @@ function Resolve-CoreFingerprint {
     return $Override
   }
 
-  if ([string]::IsNullOrWhiteSpace($BulletinUrl)) {
-    throw "Trust bulletin URL is empty"
+  if ([string]::IsNullOrWhiteSpace($RegistryPubUrl)) {
+    throw "Core registry.pub URL is empty"
   }
-  if (-not $BulletinUrl.StartsWith('https://')) {
-    throw "Trust bulletin URL must use https: $BulletinUrl"
-  }
-
-  $bulletinResponse = Invoke-WebRequest -Uri $BulletinUrl -UseBasicParsing
-  $data = Parse-TrustBulletin -Content $bulletinResponse.Content
-
-  foreach ($requiredKey in @('source', 'kind', 'url', 'fingerprint_sha256')) {
-    if (-not $data.ContainsKey($requiredKey) -or [string]::IsNullOrWhiteSpace($data[$requiredKey])) {
-      throw "trust bulletin is missing required key '$requiredKey'"
-    }
+  if (-not $RegistryPubUrl.StartsWith('https://')) {
+    throw "Core registry.pub URL must use https: $RegistryPubUrl"
   }
 
-  if ($data['source'] -ne $ExpectedSource) {
-    throw "trust bulletin source mismatch (expected '$ExpectedSource', got '$($data['source'])')"
-  }
-  if ($data['kind'] -ne $ExpectedKind) {
-    throw "trust bulletin kind mismatch (expected '$ExpectedKind', got '$($data['kind'])')"
-  }
-  if ($data['url'] -ne $ExpectedUrl) {
-    throw "trust bulletin url mismatch (expected '$ExpectedUrl', got '$($data['url'])')"
-  }
-  if (-not (Test-Hex64 -Value $data['fingerprint_sha256'])) {
-    throw "trust bulletin fingerprint_sha256 must be exactly 64 hex characters"
+  $registryPubPath = Join-Path $TempDirectory "registry.pub"
+  Invoke-WebRequest -Uri $RegistryPubUrl -OutFile $registryPubPath -UseBasicParsing
+  $fingerprint = (Get-FileHash -Algorithm SHA256 -Path $registryPubPath).Hash.ToLowerInvariant()
+  if (-not (Test-Hex64 -Value $fingerprint)) {
+    throw "computed registry key fingerprint is invalid"
   }
 
-  return $data['fingerprint_sha256']
+  return $fingerprint
 }
 
 function Update-CrosspackManagedProfileBlock {
@@ -194,8 +157,8 @@ $end
 }
 
 try {
-  if ([string]::IsNullOrWhiteSpace($TrustBulletinUrl)) {
-    $TrustBulletinUrl = "https://raw.githubusercontent.com/$Repo/main/docs/trust/core-registry-fingerprint.txt"
+  if ([string]::IsNullOrWhiteSpace($CoreRegistryPubUrl)) {
+    $CoreRegistryPubUrl = "https://raw.githubusercontent.com/spiritledsoftware/crosspack-registry/main/registry.pub"
   }
 
   if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -242,7 +205,7 @@ try {
   Copy-Item (Join-Path $tmpDir "crosspack.exe") (Join-Path $BinDir "cpk.exe") -Force
 
   $crosspackExe = Join-Path $BinDir "crosspack.exe"
-  $resolvedCoreFingerprint = Resolve-CoreFingerprint -Override $CoreFingerprint -BulletinUrl $TrustBulletinUrl -ExpectedSource $CoreName -ExpectedKind $CoreKind -ExpectedUrl $CoreUrl
+  $resolvedCoreFingerprint = Resolve-CoreFingerprint -Override $CoreFingerprint -RegistryPubUrl $CoreRegistryPubUrl -TempDirectory $tmpDir
 
   Write-Host "==> Configuring default registry source ($CoreName)"
   $addOutput = & $crosspackExe registry add $CoreName $CoreUrl --kind $CoreKind --priority $CorePriority --fingerprint $resolvedCoreFingerprint 2>&1
