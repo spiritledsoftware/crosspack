@@ -60,7 +60,7 @@ struct Cli {
 
 const NO_ROOT_PACKAGES_TO_UPGRADE: &str = "No root packages installed";
 const METADATA_CONFIG_GUIDANCE: &str =
-    "no configured registry snapshots available; bootstrap trusted source `core` with `crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <64-hex>` then run `crosspack update` (see https://github.com/spiritledsoftware/crosspack/blob/main/docs/registry-bootstrap-runbook.md and https://github.com/spiritledsoftware/crosspack/blob/main/docs/trust/core-registry-fingerprint.txt)";
+    "no configured registry snapshots available; bootstrap trusted source `core` with `crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <64-hex>` then run `crosspack update` (see https://github.com/spiritledsoftware/crosspack/blob/main/docs/registry-bootstrap-runbook.md)";
 const SNAPSHOT_ID_MISMATCH_ERROR_CODE: &str = "snapshot-id-mismatch";
 const SEARCH_METADATA_GUIDANCE: &str =
     "search metadata unavailable; run `crosspack update` to refresh local snapshots and `crosspack registry list` to inspect source status";

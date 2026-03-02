@@ -7,17 +7,14 @@ This runbook defines support and operator procedures for first-run trust bootstr
 - Source name: `core`
 - Source kind: `git`
 - Source URL: `https://github.com/spiritledsoftware/crosspack-registry.git`
-- Fingerprint channel:
-  - `docs/trust/core-registry-fingerprint.txt`
-  - Matching GitHub Release note entry
+- Fingerprint source: SHA-256 digest of `registry.pub` from `https://github.com/spiritledsoftware/crosspack-registry`
 
-Always verify both channels match on `fingerprint_sha256`, `updated_at`, and `key_id` before bootstrap.
+Always verify fingerprint derivation from trusted `registry.pub` bytes before bootstrap.
 
 ## First-Run Bootstrap (User)
 
-1. Read `docs/trust/core-registry-fingerprint.txt`.
-2. Confirm the same values appear in the latest corresponding GitHub Release note.
-3. Add the trusted source and update snapshots:
+1. Derive SHA-256 from trusted `registry.pub` bytes.
+2. Add the trusted source and update snapshots:
 
 ```bash
 crosspack registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <fingerprint_sha256>
@@ -39,10 +36,8 @@ Expected state: `core` appears with `snapshot=ready:<snapshot-id>`.
 
 1. Prepare new signing keypair and stage new `registry.pub` at planned cutover revision.
 2. Compute the new fingerprint from raw `registry.pub` bytes.
-3. Update `docs/trust/core-registry-fingerprint.txt` with new `fingerprint_sha256`, `updated_at`, and `key_id`.
-4. Publish a GitHub Release note entry with exactly matching values.
-5. Announce cutover with user recovery commands.
-6. Keep rollback window for the previous key; remove old key after successful migration.
+3. Publish cutover communication and user recovery commands.
+4. Keep rollback window for the previous key; remove old key after successful migration.
 
 User-facing recovery commands during rotation:
 
@@ -69,8 +64,8 @@ Symptoms:
 - Error includes mismatch/fingerprint wording.
 
 Actions:
-1. Re-check `docs/trust/core-registry-fingerprint.txt` against GitHub Release note.
-2. Remove and re-add `core` with the published fingerprint.
+1. Fetch trusted `registry.pub` bytes from the official registry repository.
+2. Recompute fingerprint from trusted `registry.pub` bytes and compare with local `sources.toml` value.
 3. Retry `crosspack update`.
 
 ### source sync failed (`source-sync-failed`)
@@ -100,6 +95,6 @@ Symptoms:
 - Update or metadata read fails with signature/metadata validation context.
 
 Actions:
-1. Confirm registry key and fingerprint channels still match.
+1. Confirm `registry.pub` and configured `fingerprint_sha256` still match.
 2. Retry after fresh sync (`crosspack update`).
 3. Escalate to registry operators with failing package path and error text.
