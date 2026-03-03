@@ -393,8 +393,8 @@ fn build_artifact_install_options<'a>(
     }
 }
 
-fn resolve_output_style(stdout_is_tty: bool, _stderr_is_tty: bool) -> OutputStyle {
-    if stdout_is_tty {
+fn resolve_output_style(stdout_is_tty: bool, stderr_is_tty: bool) -> OutputStyle {
+    if stdout_is_tty && stderr_is_tty {
         OutputStyle::Rich
     } else {
         OutputStyle::Plain
@@ -415,6 +415,16 @@ fn render_status_line(style: OutputStyle, status: &str, message: &str) -> String
             format!("{badge} {message}")
         }
     }
+}
+
+fn render_status_lines(
+    style: OutputStyle,
+    entries: impl IntoIterator<Item = (&'static str, String)>,
+) -> Vec<String> {
+    entries
+        .into_iter()
+        .map(|(status, message)| render_status_line(style, status, &message))
+        .collect()
 }
 
 fn render_update_line(style: OutputStyle, line: &str) -> String {

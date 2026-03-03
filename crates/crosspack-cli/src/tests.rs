@@ -6519,8 +6519,8 @@ sha256 = "abc"
     }
 
     #[test]
-    fn resolve_output_style_auto_uses_rich_when_stdout_is_tty_and_stderr_is_not() {
-        assert_eq!(resolve_output_style(true, false), OutputStyle::Rich);
+    fn resolve_output_style_auto_uses_plain_when_stdout_is_tty_and_stderr_is_not() {
+        assert_eq!(resolve_output_style(true, false), OutputStyle::Plain);
     }
 
     #[test]
@@ -7060,6 +7060,115 @@ sha256 = "abc"
     }
 
     #[test]
+    fn dispatch_output_style_formats_pin_status_lines_with_strict_split() {
+        let requirement = VersionReq::parse("^14").expect("pin requirement should parse");
+        let pin_path = Path::new("/tmp/crosspack/state/pins/ripgrep.pin");
+
+        let plain = format_pin_status_lines(OutputStyle::Plain, "ripgrep", &requirement, pin_path);
+        assert_eq!(
+            plain,
+            vec![
+                "pinned ripgrep to ^14".to_string(),
+                format!("pin: {}", pin_path.display()),
+            ]
+        );
+
+        let rich = format_pin_status_lines(OutputStyle::Rich, "ripgrep", &requirement, pin_path);
+        assert_eq!(rich[0], "[OK] pinned ripgrep to ^14");
+        assert_eq!(rich[1], format!("[..] pin: {}", pin_path.display()));
+    }
+
+    #[test]
+    fn dispatch_output_style_formats_registry_add_lines_with_strict_split() {
+        let plain = format_registry_add_status_lines(
+            OutputStyle::Plain,
+            "core",
+            "git",
+            100,
+            "0123456789abcdef0123456789abcdef",
+        );
+        assert_eq!(plain[0], "added registry core");
+        assert_eq!(plain[1], "kind: git");
+        assert_eq!(plain[2], "priority: 100");
+        assert_eq!(plain[3], "fingerprint: 0123456789abcdef...");
+
+        let rich = format_registry_add_status_lines(
+            OutputStyle::Rich,
+            "core",
+            "git",
+            100,
+            "0123456789abcdef0123456789abcdef",
+        );
+        assert_eq!(rich[0], "[OK] added registry core");
+        assert_eq!(rich[1], "[..] kind: git");
+        assert_eq!(rich[2], "[..] priority: 100");
+        assert_eq!(rich[3], "[..] fingerprint: 0123456789abcdef...");
+    }
+
+    #[test]
+    fn bundle_output_style_formats_export_status_line_with_strict_split() {
+        let bundle_path = Path::new("/tmp/crosspack.bundle.toml");
+
+        let plain = format_bundle_export_status_line(OutputStyle::Plain, bundle_path);
+        assert_eq!(plain, format!("bundle exported: {}", bundle_path.display()));
+
+        let rich = format_bundle_export_status_line(OutputStyle::Rich, bundle_path);
+        assert_eq!(
+            rich,
+            format!("[OK] bundle exported: {}", bundle_path.display())
+        );
+    }
+
+    #[test]
+    fn bundle_output_style_keeps_bundle_document_payload_undecorated() {
+        let bundle = BundleDocument {
+            format: BUNDLE_FORMAT_MARKER.to_string(),
+            version: BUNDLE_FORMAT_VERSION,
+            roots: vec![BundleRoot {
+                name: "ripgrep".to_string(),
+                target: None,
+                requirement: Some("^14".to_string()),
+            }],
+            snapshot_context: None,
+        };
+
+        let rendered = render_bundle_document(&bundle).expect("bundle document should render");
+        assert!(
+            rendered.contains("format = \"crosspack.bundle\""),
+            "bundle payload should remain raw document bytes"
+        );
+        assert!(
+            !rendered.contains("[OK]")
+                && !rendered.contains("[..]")
+                && !rendered.contains("[WARN]")
+                && !rendered.contains("[ERR]"),
+            "bundle payload must remain undecorated"
+        );
+    }
+
+    #[test]
+    fn renderer_progress_line_rich_suppresses_zero_total_completion_line() {
+        let line = render_progress_line(
+            OutputStyle::Rich,
+            "update",
+            0,
+            0,
+            Some(std::time::Duration::from_millis(250)),
+        );
+
+        assert!(
+            line.is_none(),
+            "rich progress completion line must be suppressed when total is zero"
+        );
+    }
+
+    #[test]
+    fn renderer_terminal_progress_exposes_progress_safe_status_and_line_emitters() {
+        let _print_status: fn(&TerminalProgress, &str, &str) = TerminalProgress::print_status;
+        let _print_line: fn(&TerminalProgress, &str) = TerminalProgress::print_line;
+    }
+
+    #[test]
     fn render_rich_install_detail_row_is_structured_and_badge_free() {
         let line = render_rich_install_detail_row("step", "archive", "tar.zst");
         let columns = line.split('|').map(str::trim).collect::<Vec<_>>();
@@ -7071,6 +7180,54 @@ sha256 = "abc"
                 && !line.contains("[ERR]")
                 && !line.contains("[WARN]"),
             "rich install detail row must avoid plain status badges: {line}"
+        );
+    }
+
+    #[test]
+    fn update_output_progress_guard_skips_zero_work_totals() {
+        assert!(!should_render_progress(0));
+        assert!(should_render_progress(1));
+    }
+
+    #[test]
+    fn plan_update_output_disables_progress_for_zero_line_report_and_keeps_summary_contract() {
+        let report = empty_update_report();
+
+        let plan = plan_update_output(&report, OutputStyle::Plain);
+
+        assert!(plan.lines.is_empty());
+        assert!(!plan.render_progress);
+        assert_eq!(
+            plan.summary_line,
+            "update summary: updated=0 up-to-date=0 failed=0"
+        );
+    }
+
+    #[test]
+    fn plan_update_output_enables_progress_for_non_empty_report() {
+        let report = sample_update_report();
+
+        let plan = plan_update_output(&report, OutputStyle::Plain);
+
+        assert!(plan.render_progress);
+    }
+
+    #[test]
+    fn plan_update_output_matches_plain_contract_and_decorates_rich_lines() {
+        let report = sample_update_report();
+
+        let plain_plan = plan_update_output(&report, OutputStyle::Plain);
+        assert_eq!(plain_plan.lines, report.lines);
+
+        let rich_plan = plan_update_output(&report, OutputStyle::Rich);
+        assert_eq!(rich_plan.lines[0], "[OK] core: updated (snapshot=git:abc)");
+        assert_eq!(
+            rich_plan.lines[1],
+            "[..] mirror: up-to-date (snapshot=git:abc)"
+        );
+        assert_eq!(
+            rich_plan.lines[2],
+            "[ERR] edge: failed (reason=source-sync-failed)"
         );
     }
 
@@ -8207,6 +8364,15 @@ sha256 = "abc"
             updated: 1,
             up_to_date: 1,
             failed: 1,
+        }
+    }
+
+    fn empty_update_report() -> super::UpdateReport {
+        super::UpdateReport {
+            lines: Vec::new(),
+            updated: 0,
+            up_to_date: 0,
+            failed: 0,
         }
     }
 

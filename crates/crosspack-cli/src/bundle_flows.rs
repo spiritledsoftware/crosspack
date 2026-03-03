@@ -59,6 +59,10 @@ fn default_bundle_file_path() -> PathBuf {
     PathBuf::from(DEFAULT_BUNDLE_FILE)
 }
 
+fn format_bundle_export_status_line(style: OutputStyle, path: &Path) -> String {
+    render_status_line(style, "ok", &format!("bundle exported: {}", path.display()))
+}
+
 fn run_bundle_command(
     layout: &PrefixLayout,
     registry_root: Option<&Path>,
@@ -108,7 +112,10 @@ fn run_bundle_export_command(layout: &PrefixLayout, output: Option<&Path>) -> Re
             }
             fs::write(path, rendered)
                 .with_context(|| format!("failed writing bundle file: {}", path.display()))?;
-            println!("bundle exported: {}", path.display());
+            println!(
+                "{}",
+                format_bundle_export_status_line(current_output_style(), path)
+            );
         }
         None => {
             print!("{rendered}");
@@ -268,7 +275,10 @@ fn run_bundle_apply_command(
     })?;
 
     if let Err(err) = sync_completion_assets_best_effort(layout, "bundle-apply") {
-        eprintln!("{err}");
+        eprintln!(
+            "{}",
+            render_status_line(output_style, "warn", &err.to_string())
+        );
     }
 
     Ok(())
