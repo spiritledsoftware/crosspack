@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/spiritledsoftware/crosspack/compare/v0.10.1...v0.10.2) (2026-03-03)
+
+
+### Bug Fixes
+
+* **cli:** harden non-install output mode rendering ([#87](https://github.com/spiritledsoftware/crosspack/issues/87)) ([beb1614](https://github.com/spiritledsoftware/crosspack/commit/beb16143bfd4efe1f5818eac2983ef11ef332f7e))
+
 ## [0.10.1](https://github.com/spiritledsoftware/crosspack/compare/v0.10.0...v0.10.1) (2026-03-02)
 
 
