@@ -626,6 +626,43 @@ fn collect_cache_files_recursive(
     Ok(())
 }
 
+fn should_render_progress(total_steps: u64) -> bool {
+    total_steps > 0
+}
+
+fn set_progress(progress: &mut Option<TerminalProgress>, current: u64) {
+    if let Some(active_progress) = progress.as_mut() {
+        active_progress.set(current);
+    }
+}
+
+fn print_status_with_progress(
+    renderer: TerminalRenderer,
+    progress: Option<&TerminalProgress>,
+    status: &str,
+    message: &str,
+) {
+    if let Some(active_progress) = progress {
+        active_progress.print_status(status, message);
+    } else {
+        renderer.print_status(status, message);
+    }
+}
+
+fn print_line_with_progress(progress: Option<&TerminalProgress>, line: &str) {
+    if let Some(active_progress) = progress {
+        active_progress.print_line(line);
+    } else {
+        println!("{line}");
+    }
+}
+
+fn finish_progress(progress: Option<TerminalProgress>) {
+    if let Some(active_progress) = progress {
+        active_progress.finish_success();
+    }
+}
+
 struct UpgradeCommandOptions<'a> {
     dry_run: bool,
     explain: bool,
@@ -803,7 +840,8 @@ fn run_upgrade_command(
                 enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
                 let total_packages = resolved.len() as u64;
                 let mut completed_packages = 0_u64;
-                let mut progress = renderer.start_progress("upgrade", total_packages);
+                let mut progress = should_render_progress(total_packages)
+                    .then(|| renderer.start_progress("upgrade", total_packages));
 
                 append_transaction_journal_entry(
                     layout,
@@ -818,7 +856,7 @@ fn run_upgrade_command(
                 journal_seq += 1;
 
                 for package in &resolved {
-                    progress.set(completed_packages);
+                    set_progress(&mut progress, completed_packages);
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         let old_version = Version::parse(&old.version).with_context(|| {
                             format!(
@@ -827,7 +865,9 @@ fn run_upgrade_command(
                             )
                         })?;
                         if package.manifest.version <= old_version {
-                            renderer.print_status(
+                            print_status_with_progress(
+                                renderer,
+                                progress.as_ref(),
                                 "step",
                                 &format!(
                                     "{} is up-to-date ({})",
@@ -835,7 +875,7 @@ fn run_upgrade_command(
                                 ),
                             );
                             completed_packages += 1;
-                            progress.set(completed_packages);
+                            set_progress(&mut progress, completed_packages);
                             continue;
                         }
                     }
@@ -890,30 +930,26 @@ fn run_upgrade_command(
                         Some(&mut source_build_journal),
                     )?;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
-                        println!(
-                            "{}",
-                            render_status_line(
-                                output_style,
-                                "ok",
-                                &format!(
-                                    "upgraded {} from {} to {}",
-                                    package.manifest.name, old.version, package.manifest.version
-                                )
-                            )
+                        print_status_with_progress(
+                            renderer,
+                            progress.as_ref(),
+                            "ok",
+                            &format!(
+                                "upgraded {} from {} to {}",
+                                package.manifest.name, old.version, package.manifest.version
+                            ),
                         );
                     }
-                    println!(
-                        "{}",
-                        render_status_line(
-                            output_style,
-                            "step",
-                            &format!("receipt: {}", outcome.receipt_path.display())
-                        )
+                    print_status_with_progress(
+                        renderer,
+                        progress.as_ref(),
+                        "step",
+                        &format!("receipt: {}", outcome.receipt_path.display()),
                     );
                     completed_packages += 1;
-                    progress.set(completed_packages);
+                    set_progress(&mut progress, completed_packages);
                 }
-                progress.finish_success();
+                finish_progress(progress);
             }
             None => {
                 let plans = build_upgrade_plans(&receipts);
@@ -979,13 +1015,14 @@ fn run_upgrade_command(
                     .map(std::vec::Vec::len)
                     .sum::<usize>() as u64;
                 let mut completed_packages = 0_u64;
-                let mut progress = renderer.start_progress("upgrade", total_packages);
+                let mut progress = should_render_progress(total_packages)
+                    .then(|| renderer.start_progress("upgrade", total_packages));
 
                 for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
                     let planned_dependency_overrides = build_planned_dependency_overrides(resolved);
 
                     for package in resolved {
-                        progress.set(completed_packages);
+                        set_progress(&mut progress, completed_packages);
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
                             let old_version = Version::parse(&old.version).with_context(|| {
@@ -995,19 +1032,17 @@ fn run_upgrade_command(
                                 )
                             })?;
                             if package.manifest.version <= old_version {
-                                println!(
-                                    "{}",
-                                    render_status_line(
-                                        output_style,
-                                        "step",
-                                        &format!(
-                                            "{} is up-to-date ({})",
-                                            package.manifest.name, old.version
-                                        )
-                                    )
+                                print_status_with_progress(
+                                    renderer,
+                                    progress.as_ref(),
+                                    "step",
+                                    &format!(
+                                        "{} is up-to-date ({})",
+                                        package.manifest.name, old.version
+                                    ),
                                 );
                                 completed_packages += 1;
-                                progress.set(completed_packages);
+                                set_progress(&mut progress, completed_packages);
                                 continue;
                             }
                         }
@@ -1066,45 +1101,37 @@ fn run_upgrade_command(
                         )?;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
-                            println!(
-                                "{}",
-                                render_status_line(
-                                    output_style,
-                                    "ok",
-                                    &format!(
-                                        "upgraded {} from {} to {}",
-                                        package.manifest.name,
-                                        old.version,
-                                        package.manifest.version
-                                    )
-                                )
+                            print_status_with_progress(
+                                renderer,
+                                progress.as_ref(),
+                                "ok",
+                                &format!(
+                                    "upgraded {} from {} to {}",
+                                    package.manifest.name, old.version, package.manifest.version
+                                ),
                             );
                         } else {
-                            println!(
-                                "{}",
-                                render_status_line(
-                                    output_style,
-                                    "ok",
-                                    &format!(
-                                        "installed dependency {} {}",
-                                        package.manifest.name, package.manifest.version
-                                    )
-                                )
+                            print_status_with_progress(
+                                renderer,
+                                progress.as_ref(),
+                                "ok",
+                                &format!(
+                                    "installed dependency {} {}",
+                                    package.manifest.name, package.manifest.version
+                                ),
                             );
                         }
-                        println!(
-                            "{}",
-                            render_status_line(
-                                output_style,
-                                "step",
-                                &format!("receipt: {}", outcome.receipt_path.display())
-                            )
+                        print_status_with_progress(
+                            renderer,
+                            progress.as_ref(),
+                            "step",
+                            &format!("receipt: {}", outcome.receipt_path.display()),
                         );
                         completed_packages += 1;
-                        progress.set(completed_packages);
+                        set_progress(&mut progress, completed_packages);
                     }
                 }
-                progress.finish_success();
+                finish_progress(progress);
             }
         }
 
@@ -2246,14 +2273,19 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
         } else {
             "ok"
         };
-        let total_steps = (1 + result.pruned_dependencies.len()) as u64;
-        let mut progress = renderer.start_progress("uninstall", total_steps);
-        progress.set(0);
+        let total_steps = if matches!(result.status, UninstallStatus::BlockedByDependents) {
+            0
+        } else {
+            (1 + result.pruned_dependencies.len()) as u64
+        };
+        let mut progress = should_render_progress(total_steps)
+            .then(|| renderer.start_progress("uninstall", total_steps));
+        set_progress(&mut progress, 0);
         for line in format_uninstall_messages(&result) {
-            renderer.print_status(status, &line);
+            print_status_with_progress(renderer, progress.as_ref(), status, &line);
         }
-        progress.set(total_steps);
-        progress.finish_success();
+        set_progress(&mut progress, total_steps);
+        finish_progress(progress);
 
         Ok(())
     })?;
@@ -2270,22 +2302,42 @@ fn run_update_command(store: &RegistrySourceStore, registry: &[String]) -> Resul
     let output_style = renderer.style();
     let results = store.update_sources(registry)?;
     let report = build_update_report(&results);
+    let update_output = plan_update_output(&report, output_style);
+    let UpdateOutputPlan {
+        lines,
+        render_progress,
+        summary_line,
+    } = update_output;
     renderer.print_section("Registry update");
-    let total_sources = report.lines.len() as u64;
+    let total_sources = lines.len() as u64;
     let mut processed_sources = 0_u64;
-    let mut progress = renderer.start_progress("update", total_sources);
-    for line in format_update_output_lines(&report, output_style) {
-        progress.set(processed_sources);
-        println!("{line}");
+    let mut progress = render_progress.then(|| renderer.start_progress("update", total_sources));
+    for line in lines {
+        set_progress(&mut progress, processed_sources);
+        print_line_with_progress(progress.as_ref(), &line);
         processed_sources += 1;
-        progress.set(processed_sources);
+        set_progress(&mut progress, processed_sources);
     }
-    progress.finish_success();
-    println!(
-        "{}",
-        format_update_summary_line(report.updated, report.up_to_date, report.failed)
-    );
+    finish_progress(progress);
+    println!("{summary_line}");
     ensure_update_succeeded(report.failed)
+}
+
+struct UpdateOutputPlan {
+    lines: Vec<String>,
+    render_progress: bool,
+    summary_line: String,
+}
+
+fn plan_update_output(report: &UpdateReport, style: OutputStyle) -> UpdateOutputPlan {
+    let lines = format_update_output_lines(report, style);
+    let render_progress = should_render_progress(lines.len() as u64);
+    let summary_line = format_update_summary_line(report.updated, report.up_to_date, report.failed);
+    UpdateOutputPlan {
+        lines,
+        render_progress,
+        summary_line,
+    }
 }
 
 fn run_self_update_command(
@@ -2313,20 +2365,28 @@ fn run_self_update_command(
         completed_steps = 1;
     }
 
-    let mut progress = renderer.start_progress("self-update", total_steps);
-    progress.set(completed_steps);
+    let mut progress = should_render_progress(total_steps)
+        .then(|| renderer.start_progress("self-update", total_steps));
+    set_progress(&mut progress, completed_steps);
 
     let args = build_self_update_install_args(registry_root, dry_run, force_redownload, escalation);
-    renderer.print_status("step", "self-update: installing latest crosspack");
+    print_status_with_progress(
+        renderer,
+        progress.as_ref(),
+        "step",
+        "self-update: installing latest crosspack",
+    );
     let result = run_current_exe_command(&args, "self-update install");
     match result {
         Ok(()) => {
-            progress.set(total_steps);
-            progress.finish_success();
+            set_progress(&mut progress, total_steps);
+            finish_progress(progress);
             Ok(())
         }
         Err(err) => {
-            progress.finish_abandon();
+            if let Some(active_progress) = progress {
+                active_progress.finish_abandon();
+            }
             Err(err)
         }
     }

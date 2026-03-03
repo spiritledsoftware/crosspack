@@ -90,6 +90,18 @@ impl TerminalRenderer {
 }
 
 impl TerminalProgress {
+    fn print_status(&self, status: &str, message: &str) {
+        self.print_line(&render_status_line(self.style, status, message));
+    }
+
+    fn print_line(&self, line: &str) {
+        if let Some(progress_bar) = &self.progress_bar {
+            progress_bar.println(line);
+        } else {
+            println!("{line}");
+        }
+    }
+
     fn set(&mut self, current: u64) {
         self.current = current.min(self.total);
 
@@ -184,7 +196,7 @@ fn render_progress_line(
     total: u64,
     elapsed: Option<Duration>,
 ) -> Option<String> {
-    if style == OutputStyle::Plain {
+    if style == OutputStyle::Plain || total == 0 {
         return None;
     }
 

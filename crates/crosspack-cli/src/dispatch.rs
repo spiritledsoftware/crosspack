@@ -1,3 +1,60 @@
+fn format_pin_status_lines(
+    style: OutputStyle,
+    name: &str,
+    requirement: &VersionReq,
+    pin_path: &Path,
+) -> Vec<String> {
+    render_status_lines(
+        style,
+        vec![
+            ("ok", format!("pinned {name} to {requirement}")),
+            ("step", format!("pin: {}", pin_path.display())),
+        ],
+    )
+}
+
+fn format_registry_add_status_lines(
+    style: OutputStyle,
+    name: &str,
+    kind: &str,
+    priority: u32,
+    fingerprint: &str,
+) -> Vec<String> {
+    render_status_lines(
+        style,
+        format_registry_add_lines(name, kind, priority, fingerprint)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| (if index == 0 { "ok" } else { "step" }, line)),
+    )
+}
+
+fn format_registry_remove_status_lines(
+    style: OutputStyle,
+    name: &str,
+    purge_cache: bool,
+) -> Vec<String> {
+    render_status_lines(
+        style,
+        format_registry_remove_lines(name, purge_cache)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| (if index == 0 { "ok" } else { "step" }, line)),
+    )
+}
+
+fn format_registry_list_status_lines(
+    style: OutputStyle,
+    sources: Vec<RegistrySourceWithSnapshotState>,
+) -> Vec<String> {
+    render_status_lines(
+        style,
+        format_registry_list_lines(sources)
+            .into_iter()
+            .map(|line| ("step", line)),
+    )
+}
+
 fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Search { query } => {
@@ -5,8 +62,18 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
             let results = run_search_command(&backend, &query)?;
-            for line in format_search_results(&results, &query) {
-                println!("{line}");
+            let lines = format_search_results(&results, &query);
+            if results.is_empty() {
+                for line in render_status_lines(
+                    current_output_style(),
+                    lines.into_iter().map(|line| ("warn", line)),
+                ) {
+                    println!("{line}");
+                }
+            } else {
+                for line in lines {
+                    println!("{line}");
+                }
             }
         }
         Commands::Info { name } => {
@@ -16,7 +83,14 @@ fn run_cli(cli: Cli) -> Result<()> {
             let versions = backend.package_versions(&name)?;
 
             if versions.is_empty() {
-                println!("No package found: {name}");
+                println!(
+                    "{}",
+                    render_status_line(
+                        current_output_style(),
+                        "warn",
+                        &format!("No package found: {name}")
+                    )
+                );
             } else {
                 for line in format_info_lines(&name, &versions) {
                     println!("{line}");
@@ -181,7 +255,10 @@ fn run_cli(cli: Cli) -> Result<()> {
                 Ok(())
             })?;
             if let Err(err) = sync_completion_assets_best_effort(&layout, "install") {
-                eprintln!("{err}");
+                eprintln!(
+                    "{}",
+                    render_status_line(output_style, "warn", &err.to_string())
+                );
             }
         }
         Commands::Upgrade {
@@ -233,7 +310,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let receipts = read_install_receipts(&layout)?;
             if receipts.is_empty() {
-                println!("No installed packages");
+                println!(
+                    "{}",
+                    render_status_line(current_output_style(), "step", "No installed packages")
+                );
             } else {
                 for receipt in receipts {
                     println!("{} {}", receipt.name, receipt.version);
@@ -246,8 +326,11 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
             let pin_path = write_pin(&layout, &name, &requirement.to_string())?;
-            println!("pinned {name} to {requirement}");
-            println!("pin: {}", pin_path.display());
+            for line in
+                format_pin_status_lines(current_output_style(), &name, &requirement, &pin_path)
+            {
+                println!("{line}");
+            }
         }
         Commands::Outdated => {
             let prefix = default_user_prefix()?;
@@ -289,6 +372,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let source_state_root = registry_state_root(&layout);
             let store = RegistrySourceStore::new(&source_state_root);
+            let output_style = current_output_style();
 
             match command {
                 RegistryCommands::Add {
@@ -300,8 +384,13 @@ fn run_cli(cli: Cli) -> Result<()> {
                 } => {
                     let source_kind: RegistrySourceKind = kind.into();
                     let kind_label = format_registry_kind(source_kind.clone());
-                    let output_lines =
-                        format_registry_add_lines(&name, kind_label, priority, &fingerprint);
+                    let output_lines = format_registry_add_status_lines(
+                        output_style,
+                        &name,
+                        kind_label,
+                        priority,
+                        &fingerprint,
+                    );
                     store.add_source(RegistrySourceRecord {
                         name,
                         kind: source_kind,
@@ -317,13 +406,15 @@ fn run_cli(cli: Cli) -> Result<()> {
                 }
                 RegistryCommands::List => {
                     let sources = store.list_sources_with_snapshot_state()?;
-                    for line in format_registry_list_lines(sources) {
+                    for line in format_registry_list_status_lines(output_style, sources) {
                         println!("{line}");
                     }
                 }
                 RegistryCommands::Remove { name, purge_cache } => {
                     store.remove_source_with_cache_purge(&name, purge_cache)?;
-                    for line in format_registry_remove_lines(&name, purge_cache) {
+                    for line in
+                        format_registry_remove_status_lines(output_style, &name, purge_cache)
+                    {
                         println!("{line}");
                     }
                 }
