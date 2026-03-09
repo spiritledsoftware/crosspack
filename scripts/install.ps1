@@ -219,9 +219,13 @@ try {
     Write-Host "Added registry source '$CoreName'"
   }
 
-  & $crosspackExe update | Out-Null
+  $updateOutput = & $crosspackExe update 2>&1
   if ($LASTEXITCODE -ne 0) {
-    throw "Failed to update registry snapshots after configuring '$CoreName'"
+    $renderedUpdateOutput = ($updateOutput | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($renderedUpdateOutput)) {
+      throw "Failed to update registry snapshots after configuring '$CoreName'"
+    }
+    throw "Failed to update registry snapshots after configuring '$CoreName'.`n$renderedUpdateOutput"
   }
 
   Configure-CrosspackPowerShellSetup -CrosspackExe $crosspackExe -BinDir $BinDir -Disabled:$NoShellSetup

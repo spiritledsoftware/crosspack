@@ -318,7 +318,14 @@ else
   fi
 fi
 
-"${BIN_DIR}/crosspack" update >/dev/null
+update_output_path="${tmp_dir}/crosspack-update.log"
+if "${BIN_DIR}/crosspack" update >"${update_output_path}" 2>&1; then
+  rm -f "${update_output_path}"
+else
+  echo "crosspack update failed after configuring registry source '${CORE_NAME}':" >&2
+  cat "${update_output_path}" >&2 || true
+  err "failed to update registry snapshots after configuring '${CORE_NAME}'"
+fi
 
 configure_shell_setup
 
