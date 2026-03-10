@@ -168,6 +168,6 @@ git checkout --theirs <path>  # prefer incoming version
 Use this runbook when snapshot consistency mismatches repeat during release monitoring:
 
 1. Run `scripts/check-snapshot-mismatch-health.sh` and capture the output in the issue thread.
-2. Run `cargo run -p crosspack-cli -- registry list` and confirm enabled sources report a shared `ready:<snapshot-id>`.
-3. Run `cargo run -p crosspack-cli -- update` and rerun the health check.
+2. Run `cargo run -p crosspack-cli --bin crosspack -- registry list` and confirm enabled sources report a shared `ready:<snapshot-id>`.
+3. Run `cargo run -p crosspack-cli --bin crosspack -- update` and rerun the health check.
 4. If the check is still `CRIT`, open launch blocker review, pause promotion, and assign source owners for mismatch triage.
