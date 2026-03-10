@@ -23,15 +23,15 @@ Crosspack exists to provide a native package manager with first-class Windows, m
 - Trust-pinned metadata: registry key fingerprint pinning plus fail-closed metadata verification.
 - Clear crate boundaries: CLI orchestration separated from focused domain crates.
 
-## GA scope (shipped in v0.3)
+## Current shipped scope
 
-The current GA scope is the behavior implemented in this repository today (v0.3 baseline):
+The current shipped scope is the behavior implemented in this repository today (current release line: v0.10.x):
 - source management with trusted fingerprint pinning (`registry add/list/remove`, `update`)
 - strict registry metadata signature verification (`registry.pub` + `<version>.toml.sig`)
 - deterministic metadata reads from verified local snapshots
 - install/upgrade/uninstall lifecycle with receipts, pins, and transaction recovery commands (`rollback`, `repair`, `doctor`)
 
-Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** part of current GA guarantees.
+Anything described as v0.4/v0.5 in docs is roadmap design work and is **not** part of the current shipped guarantee.
 
 ## Current capabilities
 
@@ -109,7 +109,8 @@ Notes:
 
 ```bash
 cargo build --workspace
-cargo run -p crosspack-cli -- --help
+cargo run -p crosspack-cli --bin crosspack -- --help
+cargo run -p crosspack-cli --bin crosspack -- version
 ```
 
 ### 2) Bootstrap the trusted default source (`core`)
@@ -117,9 +118,9 @@ cargo run -p crosspack-cli -- --help
 Before first metadata use, derive the source fingerprint from trusted `registry.pub` bytes in the official registry repository.
 
 ```bash
-cargo run -p crosspack-cli -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <sha256-of-registry.pub>
-cargo run -p crosspack-cli -- update
-cargo run -p crosspack-cli -- registry list
+cargo run -p crosspack-cli --bin crosspack -- registry add core https://github.com/spiritledsoftware/crosspack-registry.git --kind git --priority 100 --fingerprint <sha256-of-registry.pub>
+cargo run -p crosspack-cli --bin crosspack -- update
+cargo run -p crosspack-cli --bin crosspack -- registry list
 ```
 
 For operator and support procedures, see `docs/registry-bootstrap-runbook.md`.
@@ -127,26 +128,26 @@ For operator and support procedures, see `docs/registry-bootstrap-runbook.md`.
 ### 3) Discover and install packages
 
 ```bash
-cargo run -p crosspack-cli -- search ripgrep
-cargo run -p crosspack-cli -- info ripgrep
-cargo run -p crosspack-cli -- install ripgrep
-cargo run -p crosspack-cli -- install ripgrep --dry-run
-cargo run -p crosspack-cli -- list
+cargo run -p crosspack-cli --bin crosspack -- search ripgrep
+cargo run -p crosspack-cli --bin crosspack -- info ripgrep
+cargo run -p crosspack-cli --bin crosspack -- install ripgrep
+cargo run -p crosspack-cli --bin crosspack -- install ripgrep --dry-run
+cargo run -p crosspack-cli --bin crosspack -- list
 ```
 
 ### 4) Upgrade, pin, and uninstall
 
 ```bash
-cargo run -p crosspack-cli -- pin ripgrep@^14
-cargo run -p crosspack-cli -- upgrade
-cargo run -p crosspack-cli -- upgrade --dry-run
-cargo run -p crosspack-cli -- uninstall ripgrep
+cargo run -p crosspack-cli --bin crosspack -- pin ripgrep@^14
+cargo run -p crosspack-cli --bin crosspack -- upgrade
+cargo run -p crosspack-cli --bin crosspack -- upgrade --dry-run
+cargo run -p crosspack-cli --bin crosspack -- uninstall ripgrep
 ```
 
 ### 5) Optional: print shell completion script
 
 ```bash
-cargo run -p crosspack-cli -- completions bash
+cargo run -p crosspack-cli --bin crosspack -- completions bash
 ```
 
 Tip: `completions` targets the canonical `crosspack` binary name.
@@ -155,7 +156,7 @@ Tip: generated Crosspack scripts include loader logic for package-declared compl
 ### 6) Optional: print shell setup snippet (PATH + completion loader)
 
 ```bash
-cargo run -p crosspack-cli -- init-shell --shell zsh
+cargo run -p crosspack-cli --bin crosspack -- init-shell --shell zsh
 ```
 
 Tip: `init-shell` auto-detects shell when `--shell` is omitted; fallback is `bash` on Unix and `powershell` on Windows.
@@ -165,8 +166,8 @@ Tip: `init-shell` auto-detects shell when `--shell` is omitted; fallback is `bas
 For development and tests, you can bypass configured source snapshots and point directly to a registry root:
 
 ```bash
-cargo run -p crosspack-cli -- --registry-root /path/to/registry search ripgrep
-cargo run -p crosspack-cli -- --registry-root /path/to/registry install ripgrep
+cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry search ripgrep
+cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry install ripgrep
 ```
 
 ## Command Reference
@@ -302,7 +303,7 @@ Dependency maintenance automation:
 - `docs/install-flow.md` - install, upgrade, and uninstall lifecycle.
 - `docs/registry-spec.md` - source and snapshot model.
 - `docs/manifest-spec.md` - manifest schema.
-- `docs/source-management-spec.md` - v0.3 source-management design.
+- `docs/source-management-spec.md` - source-management roadmap spec (v0.4 draft, non-GA).
 - `docs/registry-bootstrap-runbook.md` - trusted default source bootstrap, rotation, and failure recovery.
 - `docs/release-checklist.md` - release and prerelease operator checklist with rollback paths.
 - `docs/contributor-playbook.md` - contributor workflow and launch runbook.

@@ -1,4 +1,4 @@
-# Crosspack Architecture (v0.3)
+# Crosspack Architecture (current shipped behavior)
 
 Crosspack is a native, cross-platform package manager with first-class Windows support. It does not wrap existing package managers.
 
@@ -111,9 +111,9 @@ Default user prefixes:
 - `init-shell [--shell <bash|zsh|fish|powershell>]` prints shell setup snippets for PATH + completion loading; without `--shell`, shell is auto-detected (with deterministic fallback).
 - Install scripts attempt best-effort shell setup by generating completion files under `<prefix>/share/completions/` and upserting one managed profile block; failures warn and do not abort install.
 
-## GA Scope Statement
+## Scope Statement
 
-This architecture document describes current shipped behavior unless explicitly marked otherwise.
+This architecture document describes current shipped behavior on the current release line unless explicitly marked otherwise.
 
 Roadmap specs (v0.4/v0.5) are design targets and non-GA until merged and validated in current command behavior/tests.
 

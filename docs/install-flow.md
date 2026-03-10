@@ -1,4 +1,4 @@
-# Install Flow (v0.3)
+# Install Flow (current shipped behavior)
 
 `crosspack install <name[@constraint]>` executes this sequence:
 
@@ -98,7 +98,7 @@ Mutating commands (`install`, `upgrade`, `uninstall`, `rollback`, `repair`, `sel
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 `crosspack upgrade --dry-run` emits the same preview format and performs planning without mutation.
 
-## Transaction Phases and Recovery (current v0.3)
+## Transaction Phases and Recovery (current shipped behavior)
 
 Crosspack executes install/upgrade/uninstall mutations under a transaction state machine with persisted status markers:
 
@@ -214,7 +214,7 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 
 ## Forward-Looking Extensions
 
-The current flow is the v0.3 baseline. Planned extensions are specified in:
+The current flow describes shipped behavior on the current release line. Planned extensions are specified in:
 
 - Dependency policy and replacement/provider behavior: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery behavior: `docs/transaction-rollback-spec.md`.
