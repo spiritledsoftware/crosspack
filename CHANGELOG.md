@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.3](https://github.com/spiritledsoftware/crosspack/compare/v0.10.2...v0.10.3) (2026-03-16)
+
+
+### Bug Fixes
+
+* **installer:** surface registry update diagnostics on bootstrap failure ([#89](https://github.com/spiritledsoftware/crosspack/issues/89)) ([ee3e729](https://github.com/spiritledsoftware/crosspack/commit/ee3e7291ceab69535167546d0b67d36fbcbaff2b))
+
+
+### Documentation
+
+* align Crosspack docs with current shipped behavior ([#92](https://github.com/spiritledsoftware/crosspack/issues/92)) ([8437999](https://github.com/spiritledsoftware/crosspack/commit/8437999987b6b38fc8feb8b5cf91a55ecf52c2b5))
+
 ## [0.10.2](https://github.com/spiritledsoftware/crosspack/compare/v0.10.1...v0.10.2) (2026-03-03)
 
 
