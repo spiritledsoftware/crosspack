@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Create GitHub App token for registry repository
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.CROSSPACK_BOT_APP_ID }}
           private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
