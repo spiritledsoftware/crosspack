@@ -6434,6 +6434,45 @@ sha256 = "abc"
     }
 
     #[test]
+    fn format_search_results_for_style_plain_preserves_contract() {
+        let results = vec![SearchResult {
+            name: "ripgrep".to_string(),
+            description: Some("line search".to_string()),
+            latest_version: "14.1.0".to_string(),
+            source: "core".to_string(),
+            match_kind: SearchMatchKind::Exact,
+        }];
+
+        assert_eq!(
+            format_search_results_for_style(OutputStyle::Plain, &results, "rip"),
+            vec![
+                "name\tdescription\tlatest\tsource".to_string(),
+                "ripgrep\tline search\t14.1.0\tcore".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_search_results_for_style_rich_adds_summary_and_aligned_rows() {
+        let results = vec![SearchResult {
+            name: "ripgrep".to_string(),
+            description: Some("line search".to_string()),
+            latest_version: "14.1.0".to_string(),
+            source: "core".to_string(),
+            match_kind: SearchMatchKind::Exact,
+        }];
+
+        assert_eq!(
+            format_search_results_for_style(OutputStyle::Rich, &results, "rip"),
+            vec![
+                "[OK] 1 package matched 'rip'".to_string(),
+                "name     description  latest  source".to_string(),
+                "ripgrep  line search  14.1.0  core".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn run_search_command_returns_actionable_guidance_when_source_metadata_is_unavailable() {
         let layout = test_layout();
         configure_ready_source(&layout, "official");

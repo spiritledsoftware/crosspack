@@ -62,18 +62,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
             let results = run_search_command(&backend, &query)?;
-            let lines = format_search_results(&results, &query);
-            if results.is_empty() {
-                for line in render_status_lines(
-                    current_output_style(),
-                    lines.into_iter().map(|line| ("warn", line)),
-                ) {
-                    println!("{line}");
-                }
-            } else {
-                for line in lines {
-                    println!("{line}");
-                }
+            let output_style = current_output_style();
+            let lines = format_search_results_for_style(output_style, &results, &query);
+            for line in lines {
+                println!("{line}");
             }
         }
         Commands::Info { name } => {

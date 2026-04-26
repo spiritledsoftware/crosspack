@@ -153,6 +153,51 @@ fn format_search_results(results: &[SearchResult], query: &str) -> Vec<String> {
     lines
 }
 
+fn format_search_results_for_style(
+    style: OutputStyle,
+    results: &[SearchResult],
+    query: &str,
+) -> Vec<String> {
+    if style == OutputStyle::Plain {
+        return format_search_results(results, query);
+    }
+
+    if results.is_empty() {
+        return render_empty_state(
+            style,
+            &format!("No packages found matching '{query}'."),
+            Some("Try a broader keyword or run `crosspack update` to refresh local snapshots."),
+        );
+    }
+
+    let mut rows = vec![vec![
+        "name".to_string(),
+        "description".to_string(),
+        "latest".to_string(),
+        "source".to_string(),
+    ]];
+    for result in results {
+        rows.push(vec![
+            result.name.clone(),
+            result.description.clone().unwrap_or_else(|| "-".to_string()),
+            result.latest_version.clone(),
+            result.source.clone(),
+        ]);
+    }
+
+    let mut lines = vec![render_status_line(
+        style,
+        "ok",
+        &format!(
+            "{} package{} matched '{query}'",
+            results.len(),
+            if results.len() == 1 { "" } else { "s" }
+        ),
+    )];
+    lines.extend(render_compact_table(style, &rows));
+    lines
+}
+
 fn select_metadata_backend(
     registry_root_override: Option<&Path>,
     layout: &PrefixLayout,
