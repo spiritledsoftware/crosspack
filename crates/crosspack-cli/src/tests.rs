@@ -6075,6 +6075,42 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn format_registry_list_status_lines_rich_adds_badges_without_changing_plain_lines() {
+        let sources = vec![RegistrySourceWithSnapshotState {
+            source: RegistrySourceRecord {
+                name: "core".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://github.com/spiritledsoftware/crosspack-registry.git".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                enabled: true,
+                priority: 100,
+                community: None,
+            },
+            snapshot: RegistrySourceSnapshotState::Ready {
+                snapshot_id: "snap-1".to_string(),
+            },
+        }];
+
+        let plain = format_registry_list_status_lines(OutputStyle::Plain, sources.clone());
+        assert_eq!(plain, format_registry_list_lines(sources.clone()));
+
+        let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
+        assert!(rich.iter().any(|line| line.starts_with("[OK]")));
+        assert!(rich.iter().any(|line| line.contains("snapshot")));
+    }
+
+    #[test]
+    fn format_installed_list_lines_for_style_rich_empty_includes_hint() {
+        assert_eq!(
+            format_installed_list_lines_for_style(OutputStyle::Rich, &[]),
+            vec![
+                "[WARN] No installed packages".to_string(),
+                "[..] Run `crosspack install <name>` to install a package.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn format_registry_add_lines_matches_source_management_spec() {
         let lines = format_registry_add_lines(
             "official",

@@ -47,12 +47,22 @@ fn format_registry_list_status_lines(
     style: OutputStyle,
     sources: Vec<RegistrySourceWithSnapshotState>,
 ) -> Vec<String> {
-    render_status_lines(
-        style,
-        format_registry_list_lines(sources)
-            .into_iter()
-            .map(|line| ("step", line)),
-    )
+    if style == OutputStyle::Plain {
+        return format_registry_list_lines(sources);
+    }
+
+    let mut lines = Vec::new();
+    for line in format_registry_list_lines(sources) {
+        let status = if line.contains("snapshot=ready:") {
+            "ok"
+        } else if line.contains("snapshot=none") || line.contains("snapshot=error:") {
+            "warn"
+        } else {
+            "step"
+        };
+        lines.push(render_status_line(style, status, &line));
+    }
+    lines
 }
 
 fn run_cli(cli: Cli) -> Result<()> {
@@ -305,15 +315,9 @@ fn run_cli(cli: Cli) -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             let receipts = read_install_receipts(&layout)?;
-            if receipts.is_empty() {
-                println!(
-                    "{}",
-                    render_status_line(current_output_style(), "step", "No installed packages")
-                );
-            } else {
-                for receipt in receipts {
-                    println!("{} {}", receipt.name, receipt.version);
-                }
+            let output_style = current_output_style();
+            for line in format_installed_list_lines_for_style(output_style, &receipts) {
+                println!("{line}");
             }
         }
         Commands::Pin { spec } => {

@@ -2469,6 +2469,32 @@ fn format_registry_remove_lines(name: &str, purge_cache: bool) -> Vec<String> {
     ]
 }
 
+fn format_installed_list_lines_for_style(
+    style: OutputStyle,
+    receipts: &[InstallReceipt],
+) -> Vec<String> {
+    if receipts.is_empty() {
+        return render_empty_state(
+            style,
+            "No installed packages",
+            Some("Run `crosspack install <name>` to install a package."),
+        );
+    }
+
+    if style == OutputStyle::Plain {
+        return receipts
+            .iter()
+            .map(|receipt| format!("{} {}", receipt.name, receipt.version))
+            .collect();
+    }
+
+    let mut rows = vec![vec!["name".to_string(), "version".to_string()]];
+    for receipt in receipts {
+        rows.push(vec![receipt.name.clone(), receipt.version.clone()]);
+    }
+    render_compact_table(style, &rows)
+}
+
 fn format_registry_list_snapshot_state(snapshot: &RegistrySourceSnapshotState) -> String {
     match snapshot {
         RegistrySourceSnapshotState::None => "none".to_string(),
