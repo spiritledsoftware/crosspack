@@ -5815,7 +5815,11 @@ description = "   \n\t"
         };
 
         assert_eq!(
-            format_info_lines_for_style(OutputStyle::Plain, "ripgrep", &[manifest.clone()]),
+            format_info_lines_for_style(
+                OutputStyle::Plain,
+                "ripgrep",
+                std::slice::from_ref(&manifest),
+            ),
             format_info_lines("ripgrep", &[manifest])
         );
     }
