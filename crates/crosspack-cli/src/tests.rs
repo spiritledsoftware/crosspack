@@ -5846,6 +5846,32 @@ description = "   \n\t"
     }
 
     #[test]
+    fn format_info_lines_for_style_rich_preserves_policy_details() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+description = "Portable toolchain"
+provides = ["c-compiler", "cc"]
+
+[conflicts]
+legacy-cc = "*"
+
+[replaces]
+old-cc = "<2.0.0"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines = format_info_lines_for_style(OutputStyle::Rich, "compiler", &[manifest]);
+
+        assert!(lines.contains(&"     provides  c-compiler, cc".to_string()));
+        assert!(lines.contains(&"     conflicts legacy-cc(*)".to_string()));
+        assert!(lines.contains(&"     replaces  old-cc(<2.0.0)".to_string()));
+        assert!(lines.contains(&"     policy    provides=2 conflicts=1 replaces=1".to_string()));
+    }
+
+    #[test]
     fn cli_parses_registry_add_command() {
         let cli = Cli::try_parse_from([
             "crosspack",
