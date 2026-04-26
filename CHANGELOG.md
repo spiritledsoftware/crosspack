@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/spiritledsoftware/crosspack/compare/v0.10.5...v0.11.0) (2026-04-26)
+
+
+### Features
+
+* **cli:** polish rich terminal output ([#103](https://github.com/spiritledsoftware/crosspack/issues/103)) ([d7002c4](https://github.com/spiritledsoftware/crosspack/commit/d7002c40a4d4750b346494a49ee634c6a80c08fd))
+
 ## [0.10.5](https://github.com/spiritledsoftware/crosspack/compare/v0.10.4...v0.10.5) (2026-04-26)
 
 
