@@ -7060,6 +7060,67 @@ sha256 = "abc"
     }
 
     #[test]
+    fn render_compact_table_plain_uses_tabs() {
+        let rows = vec![
+            vec!["name".to_string(), "version".to_string()],
+            vec!["ripgrep".to_string(), "14.1.0".to_string()],
+        ];
+
+        assert_eq!(
+            render_compact_table(OutputStyle::Plain, &rows),
+            vec!["name\tversion", "ripgrep\t14.1.0"]
+        );
+    }
+
+    #[test]
+    fn render_compact_table_rich_aligns_columns() {
+        let rows = vec![
+            vec!["name".to_string(), "version".to_string()],
+            vec!["ripgrep".to_string(), "14.1.0".to_string()],
+        ];
+
+        assert_eq!(
+            render_compact_table(OutputStyle::Rich, &rows),
+            vec!["name     version", "ripgrep  14.1.0"]
+        );
+    }
+
+    #[test]
+    fn render_key_value_detail_rich_aligns_key() {
+        assert_eq!(
+            render_key_value_detail(OutputStyle::Rich, "snapshot", "abc123"),
+            "     snapshot  abc123"
+        );
+    }
+
+    #[test]
+    fn render_empty_state_plain_returns_message_only() {
+        assert_eq!(
+            render_empty_state(
+                OutputStyle::Plain,
+                "No installed packages",
+                Some("Run `crosspack install <name>` to add one."),
+            ),
+            vec!["No installed packages"]
+        );
+    }
+
+    #[test]
+    fn render_empty_state_rich_includes_hint() {
+        assert_eq!(
+            render_empty_state(
+                OutputStyle::Rich,
+                "No installed packages",
+                Some("Run `crosspack install <name>` to add one."),
+            ),
+            vec![
+                "[WARN] No installed packages".to_string(),
+                "[..] Run `crosspack install <name>` to add one.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn dispatch_output_style_formats_pin_status_lines_with_strict_split() {
         let requirement = VersionReq::parse("^14").expect("pin requirement should parse");
         let pin_path = Path::new("/tmp/crosspack/state/pins/ripgrep.pin");

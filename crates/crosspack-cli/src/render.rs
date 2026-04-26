@@ -189,6 +189,62 @@ fn render_section_header(mode: UiMode, title: &str) -> Option<String> {
     }
 }
 
+fn render_compact_table(style: OutputStyle, rows: &[Vec<String>]) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    if style == OutputStyle::Plain {
+        return rows.iter().map(|row| row.join("\t")).collect();
+    }
+
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0_usize; column_count];
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.len());
+        }
+    }
+
+    rows.iter()
+        .map(|row| {
+            let mut line = String::new();
+            for index in 0..column_count {
+                if index > 0 {
+                    line.push_str("  ");
+                }
+                let cell = row.get(index).map(String::as_str).unwrap_or("");
+                if index + 1 == column_count {
+                    line.push_str(cell);
+                } else {
+                    line.push_str(&format!("{cell:<width$}", width = widths[index]));
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+fn render_key_value_detail(style: OutputStyle, key: &str, value: &str) -> String {
+    match style {
+        OutputStyle::Plain => format!("{key}: {value}"),
+        OutputStyle::Rich => format!("     {key:<9} {value}"),
+    }
+}
+
+fn render_empty_state(style: OutputStyle, message: &str, hint: Option<&str>) -> Vec<String> {
+    match style {
+        OutputStyle::Plain => vec![message.to_string()],
+        OutputStyle::Rich => {
+            let mut lines = vec![render_status_line(style, "warn", message)];
+            if let Some(hint) = hint {
+                lines.push(render_status_line(style, "step", hint));
+            }
+            lines
+        }
+    }
+}
+
 fn render_progress_line(
     style: OutputStyle,
     label: &str,
