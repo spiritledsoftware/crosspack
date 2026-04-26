@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.5](https://github.com/spiritledsoftware/crosspack/compare/v0.10.4...v0.10.5) (2026-04-26)
+
+
+### Continuous Integration
+
+* sync Homebrew tap on release ([#101](https://github.com/spiritledsoftware/crosspack/issues/101)) ([21a6323](https://github.com/spiritledsoftware/crosspack/commit/21a632351721e726e410afcd1a8453ff302d722a))
+
 ## [0.10.4](https://github.com/spiritledsoftware/crosspack/compare/v0.10.3...v0.10.4) (2026-04-26)
 
 
