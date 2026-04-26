@@ -6100,6 +6100,53 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn format_registry_list_status_lines_rich_warns_for_none_snapshot_from_state() {
+        let sources = vec![RegistrySourceWithSnapshotState {
+            source: RegistrySourceRecord {
+                name: "mirror".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://example.test/registry?snapshot=ready:misleading".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                enabled: true,
+                priority: 100,
+                community: None,
+            },
+            snapshot: RegistrySourceSnapshotState::None,
+        }];
+
+        let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
+        assert_eq!(
+            rich,
+            vec!["[WARN] mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=none".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_registry_list_status_lines_rich_warns_for_error_snapshot_from_state() {
+        let sources = vec![RegistrySourceWithSnapshotState {
+            source: RegistrySourceRecord {
+                name: "mirror".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://example.test/registry?snapshot=ready:misleading".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                enabled: true,
+                priority: 100,
+                community: None,
+            },
+            snapshot: RegistrySourceSnapshotState::Error {
+                status: RegistrySourceWithSnapshotStatus::Unreadable,
+                reason_code: "snapshot-unreadable".to_string(),
+            },
+        }];
+
+        let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
+        assert_eq!(
+            rich,
+            vec!["[WARN] mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=error:snapshot-unreadable".to_string()]
+        );
+    }
+
+    #[test]
     fn format_installed_list_lines_for_style_rich_empty_includes_hint() {
         assert_eq!(
             format_installed_list_lines_for_style(OutputStyle::Rich, &[]),

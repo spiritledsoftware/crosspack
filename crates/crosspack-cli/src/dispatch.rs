@@ -45,21 +45,34 @@ fn format_registry_remove_status_lines(
 
 fn format_registry_list_status_lines(
     style: OutputStyle,
-    sources: Vec<RegistrySourceWithSnapshotState>,
+    mut sources: Vec<RegistrySourceWithSnapshotState>,
 ) -> Vec<String> {
     if style == OutputStyle::Plain {
         return format_registry_list_lines(sources);
     }
 
+    sources.sort_by(|left, right| {
+        left.source
+            .priority
+            .cmp(&right.source.priority)
+            .then_with(|| left.source.name.cmp(&right.source.name))
+    });
+
     let mut lines = Vec::new();
-    for line in format_registry_list_lines(sources) {
-        let status = if line.contains("snapshot=ready:") {
-            "ok"
-        } else if line.contains("snapshot=none") || line.contains("snapshot=error:") {
-            "warn"
-        } else {
-            "step"
+    for source in sources {
+        let status = match &source.snapshot {
+            RegistrySourceSnapshotState::Ready { .. } => "ok",
+            RegistrySourceSnapshotState::None | RegistrySourceSnapshotState::Error { .. } => "warn",
         };
+        let kind = format_registry_kind(source.source.kind.clone());
+        let line = format!(
+            "{} kind={} priority={} location={} snapshot={}",
+            source.source.name,
+            kind,
+            source.source.priority,
+            source.source.location,
+            format_registry_list_snapshot_state(&source.snapshot)
+        );
         lines.push(render_status_line(style, status, &line));
     }
     lines
