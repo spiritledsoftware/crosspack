@@ -209,15 +209,15 @@ fn render_compact_table(style: OutputStyle, rows: &[Vec<String>]) -> Vec<String>
     rows.iter()
         .map(|row| {
             let mut line = String::new();
-            for index in 0..column_count {
+            for (index, &width) in widths.iter().enumerate() {
                 if index > 0 {
                     line.push_str("  ");
                 }
                 let cell = row.get(index).map(String::as_str).unwrap_or("");
-                if index + 1 == column_count {
+                if index + 1 == widths.len() {
                     line.push_str(cell);
                 } else {
-                    line.push_str(&format!("{cell:<width$}", width = widths[index]));
+                    line.push_str(&format!("{cell:<width$}"));
                 }
             }
             line

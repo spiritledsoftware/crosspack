@@ -7094,6 +7094,14 @@ sha256 = "abc"
     }
 
     #[test]
+    fn render_key_value_detail_plain_uses_colon_separator() {
+        assert_eq!(
+            render_key_value_detail(OutputStyle::Plain, "snapshot", "abc123"),
+            "snapshot: abc123"
+        );
+    }
+
+    #[test]
     fn render_empty_state_plain_returns_message_only() {
         assert_eq!(
             render_empty_state(
@@ -7117,6 +7125,14 @@ sha256 = "abc"
                 "[WARN] No installed packages".to_string(),
                 "[..] Run `crosspack install <name>` to add one.".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn render_empty_state_rich_omits_missing_hint() {
+        assert_eq!(
+            render_empty_state(OutputStyle::Rich, "No installed packages", None),
+            vec!["[WARN] No installed packages".to_string()]
         );
     }
 
