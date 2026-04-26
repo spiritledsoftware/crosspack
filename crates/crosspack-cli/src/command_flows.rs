@@ -1960,7 +1960,7 @@ fn replay_rollback_journal(layout: &PrefixLayout, txid: &str) -> Result<bool> {
                 .map(|package_name| (record.seq, package_name.to_string()))
         })
         .collect::<Vec<_>>();
-    compensating_steps.sort_by(|left, right| right.0.cmp(&left.0));
+    compensating_steps.sort_by_key(|step| std::cmp::Reverse(step.0));
 
     if compensating_steps.is_empty() {
         return Ok(false);
