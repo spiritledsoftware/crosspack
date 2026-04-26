@@ -138,6 +138,88 @@ fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
     lines
 }
 
+fn format_info_lines_for_style(
+    style: OutputStyle,
+    name: &str,
+    versions: &[PackageManifest],
+) -> Vec<String> {
+    if style == OutputStyle::Plain {
+        return format_info_lines(name, versions);
+    }
+
+    let mut manifests = versions.iter().collect::<Vec<_>>();
+    manifests.sort_by(|left, right| right.version.cmp(&left.version));
+
+    if manifests.is_empty() {
+        return render_empty_state(style, &format!("No package found: {name}"), None);
+    }
+
+    let mut lines = vec![render_status_line(style, "ok", name)];
+    for manifest in manifests {
+        lines.push(render_key_value_detail(
+            style,
+            "version",
+            &manifest.version.to_string(),
+        ));
+        if let Some(description) = best_available_short_description(manifest) {
+            lines.push(render_key_value_detail(style, "summary", &description));
+        }
+        if let Some(homepage) = &manifest.homepage {
+            lines.push(render_key_value_detail(style, "homepage", homepage));
+        }
+        if let Some(license) = &manifest.license {
+            lines.push(render_key_value_detail(style, "license", license));
+        }
+        if !manifest.provides.is_empty() {
+            lines.push(render_key_value_detail(
+                style,
+                "provides",
+                &manifest.provides.join(", "),
+            ));
+        }
+        if !manifest.conflicts.is_empty() {
+            let conflicts = manifest
+                .conflicts
+                .iter()
+                .map(|(name, req)| format!("{}({})", name, req))
+                .collect::<Vec<_>>();
+            lines.push(render_key_value_detail(
+                style,
+                "conflicts",
+                &conflicts.join(", "),
+            ));
+        }
+        if !manifest.replaces.is_empty() {
+            let replaces = manifest
+                .replaces
+                .iter()
+                .map(|(name, req)| format!("{}({})", name, req))
+                .collect::<Vec<_>>();
+            lines.push(render_key_value_detail(
+                style,
+                "replaces",
+                &replaces.join(", "),
+            ));
+        }
+        if !manifest.provides.is_empty()
+            || !manifest.conflicts.is_empty()
+            || !manifest.replaces.is_empty()
+        {
+            lines.push(render_key_value_detail(
+                style,
+                "policy",
+                &format!(
+                    "provides={} conflicts={} replaces={}",
+                    manifest.provides.len(),
+                    manifest.conflicts.len(),
+                    manifest.replaces.len()
+                ),
+            ));
+        }
+    }
+    lines
+}
+
 fn apply_provider_override(
     requested_name: &str,
     candidates: Vec<PackageManifest>,

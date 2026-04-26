@@ -5798,6 +5798,84 @@ description = "   \n\t"
     }
 
     #[test]
+    fn format_info_lines_for_style_plain_preserves_contract() {
+        let manifest = PackageManifest {
+            name: "ripgrep".to_string(),
+            version: Version::parse("14.1.0").unwrap(),
+            description: Some("line search".to_string()),
+            license: Some("MIT".to_string()),
+            homepage: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+            provides: Vec::new(),
+            conflicts: BTreeMap::new(),
+            replaces: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            artifacts: Vec::new(),
+            source_build: None,
+            services: Vec::new(),
+        };
+
+        assert_eq!(
+            format_info_lines_for_style(
+                OutputStyle::Plain,
+                "ripgrep",
+                std::slice::from_ref(&manifest),
+            ),
+            format_info_lines("ripgrep", &[manifest])
+        );
+    }
+
+    #[test]
+    fn format_info_lines_for_style_rich_adds_sectioned_details() {
+        let manifest = PackageManifest {
+            name: "ripgrep".to_string(),
+            version: Version::parse("14.1.0").unwrap(),
+            description: Some("line search".to_string()),
+            license: Some("MIT".to_string()),
+            homepage: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+            provides: Vec::new(),
+            conflicts: BTreeMap::new(),
+            replaces: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            artifacts: Vec::new(),
+            source_build: None,
+            services: Vec::new(),
+        };
+
+        let lines = format_info_lines_for_style(OutputStyle::Rich, "ripgrep", &[manifest]);
+
+        assert!(lines.contains(&"[OK] ripgrep".to_string()));
+        assert!(lines.contains(&"     version   14.1.0".to_string()));
+        assert!(lines.contains(&"     summary   line search".to_string()));
+        assert!(lines.contains(&"     license   MIT".to_string()));
+    }
+
+    #[test]
+    fn format_info_lines_for_style_rich_preserves_policy_details() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+description = "Portable toolchain"
+provides = ["c-compiler", "cc"]
+
+[conflicts]
+legacy-cc = "*"
+
+[replaces]
+old-cc = "<2.0.0"
+"#,
+        )
+        .expect("manifest must parse");
+
+        let lines = format_info_lines_for_style(OutputStyle::Rich, "compiler", &[manifest]);
+
+        assert!(lines.contains(&"     provides  c-compiler, cc".to_string()));
+        assert!(lines.contains(&"     conflicts legacy-cc(*)".to_string()));
+        assert!(lines.contains(&"     replaces  old-cc(<2.0.0)".to_string()));
+        assert!(lines.contains(&"     policy    provides=2 conflicts=1 replaces=1".to_string()));
+    }
+
+    #[test]
     fn cli_parses_registry_add_command() {
         let cli = Cli::try_parse_from([
             "crosspack",
@@ -5993,6 +6071,89 @@ description = "   \n\t"
         assert_eq!(
             lines[1],
             "zeta kind=git priority=10 location=https://example.test/zeta.git snapshot=ready:git:0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn format_registry_list_status_lines_rich_adds_badges_without_changing_plain_lines() {
+        let sources = vec![RegistrySourceWithSnapshotState {
+            source: RegistrySourceRecord {
+                name: "core".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://github.com/spiritledsoftware/crosspack-registry.git".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                enabled: true,
+                priority: 100,
+                community: None,
+            },
+            snapshot: RegistrySourceSnapshotState::Ready {
+                snapshot_id: "snap-1".to_string(),
+            },
+        }];
+
+        let plain = format_registry_list_status_lines(OutputStyle::Plain, sources.clone());
+        assert_eq!(plain, format_registry_list_lines(sources.clone()));
+
+        let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
+        assert!(rich.iter().any(|line| line.starts_with("[OK]")));
+        assert!(rich.iter().any(|line| line.contains("snapshot")));
+    }
+
+    #[test]
+    fn format_registry_list_status_lines_rich_warns_for_none_snapshot_from_state() {
+        let sources = vec![RegistrySourceWithSnapshotState {
+            source: RegistrySourceRecord {
+                name: "mirror".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://example.test/registry?snapshot=ready:misleading".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                enabled: true,
+                priority: 100,
+                community: None,
+            },
+            snapshot: RegistrySourceSnapshotState::None,
+        }];
+
+        let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
+        assert_eq!(
+            rich,
+            vec!["[WARN] mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=none".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_registry_list_status_lines_rich_warns_for_error_snapshot_from_state() {
+        let sources = vec![RegistrySourceWithSnapshotState {
+            source: RegistrySourceRecord {
+                name: "mirror".to_string(),
+                kind: RegistrySourceKind::Git,
+                location: "https://example.test/registry?snapshot=ready:misleading".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                enabled: true,
+                priority: 100,
+                community: None,
+            },
+            snapshot: RegistrySourceSnapshotState::Error {
+                status: RegistrySourceWithSnapshotStatus::Unreadable,
+                reason_code: "snapshot-unreadable".to_string(),
+            },
+        }];
+
+        let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
+        assert_eq!(
+            rich,
+            vec!["[WARN] mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=error:snapshot-unreadable".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_installed_list_lines_for_style_rich_empty_includes_hint() {
+        assert_eq!(
+            format_installed_list_lines_for_style(OutputStyle::Rich, &[]),
+            vec![
+                "[WARN] No installed packages".to_string(),
+                "[..] Run `crosspack install <name>` to install a package.".to_string(),
+            ]
         );
     }
 
@@ -6429,6 +6590,45 @@ sha256 = "abc"
             vec![
                 "No packages found matching 'rip'. Try a broader keyword or run `crosspack update` to refresh local snapshots."
                     .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_search_results_for_style_plain_preserves_contract() {
+        let results = vec![SearchResult {
+            name: "ripgrep".to_string(),
+            description: Some("line search".to_string()),
+            latest_version: "14.1.0".to_string(),
+            source: "core".to_string(),
+            match_kind: SearchMatchKind::Exact,
+        }];
+
+        assert_eq!(
+            format_search_results_for_style(OutputStyle::Plain, &results, "rip"),
+            vec![
+                "name\tdescription\tlatest\tsource".to_string(),
+                "ripgrep\tline search\t14.1.0\tcore".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_search_results_for_style_rich_adds_summary_and_aligned_rows() {
+        let results = vec![SearchResult {
+            name: "ripgrep".to_string(),
+            description: Some("line search".to_string()),
+            latest_version: "14.1.0".to_string(),
+            source: "core".to_string(),
+            match_kind: SearchMatchKind::Exact,
+        }];
+
+        assert_eq!(
+            format_search_results_for_style(OutputStyle::Rich, &results, "rip"),
+            vec![
+                "[OK] 1 package matched 'rip'".to_string(),
+                "name     description  latest  source".to_string(),
+                "ripgrep  line search  14.1.0  core".to_string(),
             ]
         );
     }
@@ -7056,6 +7256,83 @@ sha256 = "abc"
         assert_eq!(
             render_status_line(OutputStyle::Rich, "warn", "completion sync skipped"),
             "[WARN] completion sync skipped"
+        );
+    }
+
+    #[test]
+    fn render_compact_table_plain_uses_tabs() {
+        let rows = vec![
+            vec!["name".to_string(), "version".to_string()],
+            vec!["ripgrep".to_string(), "14.1.0".to_string()],
+        ];
+
+        assert_eq!(
+            render_compact_table(OutputStyle::Plain, &rows),
+            vec!["name\tversion", "ripgrep\t14.1.0"]
+        );
+    }
+
+    #[test]
+    fn render_compact_table_rich_aligns_columns() {
+        let rows = vec![
+            vec!["name".to_string(), "version".to_string()],
+            vec!["ripgrep".to_string(), "14.1.0".to_string()],
+        ];
+
+        assert_eq!(
+            render_compact_table(OutputStyle::Rich, &rows),
+            vec!["name     version", "ripgrep  14.1.0"]
+        );
+    }
+
+    #[test]
+    fn render_key_value_detail_rich_aligns_key() {
+        assert_eq!(
+            render_key_value_detail(OutputStyle::Rich, "snapshot", "abc123"),
+            "     snapshot  abc123"
+        );
+    }
+
+    #[test]
+    fn render_key_value_detail_plain_uses_colon_separator() {
+        assert_eq!(
+            render_key_value_detail(OutputStyle::Plain, "snapshot", "abc123"),
+            "snapshot: abc123"
+        );
+    }
+
+    #[test]
+    fn render_empty_state_plain_returns_message_only() {
+        assert_eq!(
+            render_empty_state(
+                OutputStyle::Plain,
+                "No installed packages",
+                Some("Run `crosspack install <name>` to add one."),
+            ),
+            vec!["No installed packages"]
+        );
+    }
+
+    #[test]
+    fn render_empty_state_rich_includes_hint() {
+        assert_eq!(
+            render_empty_state(
+                OutputStyle::Rich,
+                "No installed packages",
+                Some("Run `crosspack install <name>` to add one."),
+            ),
+            vec![
+                "[WARN] No installed packages".to_string(),
+                "[..] Run `crosspack install <name>` to add one.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_empty_state_rich_omits_missing_hint() {
+        assert_eq!(
+            render_empty_state(OutputStyle::Rich, "No installed packages", None),
+            vec!["[WARN] No installed packages".to_string()]
         );
     }
 

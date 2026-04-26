@@ -1,10 +1,10 @@
 ---
-title: Clippy rollback replay fix
+createdAt: '2026-04-26T11:08:03.344Z'
+keywords: []
+related: [facts/project/clippy_rollback_replay_fix.abstract.md, facts/project/clippy_rollback_replay_fix.overview.md, facts/project/agents_md_repo_guidance.md]
 summary: 'The rollback journal sort in crosspack-cli was changed from descending sort_by to sort_by_key with Reverse to satisfy Clippy while preserving replay order; verification passed with the default available Cargo toolchain and PR #99 was opened.'
 tags: []
-related: []
-keywords: []
-createdAt: '2026-04-26T11:08:03.344Z'
+title: Clippy rollback replay fix
 updatedAt: '2026-04-26T11:08:03.344Z'
 ---
 ## Reason

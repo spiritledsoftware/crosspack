@@ -45,14 +45,37 @@ fn format_registry_remove_status_lines(
 
 fn format_registry_list_status_lines(
     style: OutputStyle,
-    sources: Vec<RegistrySourceWithSnapshotState>,
+    mut sources: Vec<RegistrySourceWithSnapshotState>,
 ) -> Vec<String> {
-    render_status_lines(
-        style,
-        format_registry_list_lines(sources)
-            .into_iter()
-            .map(|line| ("step", line)),
-    )
+    if style == OutputStyle::Plain {
+        return format_registry_list_lines(sources);
+    }
+
+    sources.sort_by(|left, right| {
+        left.source
+            .priority
+            .cmp(&right.source.priority)
+            .then_with(|| left.source.name.cmp(&right.source.name))
+    });
+
+    let mut lines = Vec::new();
+    for source in sources {
+        let status = match &source.snapshot {
+            RegistrySourceSnapshotState::Ready { .. } => "ok",
+            RegistrySourceSnapshotState::None | RegistrySourceSnapshotState::Error { .. } => "warn",
+        };
+        let kind = format_registry_kind(source.source.kind.clone());
+        let line = format!(
+            "{} kind={} priority={} location={} snapshot={}",
+            source.source.name,
+            kind,
+            source.source.priority,
+            source.source.location,
+            format_registry_list_snapshot_state(&source.snapshot)
+        );
+        lines.push(render_status_line(style, status, &line));
+    }
+    lines
 }
 
 fn run_cli(cli: Cli) -> Result<()> {
@@ -62,18 +85,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
             let results = run_search_command(&backend, &query)?;
-            let lines = format_search_results(&results, &query);
-            if results.is_empty() {
-                for line in render_status_lines(
-                    current_output_style(),
-                    lines.into_iter().map(|line| ("warn", line)),
-                ) {
-                    println!("{line}");
-                }
-            } else {
-                for line in lines {
-                    println!("{line}");
-                }
+            let output_style = current_output_style();
+            let lines = format_search_results_for_style(output_style, &results, &query);
+            for line in lines {
+                println!("{line}");
             }
         }
         Commands::Info { name } => {
@@ -92,7 +107,11 @@ fn run_cli(cli: Cli) -> Result<()> {
                     )
                 );
             } else {
-                for line in format_info_lines(&name, &versions) {
+                for line in format_info_lines_for_style(
+                    current_output_style(),
+                    &name,
+                    &versions,
+                ) {
                     println!("{line}");
                 }
             }
@@ -309,15 +328,9 @@ fn run_cli(cli: Cli) -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             let receipts = read_install_receipts(&layout)?;
-            if receipts.is_empty() {
-                println!(
-                    "{}",
-                    render_status_line(current_output_style(), "step", "No installed packages")
-                );
-            } else {
-                for receipt in receipts {
-                    println!("{} {}", receipt.name, receipt.version);
-                }
+            let output_style = current_output_style();
+            for line in format_installed_list_lines_for_style(output_style, &receipts) {
+                println!("{line}");
             }
         }
         Commands::Pin { spec } => {

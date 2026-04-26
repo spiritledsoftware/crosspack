@@ -1,10 +1,10 @@
 ---
-title: AGENTS.md Repo Guidance
+createdAt: '2026-04-26T11:49:42.218Z'
+keywords: []
+related: [facts/project/clippy_rollback_replay_fix.md, facts/project/agents_md_repo_guidance.abstract.md, facts/project/agents_md_repo_guidance.overview.md]
 summary: Root AGENTS.md documents workspace commands, crate boundaries, output/trust contracts, installer compatibility, release quirks, and nested instruction pointers.
 tags: []
-related: [facts/project/clippy_rollback_replay_fix.md]
-keywords: []
-createdAt: '2026-04-26T11:49:42.218Z'
+title: AGENTS.md Repo Guidance
 updatedAt: '2026-04-26T11:49:42.218Z'
 ---
 ## Reason
