@@ -138,6 +138,45 @@ fn format_info_lines(name: &str, versions: &[PackageManifest]) -> Vec<String> {
     lines
 }
 
+fn format_info_lines_for_style(
+    style: OutputStyle,
+    name: &str,
+    versions: &[PackageManifest],
+) -> Vec<String> {
+    if style == OutputStyle::Plain {
+        return format_info_lines(name, versions);
+    }
+
+    let Some(latest) = versions.first() else {
+        return render_empty_state(style, &format!("No package found: {name}"), None);
+    };
+
+    let mut lines = vec![render_status_line(style, "ok", name)];
+    lines.push(render_key_value_detail(
+        style,
+        "version",
+        &latest.version.to_string(),
+    ));
+    if let Some(description) = best_available_short_description(latest) {
+        lines.push(render_key_value_detail(style, "summary", &description));
+    }
+    if let Some(homepage) = &latest.homepage {
+        lines.push(render_key_value_detail(style, "homepage", homepage));
+    }
+    if let Some(license) = &latest.license {
+        lines.push(render_key_value_detail(style, "license", license));
+    }
+    if versions.len() > 1 {
+        let available = versions
+            .iter()
+            .map(|manifest| manifest.version.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(render_key_value_detail(style, "versions", &available));
+    }
+    lines
+}
+
 fn apply_provider_override(
     requested_name: &str,
     candidates: Vec<PackageManifest>,

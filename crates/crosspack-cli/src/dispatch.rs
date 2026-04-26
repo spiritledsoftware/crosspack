@@ -84,7 +84,11 @@ fn run_cli(cli: Cli) -> Result<()> {
                     )
                 );
             } else {
-                for line in format_info_lines(&name, &versions) {
+                for line in format_info_lines_for_style(
+                    current_output_style(),
+                    &name,
+                    &versions,
+                ) {
                     println!("{line}");
                 }
             }

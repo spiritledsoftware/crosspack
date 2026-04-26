@@ -5798,6 +5798,54 @@ description = "   \n\t"
     }
 
     #[test]
+    fn format_info_lines_for_style_plain_preserves_contract() {
+        let manifest = PackageManifest {
+            name: "ripgrep".to_string(),
+            version: Version::parse("14.1.0").unwrap(),
+            description: Some("line search".to_string()),
+            license: Some("MIT".to_string()),
+            homepage: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+            provides: Vec::new(),
+            conflicts: BTreeMap::new(),
+            replaces: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            artifacts: Vec::new(),
+            source_build: None,
+            services: Vec::new(),
+        };
+
+        assert_eq!(
+            format_info_lines_for_style(OutputStyle::Plain, "ripgrep", &[manifest.clone()]),
+            format_info_lines("ripgrep", &[manifest])
+        );
+    }
+
+    #[test]
+    fn format_info_lines_for_style_rich_adds_sectioned_details() {
+        let manifest = PackageManifest {
+            name: "ripgrep".to_string(),
+            version: Version::parse("14.1.0").unwrap(),
+            description: Some("line search".to_string()),
+            license: Some("MIT".to_string()),
+            homepage: Some("https://github.com/BurntSushi/ripgrep".to_string()),
+            provides: Vec::new(),
+            conflicts: BTreeMap::new(),
+            replaces: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+            artifacts: Vec::new(),
+            source_build: None,
+            services: Vec::new(),
+        };
+
+        let lines = format_info_lines_for_style(OutputStyle::Rich, "ripgrep", &[manifest]);
+
+        assert!(lines.contains(&"[OK] ripgrep".to_string()));
+        assert!(lines.contains(&"     version   14.1.0".to_string()));
+        assert!(lines.contains(&"     summary   line search".to_string()));
+        assert!(lines.contains(&"     license   MIT".to_string()));
+    }
+
+    #[test]
     fn cli_parses_registry_add_command() {
         let cli = Cli::try_parse_from([
             "crosspack",
