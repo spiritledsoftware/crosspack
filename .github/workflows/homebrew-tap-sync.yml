@@ -1,0 +1,135 @@
+name: Sync Homebrew Tap
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Stable release tag to publish to Homebrew (for example: v0.10.4)"
+        required: true
+        type: string
+
+concurrency:
+  group: homebrew-tap-sync-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump-formula:
+    name: bump-formula
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')) }}
+    runs-on: macos-latest
+
+    steps:
+      - name: Create GitHub App token for tap repository
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CROSSPACK_BOT_APP_ID }}
+          private-key: ${{ secrets.CROSSPACK_BOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ${{ github.event.repository.name }}
+            ${{ vars.CROSSPACK_HOMEBREW_TAP_REPOSITORY_NAME || 'homebrew-tap' }}
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            release_tag="${{ inputs.release_tag }}"
+          else
+            release_tag="${{ github.event.release.tag_name }}"
+          fi
+
+          if [[ "$release_tag" == *"-rc."* ]]; then
+            echo "release tag is prerelease; skipping: ${release_tag}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must match stable format vMAJOR.MINOR.PATCH: ${release_tag}" >&2
+            exit 1
+          fi
+
+          version="${release_tag#v}"
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${release_tag}.tar.gz"
+          archive="$(mktemp)"
+          curl -LfsS "$url" -o "$archive"
+          sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "version=${version}"
+            echo "url=${url}"
+            echo "sha256=${sha256}"
+            echo "skip=false"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Tap Homebrew repository
+        if: steps.meta.outputs.skip == 'false'
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAP_REPOSITORY_RAW: ${{ vars.CROSSPACK_HOMEBREW_TAP_REPOSITORY }}
+          TAP_REPOSITORY_NAME: ${{ vars.CROSSPACK_HOMEBREW_TAP_REPOSITORY_NAME || 'homebrew-tap' }}
+          TAP_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${TAP_REPOSITORY_RAW}" ]; then
+            tap_repository="${TAP_REPOSITORY_RAW}"
+          else
+            tap_repository="${TAP_REPOSITORY_OWNER}/${TAP_REPOSITORY_NAME}"
+          fi
+
+          tap_owner="${tap_repository%%/*}"
+          tap_repo="${tap_repository#*/}"
+          tap_name="${tap_repo#homebrew-}"
+          echo "tap=${tap_owner}/${tap_name}" >> "$GITHUB_ENV"
+
+          brew tap \
+            "${tap_owner}/${tap_name}" \
+            "https://x-access-token:${APP_TOKEN}@github.com/${tap_repository}.git"
+
+      - name: Skip if formula is already current
+        if: steps.meta.outputs.skip == 'false'
+        id: current
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          formula_path="$(brew --repository "${tap}")/Formula/crosspack.rb"
+          if grep -Fq '${{ steps.meta.outputs.url }}' "$formula_path" \
+            && grep -Fq '${{ steps.meta.outputs.sha256 }}' "$formula_path"; then
+            echo "formula already points at ${{ steps.meta.outputs.release_tag }}"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open Homebrew formula bump PR
+        if: steps.meta.outputs.skip == 'false' && steps.current.outputs.changed == 'true'
+        shell: bash
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          brew bump-formula-pr \
+            --no-fork \
+            --no-browse \
+            --strict \
+            --online \
+            --version "${{ steps.meta.outputs.version }}" \
+            --url "${{ steps.meta.outputs.url }}" \
+            --sha256 "${{ steps.meta.outputs.sha256 }}" \
+            "${tap}/crosspack"

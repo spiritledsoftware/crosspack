@@ -1,77 +1,54 @@
-# PROJECT KNOWLEDGE BASE
+# AGENTS.md
 
-**Generated:** 2026-02-24
-**Commit:** 9bbb5cb
-**Branch:** feat/cli-output-ux
+## Repo Shape
 
-## OVERVIEW
-Crosspack is a Rust workspace for a native cross-platform package manager. The CLI crate orchestrates install/upgrade/source-management flows over focused library crates for core models, registry trust, resolver logic, installer state, and security primitives.
+- Rust workspace (`Cargo.toml`, resolver 2) with members under `crates/*`; workspace version/edition/license/deps are centralized at the root.
+- `crosspack-cli` builds both binaries, `crosspack` and `cpk`, from `crates/crosspack-cli/src/main.rs`.
+- CLI implementation is split with `include!` at the bottom of `main.rs` (`dispatch.rs`, `command_flows.rs`, `core_flows.rs`, `bundle_flows.rs`, `metadata.rs`, `render.rs`, `completion.rs`), so those files share one module scope.
+- `registry` is a git submodule (`https://github.com/spiritledsoftware/crosspack-registry.git`), not ordinary in-repo source.
+- More specific guidance exists in `crates/AGENTS.md`, `crates/crosspack-cli/AGENTS.md`, `crates/crosspack-installer/AGENTS.md`, and `crates/crosspack-registry/AGENTS.md`.
 
-## STRUCTURE
-```text
-./
-├── crates/
-│   ├── crosspack-cli/        # single runtime entrypoint; all command routing
-│   ├── crosspack-installer/  # transaction/state lifecycle + prefix layout
-│   ├── crosspack-registry/   # source records, snapshots, signature checks
-│   ├── crosspack-resolver/   # dependency graph solve and ordering
-│   ├── crosspack-core/       # shared manifest/domain types
-│   └── crosspack-security/   # checksum + Ed25519 verification helpers
-├── docs/                     # GA behavior specs + non-GA roadmap specs
-├── scripts/                  # install/bootstrap and snapshot health automation
-└── .github/workflows/        # CI, release, prerelease, registry sync pipelines
-```
+## Commands
 
-## WHERE TO LOOK
-| Task | Location | Notes |
-|------|----------|-------|
-| Add/change CLI command behavior | `crates/crosspack-cli/src/main.rs` | Central integration hotspot across all crates |
-| Manifest schema or metadata fields | `crates/crosspack-core/src/lib.rs` | Keep docs in sync when fields change |
-| Registry trust/snapshot logic | `crates/crosspack-registry/src/lib.rs` | Fingerprint and signature rules fail closed |
-| Install/upgrade/uninstall state changes | `crates/crosspack-installer/src/lib.rs` | Receipts, pins, transaction markers, rollback hooks |
-| Resolver policy changes | `crates/crosspack-resolver/src/lib.rs` | Constraint solve and deterministic ordering |
-| Hash/signature verification | `crates/crosspack-security/src/lib.rs` | Shared by registry and CLI install paths |
-| CI/release behavior | `.github/workflows/*.yml` | Docs-only changes are path-ignored in CI |
+- Full CI-equivalent gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace --locked`, `cargo test --workspace`.
+- CI also runs `scripts/validate-snapshot-flow.sh` on Ubuntu for non-doc changes; run it for registry/source/snapshot/transaction changes or before release promotion.
+- Focus one crate: `cargo test -p crosspack-cli`, `cargo clippy -p crosspack-cli --all-targets -- -D warnings`.
+- Focus one test: `cargo test -p crosspack-registry package_versions`; snapshot-flow tests often use `-- --test-threads=1`.
+- Exercise the local CLI without installing: `cargo run -p crosspack-cli --bin crosspack -- <command>`.
+- Legacy dev registry bypass: `cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry search ripgrep`.
 
-## CODE MAP
-| Symbol Cluster | Type | Location | Refs | Role |
-|----------------|------|----------|------|------|
-| `Commands` and command handlers | enums/fns | `crates/crosspack-cli/src/main.rs` | high | User-facing command dispatch + output contract |
-| install transaction + receipt types | structs/fns | `crates/crosspack-installer/src/lib.rs` | high | Prefix layout, lifecycle state, rollback metadata |
-| source records + snapshot update | structs/fns | `crates/crosspack-registry/src/lib.rs` | high | Source management and trust-anchored metadata reads |
-| dependency solver core | fns | `crates/crosspack-resolver/src/lib.rs` | medium | Deterministic dependency planning |
+## Boundaries
 
-## CONVENTIONS
-- Workspace crates inherit version/edition/license and most dependencies from root `Cargo.toml`; avoid per-crate drift.
-- `crosspack` and `cpk` binaries both map to the same `crates/crosspack-cli/src/main.rs` entrypoint.
-- Output mode is contract-sensitive: interactive terminals get rich status; non-interactive output remains deterministic plain text.
-- Specs marked v0.4/v0.5 are roadmap design docs unless behavior is explicitly shipped in current code/tests.
-- Native package-manager wrapping is out of scope: do not wrap distro package manager commands; Linux support targets cross-distro/self-contained artifacts rather than distro-specific package formats.
+- `crosspack-cli`: command parsing, orchestration, terminal/plain output contracts, and command-to-crate wiring.
+- `crosspack-core`: manifest/domain structs and serde-facing schemas; keep it free of command behavior and concrete IO/runtime side effects.
+- `crosspack-resolver`: dependency graph solve, constraints, and deterministic ordering; keep installer state and terminal formatting out.
+- `crosspack-installer`: prefix layout, receipts, pins, transaction markers/journals, rollback/uninstall/cache/completion/GUI/service state.
+- `crosspack-registry`: source records, source ordering, snapshot lifecycle, registry index reads, fingerprint/signature gates.
+- `crosspack-security`: SHA-256 and Ed25519 helpers; do not duplicate hash/signature verification ad hoc in other crates.
 
-## ANTI-PATTERNS (THIS PROJECT)
-- Do not claim roadmap specs as GA behavior in CLI/docs.
-- Do not bypass registry fingerprint/signature verification in metadata-dependent paths.
-- Do not alter deterministic machine-oriented output lines (`transaction_*`, `risk_flags`, `change_*`, update summary format) without coordinated contract update.
-- Do not change installer transaction/receipt fields without syncing `docs/install-flow.md` and related specs.
+## Contracts To Preserve
 
-## UNIQUE STYLES
-- Security/trust wording is explicit and fail-closed; docs intentionally include operational guardrails.
-- Release flow is split: Release Please (version/changelog), then artifact workflows on tags, then registry sync on stable publish.
-- Snapshot health is treated as a first-class release gate (`scripts/validate-snapshot-flow.sh`, `scripts/check-snapshot-mismatch-health.sh`).
+- Plain/non-interactive output is the automation contract; rich TTY output must remain additive decoration only.
+- Do not change machine-oriented line shapes without coordinated tests/docs: `transaction_preview`, `transaction_summary`, `risk_flags`, `change_*`, `update summary: updated=<n> up-to-date=<n> failed=<n>`.
+- Metadata trust fails closed: configured sources require pinned `registry.pub` fingerprint, ready `snapshot.json`, and verified `.toml.sig` sidecars.
+- Mutating flows must use installer transaction preflight/state paths; do not bypass active transaction checks, receipts, pins, or rollback metadata.
+- Installer path/schema changes are compatibility-sensitive because receipts and state live under the user prefix (`~/.crosspack` on macOS/Linux, `%LOCALAPPDATA%\Crosspack` on Windows).
+- Docs under `docs/*-spec.md` can be roadmap/non-GA; README and `docs/architecture.md` are the better shipped-behavior references.
 
-## COMMANDS
-```bash
-rustup run stable cargo fmt --all --check
-rustup run stable cargo clippy --workspace --all-targets --all-features -- -D warnings
-rustup run stable cargo build --workspace --locked
-rustup run stable cargo test --workspace
-scripts/validate-snapshot-flow.sh
-```
+## Release And Ops
 
-## NOTES
-- There were no existing repo-local `AGENTS.md` files at generation time.
-- Build artifacts under `target/` dominate raw file counts; prefer `git ls-files` for source-aware structure analysis.
+- Release Please drives stable releases from Conventional Commits on `main`; it updates `CHANGELOG.md` and the root workspace version.
+- Stable artifact workflow is tag-driven for `vX.Y.Z`; prerelease artifacts come from pushes to `release/*` and are tagged `vX.Y.Z-rc.N`.
+- Stable release publish triggers registry sync via `scripts/sync-crosspack-registry-release.sh`; it needs `gh`, `git`, `openssl`, `sha256sum`, `awk`, `xxd`, and registry signing secrets.
+- `scripts/check-snapshot-mismatch-health.sh` reads `${CROSSPACK_PREFIX:-~/.crosspack}/state/transactions/snapshot-monitor.log` unless `--prefix` or `--log` is passed.
+- Repo-local OpenCode config allows external-directory access to `~/.crosspack/**`; avoid assuming other external paths are pre-approved.
 
-## USER PREFERENCES
-- Write planning/design documents to `.agents/plans/` instead of `docs/plans/`.
-- Avoid Homebrew-specific terminology (`tap`, `cask`) in Crosspack UX; prefer Crosspack-native naming.
+## Project Conventions
+
+- Keep Crosspack UX terminology native; avoid Homebrew-specific terms like tap/cask in CLI UX.
+- Write agent planning/design docs under `.agents/plans/`, not `docs/plans/`.
+- Contributions are licensed `MIT OR Apache-2.0` unless explicitly stated otherwise.
+
+---
+
+This is a living document. Update it as things change.
