@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.4](https://github.com/spiritledsoftware/crosspack/compare/v0.10.3...v0.10.4) (2026-04-26)
+
+
+### Bug Fixes
+
+* **cli:** satisfy clippy sort lint ([#99](https://github.com/spiritledsoftware/crosspack/issues/99)) ([60006e2](https://github.com/spiritledsoftware/crosspack/commit/60006e2c21df79f6a01f49fd7467ae82e08399a3))
+
 ## [0.10.3](https://github.com/spiritledsoftware/crosspack/compare/v0.10.2...v0.10.3) (2026-03-16)
 
 
