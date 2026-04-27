@@ -44,13 +44,11 @@
         },
         {
           "type": "test",
-          "section": "Tests",
-          "hidden": true
+          "section": "Tests"
         },
         {
           "type": "chore",
-          "section": "Miscellaneous Chores",
-          "hidden": true
+          "section": "Miscellaneous Chores"
         }
       ]
     }

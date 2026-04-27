@@ -4,21 +4,17 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - .agents/**
-      - .opencode/**
-      - docs/**
-      - "**/*.md"
-      - .gitignore
-      - LICENSE*
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - scripts/**
   pull_request:
-    paths-ignore:
-      - .agents/**
-      - .opencode/**
-      - docs/**
-      - "**/*.md"
-      - .gitignore
-      - LICENSE*
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - scripts/**
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
