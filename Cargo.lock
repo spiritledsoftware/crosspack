@@ -158,9 +158,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.2"
+version = "4.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff7a1dccbdd8b078c2bdebff47e404615151534d5043da397ec50286816f9cb"
+checksum = "660c0520455b1013b9bcb0393d5f643d7e4454fb69c915b8d6d2aa0e9a45acc3"
 dependencies = [
  "clap",
 ]
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "semver",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-installer"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-registry"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-resolver"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-security"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -756,9 +756,9 @@ dependencies = [
 
 [[package]]
 name = "idna_adapter"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
+checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
