@@ -32,6 +32,13 @@ pub struct GuiNativeRegistrationRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationProjection {
+    pub kind: String,
+    pub key: String,
+    pub rel_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeUninstallAction {
     pub key: String,
     pub kind: String,

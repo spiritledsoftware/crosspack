@@ -2,7 +2,9 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::anyhow;
-use crosspack_core::{ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, ServiceDeclaration};
+use crosspack_core::{
+    ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration, ServiceDeclaration,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -506,6 +508,92 @@ fn expose_and_remove_completion_round_trip() {
     assert!(!exposed_path.exists());
 
     let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn expose_docker_cli_plugin_integration_round_trip() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("docker-compose", "2.40.3");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+    fs::write(package_dir.join("docker-compose"), b"#!/bin/sh\n").expect("must write plugin");
+
+    let integration = PackageIntegration::DockerCliPlugin {
+        name: "compose".to_string(),
+        source: "docker-compose".to_string(),
+    };
+    let projected = expose_integration(&layout, &package_dir, "docker-compose", &integration)
+        .expect("must expose docker integration");
+
+    assert_eq!(projected.kind, "docker_cli_plugin");
+    assert_eq!(projected.rel_path, "docker/cli-plugins/docker-compose");
+    assert!(layout.integrations_dir().join(&projected.rel_path).exists());
+
+    remove_exposed_integration(&layout, &projected).expect("must remove integration");
+    assert!(!layout.integrations_dir().join(&projected.rel_path).exists());
+}
+
+#[test]
+fn expose_path_plugin_integration_round_trip() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("kubectx", "0.9.5");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+    fs::write(package_dir.join("kubectl-ctx"), b"#!/bin/sh\n").expect("must write plugin");
+
+    let integration = PackageIntegration::PathPlugin {
+        host: "kubectl".to_string(),
+        name: "ctx".to_string(),
+        source: "kubectl-ctx".to_string(),
+    };
+    let projected = expose_integration(&layout, &package_dir, "kubectx", &integration)
+        .expect("must expose path integration");
+
+    assert_eq!(projected.kind, "path_plugin");
+    assert_eq!(projected.rel_path, "path-plugins/kubectl/kubectl-ctx");
+    assert!(layout.integrations_dir().join(&projected.rel_path).exists());
+}
+
+#[test]
+fn expose_service_integration_state_round_trip() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("caddy", "2.10.2");
+    fs::create_dir_all(package_dir.join("services")).expect("must create service dir");
+    fs::write(package_dir.join("services/caddy.service"), b"[Service]\n")
+        .expect("must write service unit");
+
+    let integration = PackageIntegration::Service {
+        name: "caddy".to_string(),
+        source: "services/caddy.service".to_string(),
+        enable: false,
+    };
+    let projected = expose_integration(&layout, &package_dir, "caddy", &integration)
+        .expect("must expose service integration");
+
+    assert_eq!(projected.kind, "service");
+    assert_eq!(projected.rel_path, "services/caddy/caddy.service");
+    write_integration_state(&layout, "caddy", std::slice::from_ref(&projected))
+        .expect("must write integration state");
+    let loaded = read_integration_state(&layout, "caddy").expect("must read integration state");
+    assert_eq!(loaded, vec![projected]);
+}
+
+#[test]
+fn expose_integration_rejects_invalid_relative_source() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("kubectx", "0.9.5");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+
+    let integration = PackageIntegration::PathPlugin {
+        host: "kubectl".to_string(),
+        name: "ctx".to_string(),
+        source: "../kubectl-ctx".to_string(),
+    };
+    let err = expose_integration(&layout, &package_dir, "kubectx", &integration)
+        .expect_err("path traversal should be rejected");
+    assert!(err.to_string().contains("integration source path"));
 }
 
 #[test]

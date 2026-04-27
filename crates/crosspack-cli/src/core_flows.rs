@@ -334,6 +334,7 @@ struct InstallOutcome {
     exposed_bins: Vec<String>,
     exposed_completions: Vec<String>,
     exposed_gui_assets: Vec<String>,
+    exposed_integrations: Vec<String>,
     native_gui_records: Vec<String>,
     warnings: Vec<String>,
 }
@@ -1380,6 +1381,57 @@ fn sync_native_gui_registration_state_best_effort(
     Ok((current_records, warnings))
 }
 
+fn sync_integration_projection_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    install_root: &Path,
+    integrations: &[PackageIntegration],
+) -> Result<Vec<IntegrationProjection>> {
+    let previous_projections = read_integration_state(layout, package_name)?;
+    let desired_projections = integrations
+        .iter()
+        .map(|integration| projected_integration(package_name, integration))
+        .collect::<Result<Vec<_>>>()?;
+    let all_projection_states = read_all_integration_states(layout)?;
+    for desired in &desired_projections {
+        for (owner, projections) in &all_projection_states {
+            if owner == package_name {
+                continue;
+            }
+            if projections
+                .iter()
+                .any(|projection| projection.rel_path == desired.rel_path)
+            {
+                return Err(anyhow!(
+                    "integration projection '{}' is already owned by package '{}'",
+                    desired.rel_path,
+                    owner
+                ));
+            }
+        }
+    }
+
+    let mut current_projections = Vec::new();
+    for integration in integrations {
+        current_projections.push(expose_integration(
+            layout,
+            install_root,
+            package_name,
+            integration,
+        )?);
+    }
+
+    for stale_projection in previous_projections.iter().filter(|old| {
+        !current_projections
+            .iter()
+            .any(|current| current.rel_path == old.rel_path)
+    }) {
+        remove_exposed_integration(layout, stale_projection)?;
+    }
+    write_integration_state(layout, package_name, &current_projections)?;
+    Ok(current_projections)
+}
+
 struct InstallResolvedOptions<'a> {
     snapshot_id: Option<&'a str>,
     force_redownload: bool,
@@ -1577,6 +1629,13 @@ fn install_resolved(
     }
     write_gui_exposure_state(layout, &resolved.manifest.name, &exposed_gui_assets)?;
 
+    let exposed_integrations = sync_integration_projection_state(
+        layout,
+        &resolved.manifest.name,
+        &install_root,
+        &resolved.manifest.integrations,
+    )?;
+
     let (native_gui_records, native_gui_warnings) = sync_native_gui_registration_state_best_effort(
         layout,
         &resolved.manifest.name,
@@ -1632,6 +1691,10 @@ fn install_resolved(
         exposed_gui_assets: exposed_gui_assets
             .iter()
             .map(|asset| asset.key.clone())
+            .collect(),
+        exposed_integrations: exposed_integrations
+            .iter()
+            .map(|projection| projection.key.clone())
             .collect(),
         native_gui_records: native_gui_records
             .iter()
@@ -1766,6 +1829,16 @@ fn format_install_outcome_lines(outcome: &InstallOutcome, style: OutputStyle) ->
             ),
         ));
     }
+    if !outcome.exposed_integrations.is_empty() {
+        lines.push(render_status_line(
+            detail_style,
+            "step",
+            &format!(
+                "exposed_integrations: {}",
+                outcome.exposed_integrations.join(", ")
+            ),
+        ));
+    }
     if !outcome.native_gui_records.is_empty() {
         lines.push(render_status_line(
             detail_style,
@@ -1839,6 +1912,13 @@ fn format_rich_install_outcome_lines(outcome: &InstallOutcome) -> Vec<String> {
             "step",
             "exposed_gui_assets",
             &outcome.exposed_gui_assets.join(", "),
+        ));
+    }
+    if !outcome.exposed_integrations.is_empty() {
+        lines.push(render_rich_install_detail_row(
+            "step",
+            "exposed_integrations",
+            &outcome.exposed_integrations.join(", "),
         ));
     }
     if !outcome.native_gui_records.is_empty() {

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::path::{Component, Path};
 
 use anyhow::{anyhow, Context};
 use semver::{Version, VersionReq};
@@ -27,6 +28,67 @@ pub struct PackageManifest {
     pub source_build: Option<SourceBuildMetadata>,
     #[serde(default)]
     pub services: Vec<ServiceDeclaration>,
+    #[serde(default)]
+    pub integrations: Vec<PackageIntegration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PackageIntegration {
+    DockerCliPlugin {
+        name: String,
+        source: String,
+    },
+    PathPlugin {
+        host: String,
+        name: String,
+        source: String,
+    },
+    Service {
+        name: String,
+        source: String,
+        #[serde(default)]
+        enable: bool,
+    },
+}
+
+impl PackageIntegration {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::DockerCliPlugin { .. } => "docker_cli_plugin",
+            Self::PathPlugin { .. } => "path_plugin",
+            Self::Service { .. } => "service",
+        }
+    }
+
+    pub fn source(&self) -> &str {
+        match self {
+            Self::DockerCliPlugin { source, .. }
+            | Self::PathPlugin { source, .. }
+            | Self::Service { source, .. } => source,
+        }
+    }
+
+    fn ownership_key(&self) -> String {
+        match self {
+            Self::DockerCliPlugin { name, .. } => format!("docker_cli_plugin:{name}"),
+            Self::PathPlugin { host, name, .. } => format!("path_plugin:{host}:{name}"),
+            Self::Service { name, .. } => format!("service:{name}"),
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        validate_integration_source_path(self.source())?;
+        match self {
+            Self::DockerCliPlugin { name, .. } | Self::Service { name, .. } => {
+                validate_service_token("integration name", name, false)
+            }
+            Self::PathPlugin { host, name, .. } => {
+                validate_service_token("integration host", host, false)?;
+                validate_service_token("integration name", name, false)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,8 +164,39 @@ impl PackageManifest {
                 validate_native_service_id_token(native_id)?;
             }
         }
+        let mut seen_integration_keys = HashSet::new();
+        for integration in &manifest.integrations {
+            integration.validate()?;
+            let key = integration.ownership_key();
+            if !seen_integration_keys.insert(key.clone()) {
+                return Err(anyhow!(
+                    "duplicate integration declaration '{}' in manifest '{}'",
+                    key,
+                    manifest.name
+                ));
+            }
+        }
         Ok(manifest)
     }
+}
+
+fn validate_integration_source_path(value: &str) -> anyhow::Result<()> {
+    let relative = Path::new(value);
+    if relative.is_absolute() {
+        return Err(anyhow!("integration source path must be relative: {value}"));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("integration source path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(anyhow!(
+            "integration source path must not include '..' or prefixes: {value}"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_service_name_token(value: &str) -> anyhow::Result<()> {

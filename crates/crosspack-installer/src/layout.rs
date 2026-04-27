@@ -62,6 +62,10 @@ impl PrefixLayout {
         self.gui_dir().join("handlers")
     }
 
+    pub fn integrations_dir(&self) -> PathBuf {
+        self.share_dir().join("integrations")
+    }
+
     pub fn artifacts_cache_dir(&self) -> PathBuf {
         self.cache_dir().join("artifacts")
     }
@@ -101,6 +105,11 @@ impl PrefixLayout {
 
     pub fn declared_services_state_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.services"))
+    }
+
+    pub fn integration_state_path(&self, name: &str) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{name}.integrations"))
     }
 
     pub fn transactions_dir(&self) -> PathBuf {
@@ -153,6 +162,7 @@ impl PrefixLayout {
             self.gui_dir(),
             self.gui_launchers_dir(),
             self.gui_handlers_dir(),
+            self.integrations_dir(),
             self.artifacts_cache_dir(),
             self.tmp_state_dir(),
             self.installed_state_dir(),

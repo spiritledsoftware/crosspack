@@ -5812,6 +5812,7 @@ description = "   \n\t"
             artifacts: Vec::new(),
             source_build: None,
             services: Vec::new(),
+            integrations: Vec::new(),
         };
 
         assert_eq!(
@@ -5839,6 +5840,7 @@ description = "   \n\t"
             artifacts: Vec::new(),
             source_build: None,
             services: Vec::new(),
+            integrations: Vec::new(),
         };
 
         let lines = format_info_lines_for_style(OutputStyle::Rich, "ripgrep", &[manifest]);
@@ -7695,6 +7697,80 @@ sha256 = "abc"
     }
 
     #[test]
+    fn integration_projection_sync_replaces_stale_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("kubectx", "0.9.5");
+        fs::create_dir_all(&install_root).expect("must create install root");
+        fs::write(install_root.join("kubectl-ctx"), b"#!/bin/sh\n").expect("must write plugin");
+
+        let stale = IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "path_plugin:kubectl:old".to_string(),
+            rel_path: "path-plugins/kubectl/kubectl-old".to_string(),
+        };
+        fs::create_dir_all(layout.integrations_dir().join("path-plugins/kubectl"))
+            .expect("must create stale integration dir");
+        fs::write(layout.integrations_dir().join(&stale.rel_path), b"stale")
+            .expect("must write stale integration");
+        write_integration_state(&layout, "kubectx", std::slice::from_ref(&stale))
+            .expect("must seed stale integration state");
+
+        let integration = PackageIntegration::PathPlugin {
+            host: "kubectl".to_string(),
+            name: "ctx".to_string(),
+            source: "kubectl-ctx".to_string(),
+        };
+        let projected = sync_integration_projection_state(
+            &layout,
+            "kubectx",
+            &install_root,
+            std::slice::from_ref(&integration),
+        )
+        .expect("must sync integrations");
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].rel_path, "path-plugins/kubectl/kubectl-ctx");
+        assert!(layout.integrations_dir().join(&projected[0].rel_path).exists());
+        assert!(!layout.integrations_dir().join(&stale.rel_path).exists());
+        assert_eq!(
+            read_integration_state(&layout, "kubectx").expect("must read state"),
+            projected
+        );
+    }
+
+    #[test]
+    fn integration_projection_sync_rejects_other_package_owner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("other-compose", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+        fs::write(install_root.join("artifact.bin"), b"#!/bin/sh\n").expect("must write plugin");
+
+        let owned = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: "docker/cli-plugins/docker-compose".to_string(),
+        };
+        write_integration_state(&layout, "docker-compose", std::slice::from_ref(&owned))
+            .expect("must seed other package integration state");
+
+        let integration = PackageIntegration::DockerCliPlugin {
+            name: "compose".to_string(),
+            source: "artifact.bin".to_string(),
+        };
+        let err = sync_integration_projection_state(
+            &layout,
+            "other-compose",
+            &install_root,
+            std::slice::from_ref(&integration),
+        )
+        .expect_err("other package ownership should block projection");
+
+        assert!(err.to_string().contains("already owned by package 'docker-compose'"));
+    }
+
+    #[test]
     fn native_gui_sync_same_path_kind_migration_keeps_deployed_bundle_copy() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -8626,6 +8702,7 @@ sha256 = "abc"
             exposed_bins: vec!["rg".to_string()],
             exposed_completions: vec!["bash:rg".to_string()],
             exposed_gui_assets: vec!["app:dev.ripgrep.viewer".to_string()],
+            exposed_integrations: Vec::new(),
             native_gui_records: vec!["app:dev.ripgrep.viewer".to_string()],
             warnings: Vec::new(),
         }

@@ -11,11 +11,13 @@ mod uninstall;
 
 pub use artifact::{install_from_artifact, install_from_source_archive};
 pub use exposure::{
-    bin_path, clear_gui_exposure_state, expose_binary, expose_completion, expose_gui_app,
-    exposed_completion_path, gui_asset_path, projected_exposed_completion_path,
-    projected_gui_assets, read_all_gui_exposure_states, read_gui_exposure_state,
-    remove_exposed_binary, remove_exposed_completion, remove_exposed_gui_asset,
-    write_gui_exposure_state,
+    bin_path, clear_gui_exposure_state, clear_integration_state, expose_binary, expose_completion,
+    expose_gui_app, expose_integration, exposed_completion_path, gui_asset_path,
+    projected_exposed_completion_path, projected_gui_assets, projected_integration,
+    read_all_gui_exposure_states, read_all_integration_states, read_gui_exposure_state,
+    read_integration_state, remove_exposed_binary, remove_exposed_completion,
+    remove_exposed_gui_asset, remove_exposed_integration, write_gui_exposure_state,
+    write_integration_state,
 };
 pub use fs_utils::remove_file_if_exists;
 pub use layout::{default_user_prefix, PrefixLayout};
@@ -38,9 +40,9 @@ pub use transactions::{
 };
 pub use types::{
     ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, NativeServiceAction,
-    NativeServiceOutcome, NativeSidecarState, NativeUninstallAction, TransactionJournalEntry,
-    TransactionMetadata, UninstallResult, UninstallStatus,
+    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, IntegrationProjection,
+    NativeServiceAction, NativeServiceOutcome, NativeSidecarState, NativeUninstallAction,
+    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
 };
 pub use uninstall::{
     uninstall_blocked_by_roots_with_dependency_overrides,
