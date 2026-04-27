@@ -1,12 +1,145 @@
 use anyhow::{anyhow, Context, Result};
-use crosspack_core::{ArtifactCompletionShell, ArtifactGuiApp};
+use crosspack_core::{ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::fs_utils::remove_file_if_exists;
-use crate::{GuiExposureAsset, PrefixLayout};
+use crate::{GuiExposureAsset, IntegrationProjection, PrefixLayout};
+
+const INTEGRATION_STATE_VERSION: u32 = 1;
+
+pub fn write_integration_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    projections: &[IntegrationProjection],
+) -> Result<PathBuf> {
+    let path = layout.integration_state_path(package_name);
+    if projections.is_empty() {
+        let _ = remove_file_if_exists(&path);
+        return Ok(path);
+    }
+
+    let mut payload = String::new();
+    payload.push_str(&format!("version={INTEGRATION_STATE_VERSION}\n"));
+    for projection in projections {
+        if projection.kind.contains(['\t', '\n'])
+            || projection.key.contains(['\t', '\n'])
+            || projection.rel_path.contains(['\t', '\n'])
+        {
+            return Err(anyhow!(
+                "integration state values must not contain tabs or newlines"
+            ));
+        }
+        validated_relative_integration_storage_path(&projection.rel_path)?;
+        payload.push_str(&format!(
+            "integration={}\t{}\t{}\n",
+            projection.kind, projection.key, projection.rel_path
+        ));
+    }
+
+    fs::write(&path, payload.as_bytes())
+        .with_context(|| format!("failed to write integration state: {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_integration_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<IntegrationProjection>> {
+    let path = layout.integration_state_path(package_name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read integration state: {}", path.display()))?;
+    parse_integration_state(&raw)
+        .with_context(|| format!("failed to parse integration state: {}", path.display()))
+}
+
+pub fn read_all_integration_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<IntegrationProjection>>> {
+    let dir = layout.installed_state_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut states = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".integrations"))
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read integration state: {}", path.display()))?;
+        let projections = parse_integration_state(&raw)
+            .with_context(|| format!("failed to parse integration state: {}", path.display()))?;
+        states.insert(stem.to_string(), projections);
+    }
+
+    Ok(states)
+}
+
+pub fn clear_integration_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    let path = layout.integration_state_path(package_name);
+    remove_file_if_exists(&path)?;
+    Ok(())
+}
+
+fn parse_integration_state(raw: &str) -> Result<Vec<IntegrationProjection>> {
+    let mut version = None;
+    let mut projections = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("invalid integration state row format"));
+        };
+        match key {
+            "version" => {
+                version = Some(
+                    value
+                        .parse::<u32>()
+                        .context("invalid integration state version")?,
+                )
+            }
+            "integration" => {
+                let fields = value.split('\t').collect::<Vec<_>>();
+                if fields.len() != 3 {
+                    return Err(anyhow!("invalid integration state row format"));
+                }
+                if fields[0].trim().is_empty() || fields[1].trim().is_empty() {
+                    return Err(anyhow!("integration state kind and key must not be empty"));
+                }
+                validated_relative_integration_storage_path(fields[2])?;
+                projections.push(IntegrationProjection {
+                    kind: fields[0].to_string(),
+                    key: fields[1].to_string(),
+                    rel_path: fields[2].to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if version.unwrap_or(INTEGRATION_STATE_VERSION) != INTEGRATION_STATE_VERSION {
+        return Err(anyhow!("unsupported integration state version"));
+    }
+    Ok(projections)
+}
 
 pub fn write_gui_exposure_state(
     layout: &PrefixLayout,
@@ -253,6 +386,115 @@ pub fn remove_exposed_completion(
 
     prune_empty_completion_dirs(layout, destination.parent())?;
     Ok(())
+}
+
+pub fn expose_integration(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    package_name: &str,
+    integration: &PackageIntegration,
+) -> Result<IntegrationProjection> {
+    let source_rel = validated_relative_integration_source_path(integration.source())?;
+    let source_path = install_root.join(source_rel);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "declared integration source path '{}' was not found in install root: {}",
+            integration.source(),
+            source_path.display()
+        ));
+    }
+    let metadata = fs::metadata(&source_path).with_context(|| {
+        format!(
+            "failed to inspect integration source path: {}",
+            source_path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(anyhow!(
+            "declared integration source path '{}' must be a file: {}",
+            integration.source(),
+            source_path.display()
+        ));
+    }
+
+    let projection = projected_integration(package_name, integration)?;
+    let destination = integration_path(layout, &projection.rel_path)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create integration dir: {}", parent.display()))?;
+    }
+    if destination.exists() {
+        fs::remove_file(&destination).with_context(|| {
+            format!(
+                "failed to replace existing integration file: {}",
+                destination.display()
+            )
+        })?;
+    }
+    fs::copy(&source_path, &destination).with_context(|| {
+        format!(
+            "failed to expose integration file {} -> {}",
+            source_path.display(),
+            destination.display()
+        )
+    })?;
+    Ok(projection)
+}
+
+pub fn remove_exposed_integration(
+    layout: &PrefixLayout,
+    projection: &IntegrationProjection,
+) -> Result<()> {
+    let path = integration_path(layout, &projection.rel_path)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path)
+        .with_context(|| format!("failed to remove exposed integration: {}", path.display()))?;
+    prune_empty_integration_dirs(layout, path.parent())?;
+    Ok(())
+}
+
+pub fn projected_integration(
+    package_name: &str,
+    integration: &PackageIntegration,
+) -> Result<IntegrationProjection> {
+    let projection = match integration {
+        PackageIntegration::DockerCliPlugin { name, .. } => IntegrationProjection {
+            kind: integration.kind().to_string(),
+            key: format!("docker_cli_plugin:{name}"),
+            rel_path: format!(
+                "docker/cli-plugins/docker-{}",
+                normalize_integration_token(name)
+            ),
+        },
+        PackageIntegration::PathPlugin { host, name, .. } => IntegrationProjection {
+            kind: integration.kind().to_string(),
+            key: format!("path_plugin:{host}:{name}"),
+            rel_path: format!(
+                "path-plugins/{}/{}-{}",
+                normalize_integration_token(host),
+                normalize_integration_token(host),
+                normalize_integration_token(name)
+            ),
+        },
+        PackageIntegration::Service { name, .. } => IntegrationProjection {
+            kind: integration.kind().to_string(),
+            key: format!("service:{name}"),
+            rel_path: format!(
+                "services/{}/{}.service",
+                normalize_integration_token(package_name),
+                normalize_integration_token(name)
+            ),
+        },
+    };
+    validated_relative_integration_storage_path(&projection.rel_path)?;
+    Ok(projection)
+}
+
+fn integration_path(layout: &PrefixLayout, rel_path: &str) -> Result<PathBuf> {
+    let relative = validated_relative_integration_storage_path(rel_path)?;
+    Ok(layout.integrations_dir().join(relative))
 }
 
 pub fn gui_asset_path(layout: &PrefixLayout, gui_storage_rel_path: &str) -> Result<PathBuf> {
@@ -716,7 +958,54 @@ fn prune_empty_completion_dirs(layout: &PrefixLayout, start: Option<&Path>) -> R
     Ok(())
 }
 
+fn prune_empty_integration_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
+    let mut current = start.map(PathBuf::from);
+    let integration_root = layout.integrations_dir();
+    while let Some(dir) = current {
+        if !dir.starts_with(&integration_root) || dir == integration_root {
+            break;
+        }
+
+        let mut entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                current = dir.parent().map(PathBuf::from);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed reading integration dir: {}", dir.display()));
+            }
+        };
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&dir)
+            .with_context(|| format!("failed pruning integration dir: {}", dir.display()))?;
+        current = dir.parent().map(PathBuf::from);
+    }
+    Ok(())
+}
+
 fn normalize_completion_token(value: &str) -> String {
+    let mut normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if normalized.is_empty() {
+        normalized.push('_');
+    }
+    normalized
+}
+
+fn normalize_integration_token(value: &str) -> String {
     let mut normalized = value
         .chars()
         .map(|ch| {
@@ -800,6 +1089,52 @@ pub(crate) fn validated_relative_binary_path(path: &str) -> Result<&Path> {
         .any(|component| matches!(component, Component::ParentDir))
     {
         return Err(anyhow!("binary path must not include '..': {}", path));
+    }
+    Ok(relative)
+}
+
+fn validated_relative_integration_source_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!(
+            "integration source path must be relative: {}",
+            path
+        ));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("integration source path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(anyhow!(
+            "integration source path must not include '..' or prefixes: {}",
+            path
+        ));
+    }
+    Ok(relative)
+}
+
+fn validated_relative_integration_storage_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(anyhow!(
+            "integration storage path must be relative: {}",
+            path
+        ));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("integration storage path must not be empty"));
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(anyhow!(
+            "integration storage path must not include '..' or prefixes: {}",
+            path
+        ));
     }
     Ok(relative)
 }

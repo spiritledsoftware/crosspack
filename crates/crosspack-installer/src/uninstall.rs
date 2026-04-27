@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Component, PathBuf};
 
 use crate::exposure::{
-    clear_gui_exposure_state, read_gui_exposure_state, remove_exposed_binary,
-    remove_exposed_completion, remove_exposed_gui_asset,
+    clear_gui_exposure_state, clear_integration_state, read_gui_exposure_state,
+    read_integration_state, remove_exposed_binary, remove_exposed_completion,
+    remove_exposed_gui_asset, remove_exposed_integration,
 };
 use crate::fs_utils::remove_file_if_exists;
 use crate::native::{
@@ -253,6 +254,11 @@ fn remove_receipt_artifacts(
         remove_exposed_gui_asset(layout, asset)?;
     }
     clear_gui_exposure_state(layout, &receipt.name)?;
+    let integration_projections = read_integration_state(layout, &receipt.name)?;
+    for projection in &integration_projections {
+        remove_exposed_integration(layout, projection)?;
+    }
+    clear_integration_state(layout, &receipt.name)?;
     if receipt.install_mode != InstallMode::Native {
         let _native_gui_warnings =
             remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;

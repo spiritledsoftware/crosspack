@@ -126,6 +126,79 @@ native_id = "demo-worker@main"
 }
 
 #[test]
+fn parse_manifest_with_typed_integrations() {
+    let content = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "docker_cli_plugin"
+name = "compose"
+source = "docker-compose"
+
+[[integrations]]
+kind = "path_plugin"
+host = "kubectl"
+name = "ctx"
+source = "kubectl-ctx"
+
+[[integrations]]
+kind = "service"
+name = "demo"
+source = "services/demo.service"
+enable = false
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    assert_eq!(parsed.integrations.len(), 3);
+    assert_eq!(parsed.integrations[0].kind(), "docker_cli_plugin");
+    assert_eq!(parsed.integrations[1].kind(), "path_plugin");
+    assert_eq!(parsed.integrations[2].kind(), "service");
+}
+
+#[test]
+fn parse_manifest_rejects_duplicate_integration_ownership() {
+    let content = r#"
+name = "demo"
+version = "1.0.0"
+
+[[integrations]]
+kind = "docker_cli_plugin"
+name = "compose"
+source = "docker-compose"
+
+[[integrations]]
+kind = "docker_cli_plugin"
+name = "compose"
+source = "compose-v2"
+"#;
+
+    let err = PackageManifest::from_toml_str(content)
+        .expect_err("duplicate integration ownership must fail");
+    assert!(err
+        .to_string()
+        .contains("duplicate integration declaration"));
+}
+
+#[test]
+fn parse_manifest_rejects_unsafe_integration_source_path() {
+    let content = r#"
+name = "demo"
+version = "1.0.0"
+
+[[integrations]]
+kind = "path_plugin"
+host = "kubectl"
+name = "ctx"
+source = "../kubectl-ctx"
+"#;
+
+    let err =
+        PackageManifest::from_toml_str(content).expect_err("unsafe integration source must fail");
+    assert!(err.to_string().contains("integration source path"));
+}
+
+#[test]
 fn parse_manifest_rejects_duplicate_declared_service_names() {
     let content = r#"
 name = "demo"
