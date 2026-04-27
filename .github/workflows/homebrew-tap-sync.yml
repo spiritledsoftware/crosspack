@@ -129,7 +129,6 @@ jobs:
             --no-browse \
             --strict \
             --online \
-            --version "${{ steps.meta.outputs.version }}" \
             --url "${{ steps.meta.outputs.url }}" \
             --sha256 "${{ steps.meta.outputs.sha256 }}" \
             "${tap}/crosspack"

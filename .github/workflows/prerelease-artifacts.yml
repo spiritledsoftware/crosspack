@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - "release/**"
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - scripts/**
+      - README.md
+      - docs/architecture.md
 
 concurrency:
   group: prerelease-artifacts-${{ github.ref }}

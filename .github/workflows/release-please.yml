@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - scripts/**
+      - README.md
+      - docs/architecture.md
 
 concurrency:
   group: release-please-${{ github.ref }}
