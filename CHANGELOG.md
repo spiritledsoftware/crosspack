@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.12.0](https://github.com/spiritledsoftware/crosspack/compare/v0.11.0...v0.12.0) (2026-04-27)
+
+
+### Features
+
+* **installer:** add typed host integrations ([#106](https://github.com/spiritledsoftware/crosspack/issues/106)) ([1abc026](https://github.com/spiritledsoftware/crosspack/commit/1abc026433cfa262b6c6cb6d185acfe2b1415bfe))
+
+
+### Continuous Integration
+
+* scope workflow triggers ([#105](https://github.com/spiritledsoftware/crosspack/issues/105)) ([57ab972](https://github.com/spiritledsoftware/crosspack/commit/57ab972ddb2a6a5c41226fe0976427a384452656))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump googleapis/release-please-action ([#108](https://github.com/spiritledsoftware/crosspack/issues/108)) ([7abb77f](https://github.com/spiritledsoftware/crosspack/commit/7abb77fb70f2938a20dc0c46c89fb5284790a385))
+* **deps:** bump sha2 from 0.10.9 to 0.11.0 ([#107](https://github.com/spiritledsoftware/crosspack/issues/107)) ([27adcf1](https://github.com/spiritledsoftware/crosspack/commit/27adcf187f1e5b894b6cf52b0143a2421dbe0c43))
+* **registry:** bump submodule to 4ee998fbf4791cc669e2629cc2abb2373a8c1efc ([2234247](https://github.com/spiritledsoftware/crosspack/commit/223424769825a5120c6d867bda577d6e6fa38ff4))
+* **registry:** bump submodule to 60ab5e6aba8adbc016fad77dfeaae7655274556c ([f7676a6](https://github.com/spiritledsoftware/crosspack/commit/f7676a62a3030252bdc060cde285faa0875a3e86))
+* **registry:** bump submodule to 8ac67aea994a58d8371ac9fc2855615902fb9831 ([a7ab652](https://github.com/spiritledsoftware/crosspack/commit/a7ab6525a305e9253725daa344886b83fc679918))
+* **registry:** bump submodule to d7a43bb8084e239ebbdc5b27e27f61a069e1b26e ([74701c6](https://github.com/spiritledsoftware/crosspack/commit/74701c667ce206d791a855a6de4ece8cf8c7a58a))
+* **registry:** bump submodule to fc3ae15339febdefe87147a3e7b6a34e75eb237b ([02d36db](https://github.com/spiritledsoftware/crosspack/commit/02d36db21407f4e867df35c4fdd9251a8b577636))
+
 ## [0.11.0](https://github.com/spiritledsoftware/crosspack/compare/v0.10.5...v0.11.0) (2026-04-26)
 
 
