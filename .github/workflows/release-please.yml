@@ -9,8 +9,6 @@ on:
       - Cargo.lock
       - crates/**
       - scripts/**
-      - README.md
-      - docs/architecture.md
 
 concurrency:
   group: release-please-${{ github.ref }}
