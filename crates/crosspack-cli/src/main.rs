@@ -17,33 +17,44 @@ use crosspack_core::{
 };
 #[cfg(test)]
 use crosspack_installer::read_declared_services_state;
+#[cfg(test)]
+use crosspack_installer::read_installed_package_state;
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, expose_completion, expose_gui_app, expose_integration,
-    exposed_completion_path, gui_asset_path, install_from_artifact, install_from_source_archive,
-    projected_exposed_completion_path, projected_gui_assets, projected_integration,
-    read_active_transaction, read_all_declared_services_states, read_all_gui_exposure_states,
-    read_all_integration_states, read_all_pins, read_gui_exposure_state, read_gui_native_state,
-    read_install_receipts, read_integration_state, read_transaction_metadata,
-    register_native_gui_app_best_effort, remove_exposed_binary, remove_exposed_completion,
-    remove_exposed_gui_asset, remove_exposed_integration, remove_file_if_exists,
-    remove_native_gui_registration_best_effort, run_native_service_action,
-    run_package_native_uninstall_actions, set_active_transaction,
+    exposed_completion_path, find_installed_states_by_package_name, gui_asset_path,
+    install_from_artifact, install_from_source_archive, projected_exposed_completion_path,
+    projected_gui_assets, projected_integration, read_active_transaction,
+    read_all_declared_services_states, read_all_gui_exposure_states,
+    read_all_installed_package_states, read_all_integration_states, read_all_pins,
+    read_gui_exposure_state, read_gui_native_state, read_install_receipts, read_integration_state,
+    read_transaction_metadata, register_native_gui_app_best_effort, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
+    remove_file_if_exists, remove_native_gui_registration_best_effort, run_native_service_action,
+    run_package_native_uninstall_actions,
     uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
     uninstall_package_with_dependency_overrides_and_ignored_roots, update_transaction_status,
     write_declared_services_state, write_gui_exposure_state, write_gui_native_state,
-    write_install_receipt, write_integration_state, write_pin, write_transaction_metadata,
+    write_install_receipt, write_installed_package_state, write_integration_state, write_pin,
     ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, IntegrationProjection,
-    NativeServiceAction, NativeServiceOutcome, PrefixLayout, TransactionJournalEntry,
-    TransactionMetadata, TransactionStatus, UninstallResult, UninstallStatus,
+    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity,
+    InstalledPackageState, IntegrationProjection, NativeServiceAction, NativeServiceOutcome,
+    PrefixLayout, TransactionCoordinator, TransactionJournalEntry, TransactionMetadata,
+    TransactionStatus, UninstallResult, UninstallStatus,
 };
+#[cfg(test)]
+use crosspack_installer::{set_active_transaction, write_transaction_metadata};
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
     RegistrySourceSnapshotState, RegistrySourceStore, RegistrySourceWithSnapshotState,
     SourceUpdateResult, SourceUpdateStatus,
 };
-use crosspack_resolver::{resolve_dependency_graph, RootRequirement};
+use crosspack_resolver::{
+    plan_from_resolved_graph_with_installed, resolve_dependency_graph, InstallPlan,
+    InstalledPackageSummary, PlanOperation, PlannedPackage as InstallPlanPackage,
+    PlannedRemoval as InstallPlanRemoval, PlannedReplacement as InstallPlanReplacement,
+    PlannedTransition as InstallPlanTransition, ResolvedGraph, RootRequirement,
+};
 use crosspack_security::verify_sha256_file;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};

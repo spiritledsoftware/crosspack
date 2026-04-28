@@ -1,11 +1,14 @@
 mod artifact;
+mod atomic_write;
 mod exposure;
 mod fs_utils;
+mod identity;
 mod installed_state;
 mod layout;
 mod native;
 mod pins;
 mod receipts;
+mod transaction_coordinator;
 mod transactions;
 mod types;
 mod uninstall;
@@ -21,7 +24,11 @@ pub use exposure::{
     write_integration_state,
 };
 pub use fs_utils::remove_file_if_exists;
-pub use installed_state::{read_installed_package_state, InstalledPackageState};
+pub use identity::InstalledPackageIdentity;
+pub use installed_state::{
+    find_installed_states_by_package_name, read_all_installed_package_states,
+    read_installed_package_state, write_installed_package_state, InstalledPackageState,
+};
 pub use layout::{default_user_prefix, PrefixLayout};
 pub use native::{
     clear_gui_native_state, clear_native_sidecar_state, read_all_gui_native_states,
@@ -35,6 +42,7 @@ pub use receipts::{
     clear_declared_services_state, read_all_declared_services_states, read_declared_services_state,
     read_install_receipts, write_declared_services_state, write_install_receipt,
 };
+pub use transaction_coordinator::{StartedTransaction, TransactionCoordinator};
 pub use transactions::{
     append_transaction_journal_entry, clear_active_transaction, current_unix_timestamp,
     read_active_transaction, read_transaction_metadata, set_active_transaction,

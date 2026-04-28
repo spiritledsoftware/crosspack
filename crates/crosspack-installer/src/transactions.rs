@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -188,21 +189,11 @@ pub fn current_unix_timestamp() -> Result<u64> {
 }
 
 fn serialize_transaction_metadata(metadata: &TransactionMetadata) -> String {
-    let snapshot_id = metadata
-        .snapshot_id
-        .as_ref()
-        .map(|value| format!("\n  \"snapshot_id\": \"{}\"", escape_json(value)))
-        .unwrap_or_default();
-
-    format!(
-        "{{\n  \"version\": {},\n  \"txid\": \"{}\",\n  \"operation\": \"{}\",\n  \"status\": \"{}\",\n  \"started_at_unix\": {}{}\n}}\n",
-        metadata.version,
-        escape_json(&metadata.txid),
-        escape_json(&metadata.operation),
-        metadata.status.as_str(),
-        metadata.started_at_unix,
-        snapshot_id
-    )
+    let document = TransactionMetadataDocument::from(metadata);
+    let mut raw = serde_json::to_string_pretty(&document)
+        .expect("transaction metadata document should serialize");
+    raw.push('\n');
+    raw
 }
 
 fn serialize_transaction_journal_entry(entry: &TransactionJournalEntry) -> String {
@@ -218,6 +209,55 @@ fn serialize_transaction_journal_entry(entry: &TransactionJournalEntry) -> Strin
 }
 
 fn parse_transaction_metadata(raw: &str) -> Result<TransactionMetadata> {
+    match serde_json::from_str::<TransactionMetadataDocument>(raw) {
+        Ok(document) => TransactionMetadata::try_from(document),
+        Err(serde_error) => match parse_transaction_metadata_legacy(raw) {
+            Ok(metadata) => Ok(metadata),
+            Err(legacy_error) => Err(legacy_error).context(serde_error),
+        },
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TransactionMetadataDocument {
+    version: u32,
+    txid: String,
+    operation: String,
+    status: String,
+    started_at_unix: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
+}
+
+impl From<&TransactionMetadata> for TransactionMetadataDocument {
+    fn from(metadata: &TransactionMetadata) -> Self {
+        Self {
+            version: metadata.version,
+            txid: metadata.txid.clone(),
+            operation: metadata.operation.clone(),
+            status: metadata.status.as_str().to_string(),
+            started_at_unix: metadata.started_at_unix,
+            snapshot_id: metadata.snapshot_id.clone(),
+        }
+    }
+}
+
+impl TryFrom<TransactionMetadataDocument> for TransactionMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(document: TransactionMetadataDocument) -> Result<Self> {
+        Ok(Self {
+            version: document.version,
+            txid: document.txid,
+            operation: document.operation,
+            status: TransactionStatus::parse(&document.status)?,
+            started_at_unix: document.started_at_unix,
+            snapshot_id: document.snapshot_id,
+        })
+    }
+}
+
+fn parse_transaction_metadata_legacy(raw: &str) -> Result<TransactionMetadata> {
     let mut string_fields = HashMap::new();
     let mut number_fields = HashMap::new();
 

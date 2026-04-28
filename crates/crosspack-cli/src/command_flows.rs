@@ -695,17 +695,17 @@ fn run_upgrade_command(
     };
 
     if options.dry_run {
-        let mut planned_changes = Vec::new();
-        let mut explainability = DependencyPolicyExplainability::default();
+        let mut install_plans = Vec::new();
 
         match spec.as_deref() {
             Some(single) => {
                 let (name, requirement) = parse_spec(single)?;
-                let installed = receipts.iter().find(|receipt| receipt.name == name);
-                let Some(installed_receipt) = installed else {
+                let Some(installed_state) = resolve_unambiguous_installed_package(layout, &name)? else {
                     println!("{name} is not installed");
                     return Ok(());
                 };
+                let installed = receipts.iter().find(|receipt| receipt.name == name);
+                let installed_receipt = installed.unwrap_or(&installed_state.receipt);
 
                 let roots = vec![RootInstallRequest {
                     name: installed_receipt.name.clone(),
@@ -723,13 +723,13 @@ fn run_upgrade_command(
                 for package in &resolved {
                     validate_install_preflight_for_resolved(layout, package, &receipts)?;
                 }
-                planned_changes.extend(build_planned_package_changes(&resolved, &receipts)?);
-                if options.explain {
-                    merge_dependency_policy_explainability(
-                        &mut explainability,
-                        build_dependency_policy_explainability(&resolved, &receipts, &roots)?,
-                    );
-                }
+                install_plans.push(build_install_plan_from_resolved(
+                    PlanOperation::Upgrade,
+                    installed_receipt.target.clone(),
+                    &resolved,
+                    &receipts,
+                    &roots,
+                ));
             }
             None => {
                 let plans = build_upgrade_plans(&receipts);
@@ -752,16 +752,13 @@ fn run_upgrade_command(
                     )?;
                     enforce_no_downgrades(&receipts, &resolved, "upgrade")?;
                     resolved_dependency_tokens.extend(plan_tokens);
-                    if options.explain {
-                        merge_dependency_policy_explainability(
-                            &mut explainability,
-                            build_dependency_policy_explainability(
-                                &resolved,
-                                &receipts,
-                                &plan.roots,
-                            )?,
-                        );
-                    }
+                    install_plans.push(build_install_plan_from_resolved(
+                        PlanOperation::Upgrade,
+                        plan.target.clone(),
+                        &resolved,
+                        &receipts,
+                        &plan.roots,
+                    ));
                     grouped_resolved.push(resolved);
                 }
 
@@ -789,16 +786,17 @@ fn run_upgrade_command(
                     for package in resolved {
                         validate_install_preflight_for_resolved(layout, package, &receipts)?;
                     }
-                    planned_changes.extend(build_planned_package_changes(resolved, &receipts)?);
                 }
             }
         }
 
-        let preview = build_transaction_preview("upgrade", &planned_changes);
-        for line in render_dry_run_output_lines(
-            &preview,
+        let install_plan = merge_install_plans(PlanOperation::Upgrade, None, &install_plans);
+        let explainability =
+            options.explain.then(|| dependency_policy_explainability_from_install_plan(&install_plan));
+        for line in render_install_plan_preview_lines(
+            &install_plan,
             TransactionPreviewMode::DryRun,
-            options.explain.then_some(&explainability),
+            explainability.as_ref(),
         ) {
             println!("{line}");
         }
@@ -817,11 +815,12 @@ fn run_upgrade_command(
         match spec.as_deref() {
             Some(single) => {
                 let (name, requirement) = parse_spec(single)?;
-                let installed = receipts.iter().find(|receipt| receipt.name == name);
-                let Some(installed_receipt) = installed else {
+                let Some(installed_state) = resolve_unambiguous_installed_package(layout, &name)? else {
                     println!("{name} is not installed");
                     return Ok(());
                 };
+                let installed = receipts.iter().find(|receipt| receipt.name == name);
+                let installed_receipt = installed.unwrap_or(&installed_state.receipt);
 
                 let roots = vec![RootInstallRequest {
                     name: installed_receipt.name.clone(),
@@ -854,6 +853,13 @@ fn run_upgrade_command(
                     },
                 )?;
                 journal_seq += 1;
+                let install_plan = build_install_plan_from_resolved(
+                    PlanOperation::Upgrade,
+                    installed_receipt.target.clone(),
+                    &resolved,
+                    &receipts,
+                    &roots,
+                );
 
                 for package in &resolved {
                     set_progress(&mut progress, completed_packages);
@@ -919,8 +925,11 @@ fn run_upgrade_command(
                         layout,
                         package,
                         &dependencies,
-                        &root_names,
-                        &planned_dependency_overrides,
+                        InstallResolvedPlanContext {
+                            root_names: &root_names,
+                            install_plan: &install_plan,
+                            planned_dependency_overrides: &planned_dependency_overrides,
+                        },
                         InstallResolvedOptions {
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload: false,
@@ -1020,6 +1029,13 @@ fn run_upgrade_command(
 
                 for (resolved, plan) in grouped_resolved.iter().zip(plans.iter()) {
                     let planned_dependency_overrides = build_planned_dependency_overrides(resolved);
+                    let install_plan = build_install_plan_from_resolved(
+                        PlanOperation::Upgrade,
+                        plan.target.clone(),
+                        resolved,
+                        &receipts,
+                        &plan.roots,
+                    );
 
                     for package in resolved {
                         set_progress(&mut progress, completed_packages);
@@ -1089,8 +1105,11 @@ fn run_upgrade_command(
                             layout,
                             package,
                             &dependencies,
-                            &plan.root_names,
-                            &planned_dependency_overrides,
+                            InstallResolvedPlanContext {
+                                root_names: &plan.root_names,
+                                install_plan: &install_plan,
+                                planned_dependency_overrides: &planned_dependency_overrides,
+                            },
                             InstallResolvedOptions {
                                 snapshot_id: snapshot_id.as_deref(),
                                 force_redownload: false,
@@ -2202,13 +2221,18 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
     let renderer = TerminalRenderer::from_style(output_style);
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "uninstall")?;
+    let Some(_installed_state) = resolve_unambiguous_installed_package(layout, &name)? else {
+        println!("Package not installed: {name}");
+        return Ok(());
+    };
 
     renderer.print_section(&format!("Uninstall {name}"));
 
     execute_with_transaction(layout, "uninstall", None, |tx| {
         let mut journal_seq = 1_u64;
         let mut snapshot_paths = HashMap::new();
-        for receipt in read_install_receipts(layout)? {
+        for state in read_all_installed_package_states(layout)? {
+            let receipt = state.receipt;
             let snapshot_path = capture_package_state_snapshot(layout, &tx.txid, &receipt.name)?;
             snapshot_paths.insert(receipt.name, snapshot_path);
         }

@@ -270,6 +270,8 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "crosspack-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

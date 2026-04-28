@@ -4985,6 +4985,42 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn install_plan_preview_lines_match_existing_transaction_preview_output() {
+        let preview = build_transaction_preview(
+            "upgrade",
+            &[
+                PlannedPackageChange {
+                    name: "tool".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "2.0.0".to_string(),
+                    old_version: Some("1.0.0".to_string()),
+                    replacement_removals: vec![PlannedRemoval {
+                        name: "old-tool".to_string(),
+                        version: "0.9.0".to_string(),
+                    }],
+                },
+                PlannedPackageChange {
+                    name: "dep".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "1.1.0".to_string(),
+                    old_version: None,
+                    replacement_removals: Vec::new(),
+                },
+            ],
+        );
+        let plan = install_plan_from_transaction_preview(
+            PlanOperation::Upgrade,
+            Some("x86_64-unknown-linux-gnu".to_string()),
+            &preview,
+        );
+
+        assert_eq!(
+            render_install_plan_preview_lines(&plan, TransactionPreviewMode::DryRun, None),
+            render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None)
+        );
+    }
+
+    #[test]
     fn install_transaction_preview_dry_run_output_matches_lifecycle_contract() {
         let resolved = vec![resolved_install("tool", "1.2.3")];
         let planned = build_planned_package_changes(&resolved, &[])
@@ -7793,6 +7829,128 @@ sha256 = "abc"
         );
     }
 
+    #[test]
+    fn install_resolved_writes_legacy_receipt_and_state_document() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut resolved = resolved_install("demo-bin", "1.0.0");
+        resolved.archive_type = ArchiveType::Bin;
+        resolved.artifact.url = "https://example.test/demo-bin".to_string();
+        resolved.artifact.sha256 = EMPTY_SHA256.to_string();
+        resolved.artifact.archive = Some("bin".to_string());
+        resolved.artifact.binaries = vec![crosspack_core::ArtifactBinary {
+            name: "demo-bin".to_string(),
+            path: "demo-bin".to_string(),
+        }];
+        let cache_path = resolved_artifact_cache_path(
+            &layout,
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &resolved.resolved_target,
+            resolved.archive_type,
+            &resolved.artifact.url,
+        )
+        .expect("must resolve bin cache path");
+        std::fs::create_dir_all(cache_path.parent().expect("cache path must have parent"))
+            .expect("must create cache dir");
+        std::fs::write(cache_path, b"").expect("must seed cached bin artifact");
+        let install_plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(resolved.resolved_target.clone()),
+            std::slice::from_ref(&resolved),
+            &[],
+            &[RootInstallRequest {
+                name: "demo-bin".to_string(),
+                requirement: VersionReq::STAR,
+            }],
+        );
+
+        install_resolved(
+            &layout,
+            &resolved,
+            &["demo-bin@1.0.0".to_string()],
+            InstallResolvedPlanContext {
+                root_names: &["demo-bin".to_string()],
+                install_plan: &install_plan,
+                planned_dependency_overrides: &HashMap::new(),
+            },
+            InstallResolvedOptions {
+                snapshot_id: None,
+                force_redownload: false,
+                interaction_policy: InstallInteractionPolicy::default(),
+                install_progress_mode: InstallProgressMode::Disabled,
+            },
+            None,
+        )
+        .expect("install should succeed");
+
+        assert!(layout.receipt_path("demo-bin").exists());
+        assert!(layout
+            .installed_identity_state_document_path(&InstalledPackageIdentity {
+                profile: "default".to_string(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                package: "demo-bin".to_string(),
+            })
+            .exists());
+        let state = read_installed_package_state(&layout, "demo-bin")
+            .expect("must read installed state")
+            .expect("demo-bin must be installed");
+        assert_eq!(state.receipt.name, "demo-bin");
+        assert_eq!(state.receipt.exposed_bins, vec!["demo-bin"]);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ambiguous_installed_package_name_blocks_uninstall_with_identity_guidance() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut linux_receipt = install_receipt("demo", "1.0.0", InstallReason::Root, &[]);
+        linux_receipt.target = Some("x86_64-unknown-linux-gnu".to_string());
+        let linux_state = InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&linux_receipt),
+            version: linux_receipt.version.clone(),
+            receipt: linux_receipt,
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
+        };
+        write_installed_package_state(&layout, &linux_state).expect("must write linux state");
+
+        let mut macos_receipt = install_receipt("demo", "1.0.0", InstallReason::Root, &[]);
+        macos_receipt.target = Some("aarch64-apple-darwin".to_string());
+        let macos_state = InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&macos_receipt),
+            version: macos_receipt.version.clone(),
+            receipt: macos_receipt,
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
+        };
+        write_installed_package_state(&layout, &macos_state).expect("must write macos state");
+
+        let err = run_uninstall_command(&layout, "demo".to_string())
+            .expect_err("ambiguous package should fail before uninstall");
+        let message = err.to_string();
+        assert!(
+            message.contains(
+                "installed package name 'demo' is ambiguous; this command cannot disambiguate target/profile yet"
+            ),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("default--aarch64-apple-darwin--demo")
+                && message.contains("default--x86_64-unknown-linux-gnu--demo"),
+            "error should list matching identities: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn install_reports_actionable_error_for_unsupported_exe_host() {
@@ -7805,13 +7963,23 @@ sha256 = "abc"
         resolved.artifact.sha256 = EMPTY_SHA256.to_string();
 
         seed_cached_artifact(&layout, &resolved, b"");
+        let install_plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(resolved.resolved_target.clone()),
+            std::slice::from_ref(&resolved),
+            &[],
+            &[],
+        );
 
         let err = install_resolved(
             &layout,
             &resolved,
             &[],
-            &[],
-            &HashMap::new(),
+            InstallResolvedPlanContext {
+                root_names: &[],
+                install_plan: &install_plan,
+                planned_dependency_overrides: &HashMap::new(),
+            },
             InstallResolvedOptions {
                 snapshot_id: None,
                 force_redownload: false,
@@ -7841,13 +8009,23 @@ sha256 = "abc"
         resolved.artifact.sha256 = EMPTY_SHA256.to_string();
 
         seed_cached_artifact(&layout, &resolved, b"");
+        let install_plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(resolved.resolved_target.clone()),
+            std::slice::from_ref(&resolved),
+            &[],
+            &[],
+        );
 
         let err = install_resolved(
             &layout,
             &resolved,
             &[],
-            &[],
-            &HashMap::new(),
+            InstallResolvedPlanContext {
+                root_names: &[],
+                install_plan: &install_plan,
+                planned_dependency_overrides: &HashMap::new(),
+            },
             InstallResolvedOptions {
                 snapshot_id: None,
                 force_redownload: false,

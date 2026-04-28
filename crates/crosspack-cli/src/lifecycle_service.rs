@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 struct InstallCommandRequest {
     spec: String,
     target: Option<String>,
@@ -10,6 +11,7 @@ struct InstallCommandRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 struct UpgradeCommandRequest {
     spec: Option<String>,
     target: Option<String>,
@@ -21,6 +23,7 @@ struct UpgradeCommandRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 struct UninstallCommandRequest {
     name: String,
 }
@@ -38,6 +41,7 @@ fn build_list_command_outcome(receipts: Vec<InstallReceipt>) -> ListCommandOutco
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum LifecycleCommandOutcome {
     Lines(Vec<String>),
 }

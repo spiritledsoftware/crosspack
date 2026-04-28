@@ -206,6 +206,13 @@ fn run_bundle_apply_command(
             journal_seq += 1;
 
             let planned_dependency_overrides = build_planned_dependency_overrides(&plan.resolved);
+            let install_plan = build_install_plan_from_resolved(
+                PlanOperation::BundleApply,
+                plan.target.clone(),
+                &plan.resolved,
+                &receipts,
+                &plan.roots,
+            );
             for package in &plan.resolved {
                 let snapshot_path =
                     capture_package_state_snapshot(layout, &tx.txid, &package.manifest.name)?;
@@ -246,8 +253,11 @@ fn run_bundle_apply_command(
                     layout,
                     package,
                     &dependencies,
-                    &plan.root_names,
-                    &planned_dependency_overrides,
+                    InstallResolvedPlanContext {
+                        root_names: &plan.root_names,
+                        install_plan: &install_plan,
+                        planned_dependency_overrides: &planned_dependency_overrides,
+                    },
                     InstallResolvedOptions {
                         snapshot_id: snapshot_id.as_deref(),
                         force_redownload: options.force_redownload,

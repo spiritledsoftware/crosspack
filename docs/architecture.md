@@ -7,8 +7,8 @@ Crosspack is a native, cross-platform package manager with first-class Windows s
 - `crosspack-cli`: user-facing commands and output.
 - `crosspack-core`: shared domain models (manifest and artifact metadata).
 - `crosspack-registry`: reads and searches the package index.
-- `crosspack-resolver`: resolves version constraints against available manifests.
-- `crosspack-installer`: prefix layout, install/uninstall filesystem mechanics, and transaction apply/rollback coordination.
+- `crosspack-resolver`: resolves version constraints against available manifests and produces typed install-plan evidence for adds, removals, replacements, transitions, providers, and conflicts.
+- `crosspack-installer`: prefix layout, installed-state hydration, install/uninstall filesystem mechanics, and transaction apply/rollback coordination.
 - `crosspack-security`: checksum verification and registry metadata signature verification helpers.
 
 ## Install Layout
@@ -88,10 +88,11 @@ Default user prefixes:
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - `upgrade --dry-run` performs full planning and emits the same deterministic transaction preview format without mutating install state.
 - `install`, `upgrade`, and `bundle apply` support `--explain` in dry-run mode only; explainability lines are additive and deterministic (`explain_provider`, `explain_replacement`, `explain_conflict`).
-- Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap; current install state is package-name keyed.
+- Global `upgrade` runs one solve per target group derived from root receipts and rejects cross-target package-name overlap while target/profile selectors are still pending.
 - `install` and `upgrade` persist `install_mode` in receipts (`managed` or `native`, derived from artifact-kind defaults).
 - `--build-from-source` is supported for `install` and `bundle apply` when manifests provide valid `source_build` metadata (including `archive_sha256`); invalid metadata, checksum mismatch, and command/tool failures fail closed.
 - `install` and `upgrade` persist `install_reason` in receipts (`root` for explicit installs, `dependency` for transitive installs), while preserving existing root intent on upgrades.
+- `install`, `upgrade`, and `bundle apply` render dry-run previews from typed resolver `InstallPlan` data and execute replacement handoff/root-intent preservation from that same plan data during apply.
 - `install` and `upgrade` persist `exposed_completions` receipt entries for package-declared completion files exposed under `<prefix>/share/completions/packages/<shell>/`.
 - `install` and `upgrade` persist GUI asset ownership in optional `<prefix>/state/installed/<name>.gui` sidecars for deterministic stale cleanup and uninstall removal.
 - `install` and `upgrade` persist native uninstall action records in optional `<prefix>/state/installed/<name>.gui-native` sidecars.
@@ -105,8 +106,12 @@ Default user prefixes:
   - `doctor` reports prefix paths and transaction health status.
 - Rollback snapshots capture package tree, receipt, exposed binaries, exposed completions, GUI assets, and native sidecar state.
 - Rollback replay for native package journal steps runs native uninstall actions before managed snapshot restore.
+- Transaction metadata is parsed and written through typed status values and coordinated through installer-owned transaction APIs for begin/status/active-marker cleanup.
 - Successful multi-package install/upgrade receipts in one transaction share a single `snapshot_id` to preserve metadata provenance.
-- `list` reads install receipts from `<prefix>/state/installed/`.
+- Installed state is hydrated through a versioned state API that reads new identity-keyed state documents when present and falls back to legacy receipt/sidecar files (`.receipt`, `.gui`, `.gui-native`, `.services`, `.integrations`).
+- New installed-state documents are keyed by imported installed identity (`default--<target-or-host>--<package>.state.json`) while legacy package-name receipt paths remain readable and writable for compatibility.
+- Bare package lifecycle commands keep package-name defaults, but fail with deterministic guidance when multiple installed identities share the same package name and the command has no target/profile selector yet.
+- `list` reads hydrated installed package state from `<prefix>/state/installed/` and prints the same `name version` rows.
 - `completions <bash|zsh|fish|powershell>` prints shell completion scripts for the canonical `crosspack` binary name and includes a loader block for package-declared completions.
 - `init-shell [--shell <bash|zsh|fish|powershell>]` prints shell setup snippets for PATH + completion loading; without `--shell`, shell is auto-detected (with deterministic fallback).
 - Install scripts attempt best-effort shell setup by generating completion files under `<prefix>/share/completions/` and upserting one managed profile block; failures warn and do not abort install.
@@ -115,7 +120,7 @@ Default user prefixes:
 
 This architecture document describes current shipped behavior on the current release line unless explicitly marked otherwise.
 
-Roadmap specs (v0.4/v0.5) are design targets and non-GA until merged and validated in current command behavior/tests.
+Roadmap specs (v0.4/v0.5) are design targets; use this document and `docs/install-flow.md` for the subset that is current shipped behavior.
 
 ## Deferred Items
 
@@ -125,7 +130,7 @@ Roadmap specs (v0.4/v0.5) are design targets and non-GA until merged and validat
 
 The next architecture milestones are specified in dedicated docs. These are design targets and are not fully implemented yet.
 
-Planned (non-GA) additions include resolver provider/conflict/replacement phases and expanded transaction coordinator policies beyond current shipped rollback/repair behavior.
+Planned (non-GA) additions include expanded profile/target selectors for installed identities and transaction coordinator policies beyond current shipped rollback/repair behavior.
 
 - Dependency policy (`provides`, `conflicts`, `replaces`) and provider resolution: `docs/dependency-policy-spec.md`.
 - Transaction journal, rollback, and crash recovery: `docs/transaction-rollback-spec.md`.

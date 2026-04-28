@@ -13,9 +13,10 @@ use crate::native::{
     clear_native_sidecar_state, remove_package_native_gui_registrations_best_effort,
     run_package_native_uninstall_actions,
 };
-use crate::receipts::{clear_declared_services_state, read_install_receipts};
+use crate::receipts::clear_declared_services_state;
 use crate::{
-    InstallMode, InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
+    read_all_installed_package_states, InstallMode, InstallReason, InstallReceipt, PrefixLayout,
+    UninstallResult, UninstallStatus,
 };
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
@@ -41,7 +42,10 @@ pub fn uninstall_package_with_dependency_overrides_and_ignored_roots(
     dependency_overrides: &HashMap<String, Vec<String>>,
     ignored_root_names: &HashSet<String>,
 ) -> Result<UninstallResult> {
-    let receipts = read_install_receipts(layout)?;
+    let receipts = read_all_installed_package_states(layout)?
+        .into_iter()
+        .map(|state| state.receipt)
+        .collect::<Vec<_>>();
     let Some(target_receipt) = receipts
         .iter()
         .find(|receipt| receipt.name == name)
@@ -158,7 +162,10 @@ pub fn uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots(
     dependency_overrides: &HashMap<String, Vec<String>>,
     ignored_root_names: &HashSet<String>,
 ) -> Result<Vec<String>> {
-    let receipts = read_install_receipts(layout)?;
+    let receipts = read_all_installed_package_states(layout)?
+        .into_iter()
+        .map(|state| state.receipt)
+        .collect::<Vec<_>>();
     let receipt_map: HashMap<String, InstallReceipt> = receipts
         .iter()
         .cloned()
