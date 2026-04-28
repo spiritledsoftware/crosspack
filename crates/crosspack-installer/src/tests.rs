@@ -453,7 +453,7 @@ fn write_transaction_metadata_and_active_file() {
         version: 1,
         txid: "tx-1771001234-000042".to_string(),
         operation: "upgrade".to_string(),
-        status: "applying".to_string(),
+        status: TransactionStatus::Applying,
         started_at_unix: 1_771_001_234,
         snapshot_id: Some("git:5f1b3d8a1f2a4d0e".to_string()),
     };
@@ -487,7 +487,7 @@ fn read_transaction_metadata_round_trip() {
         version: 1,
         txid: "tx-meta-1".to_string(),
         operation: "upgrade".to_string(),
-        status: "applying".to_string(),
+        status: TransactionStatus::Applying,
         started_at_unix: 1_771_001_240,
         snapshot_id: Some("git:abc123".to_string()),
     };
@@ -498,6 +498,72 @@ fn read_transaction_metadata_round_trip() {
         .expect("metadata should exist");
 
     assert_eq!(loaded, metadata);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_status_parses_all_supported_tokens() {
+    let cases = [
+        ("planning", TransactionStatus::Planning),
+        ("applying", TransactionStatus::Applying),
+        ("completed", TransactionStatus::Completed),
+        ("committed", TransactionStatus::Committed),
+        ("rolling_back", TransactionStatus::RollingBack),
+        ("rolled_back", TransactionStatus::RolledBack),
+        ("failed", TransactionStatus::Failed),
+    ];
+
+    for (token, expected) in cases {
+        assert_eq!(
+            TransactionStatus::parse(token).expect("status should parse"),
+            expected
+        );
+        assert_eq!(expected.as_str(), token);
+    }
+}
+
+#[test]
+fn transaction_status_rejects_unknown_status() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let txid = "tx-unknown-status";
+    let raw = "{\n  \"version\": 1,\n  \"txid\": \"tx-unknown-status\",\n  \"operation\": \"install\",\n  \"status\": \"paused\",\n  \"started_at_unix\": 1771001250\n}\n";
+    fs::write(layout.transaction_metadata_path(txid), raw).expect("must write metadata file");
+
+    let err = read_transaction_metadata(&layout, txid)
+        .expect_err("unknown transaction status should be rejected");
+    let err_text = format!("{err:#}");
+    assert!(
+        err_text.contains("invalid transaction status: paused"),
+        "unexpected error: {err_text}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_status_serializes_current_metadata_shape() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let metadata = TransactionMetadata {
+        version: 1,
+        txid: "tx-status-shape".to_string(),
+        operation: "install".to_string(),
+        status: TransactionStatus::Completed,
+        started_at_unix: 1_771_001_260,
+        snapshot_id: None,
+    };
+
+    let metadata_path =
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+    let metadata_raw = fs::read_to_string(metadata_path).expect("must read metadata file");
+    assert_eq!(
+        metadata_raw,
+        "{\n  \"version\": 1,\n  \"txid\": \"tx-status-shape\",\n  \"operation\": \"install\",\n  \"status\": \"completed\",\n  \"started_at_unix\": 1771001260\n}\n"
+    );
 
     let _ = fs::remove_dir_all(layout.prefix());
 }
@@ -532,13 +598,14 @@ fn update_transaction_status_rewrites_metadata_status() {
         version: 1,
         txid: "tx-status-1".to_string(),
         operation: "install".to_string(),
-        status: "planning".to_string(),
+        status: TransactionStatus::Planning,
         started_at_unix: 1_771_001_250,
         snapshot_id: None,
     };
 
     write_transaction_metadata(&layout, &metadata).expect("must write metadata");
-    update_transaction_status(&layout, "tx-status-1", "applying").expect("must update status");
+    update_transaction_status(&layout, "tx-status-1", TransactionStatus::Applying)
+        .expect("must update status");
 
     let loaded = read_transaction_metadata(&layout, "tx-status-1")
         .expect("must read metadata")

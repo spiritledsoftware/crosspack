@@ -44,7 +44,8 @@ pub use types::{
     ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
     InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, IntegrationProjection,
     NativeServiceAction, NativeServiceOutcome, NativeSidecarState, NativeUninstallAction,
-    TransactionJournalEntry, TransactionMetadata, UninstallResult, UninstallStatus,
+    TransactionJournalEntry, TransactionMetadata, TransactionStatus, UninstallResult,
+    UninstallStatus,
 };
 pub use uninstall::{
     uninstall_blocked_by_roots_with_dependency_overrides,

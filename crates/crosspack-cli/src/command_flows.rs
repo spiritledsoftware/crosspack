@@ -2017,7 +2017,10 @@ fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String
         let Some(metadata) = read_transaction_metadata(layout, txid)? else {
             continue;
         };
-        if matches!(metadata.status.as_str(), "committed" | "rolled_back") {
+        if matches!(
+            metadata.status,
+            TransactionStatus::Completed | TransactionStatus::Committed | TransactionStatus::RolledBack
+        ) {
             continue;
         }
 
@@ -2066,7 +2069,10 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         .ok_or_else(|| anyhow!("transaction metadata missing for rollback txid={target_txid}"))?;
     let active_txid = read_active_transaction(layout)?;
 
-    if matches!(metadata.status.as_str(), "planning" | "applying")
+    if matches!(
+        metadata.status,
+        TransactionStatus::Planning | TransactionStatus::Applying
+    )
         && active_txid.as_deref() == Some(target_txid.as_str())
         && transaction_owner_process_alive(&target_txid)?
     {
@@ -2076,7 +2082,10 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         ));
     }
 
-    if metadata.status == "committed" || metadata.status == "rolled_back" {
+    if matches!(
+        metadata.status,
+        TransactionStatus::Completed | TransactionStatus::Committed | TransactionStatus::RolledBack
+    ) {
         if active_txid.as_deref() == Some(target_txid.as_str()) {
             clear_active_transaction(layout)?;
         }
@@ -2092,11 +2101,11 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
         .iter()
         .any(|record| record.state == "done" && rollback_package_from_step(&record.step).is_some());
 
-    set_transaction_status(layout, &target_txid, "rolling_back")?;
+    set_transaction_status(layout, &target_txid, TransactionStatus::RollingBack)?;
     let replayed = match replay_rollback_journal(layout, &target_txid) {
         Ok(replayed) => replayed,
         Err(err) => {
-            let _ = set_transaction_status(layout, &target_txid, "failed");
+            let _ = set_transaction_status(layout, &target_txid, TransactionStatus::Failed);
             return Err(err).with_context(|| {
                 format!("rollback failed {target_txid}: transaction journal replay required")
             });
@@ -2104,13 +2113,13 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
     };
 
     if !replayed && has_completed_mutating_steps {
-        let _ = set_transaction_status(layout, &target_txid, "failed");
+        let _ = set_transaction_status(layout, &target_txid, TransactionStatus::Failed);
         return Err(anyhow!(
             "rollback failed {target_txid}: transaction journal replay required"
         ));
     }
 
-    set_transaction_status(layout, &target_txid, "rolled_back")?;
+    set_transaction_status(layout, &target_txid, TransactionStatus::RolledBack)?;
 
     if active_txid.as_deref() == Some(target_txid.as_str()) {
         clear_active_transaction(layout)?;
@@ -2166,8 +2175,11 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
         return Ok(());
     }
 
-    match metadata.status.as_str() {
-        "planning" | "applying" | "failed" | "rolling_back" => {
+    match metadata.status {
+        TransactionStatus::Planning
+        | TransactionStatus::Applying
+        | TransactionStatus::Failed
+        | TransactionStatus::RollingBack => {
             run_rollback_command(layout, Some(txid.clone()))?;
             println!(
                 "{}",

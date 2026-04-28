@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{PrefixLayout, TransactionJournalEntry, TransactionMetadata};
+use crate::{PrefixLayout, TransactionJournalEntry, TransactionMetadata, TransactionStatus};
 
 pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathBuf> {
     let path = layout.transaction_active_path();
@@ -139,10 +139,14 @@ pub fn read_transaction_metadata(
     Ok(Some(metadata))
 }
 
-pub fn update_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
+pub fn update_transaction_status(
+    layout: &PrefixLayout,
+    txid: &str,
+    status: TransactionStatus,
+) -> Result<()> {
     let mut metadata = read_transaction_metadata(layout, txid)?
         .ok_or_else(|| anyhow!("transaction metadata not found for '{txid}'"))?;
-    metadata.status = status.to_string();
+    metadata.status = status;
     write_transaction_metadata(layout, &metadata)?;
     Ok(())
 }
@@ -195,7 +199,7 @@ fn serialize_transaction_metadata(metadata: &TransactionMetadata) -> String {
         metadata.version,
         escape_json(&metadata.txid),
         escape_json(&metadata.operation),
-        escape_json(&metadata.status),
+        metadata.status.as_str(),
         metadata.started_at_unix,
         snapshot_id
     )
@@ -261,10 +265,11 @@ fn parse_transaction_metadata(raw: &str) -> Result<TransactionMetadata> {
             .get("operation")
             .with_context(|| "missing transaction metadata field: operation")?
             .clone(),
-        status: string_fields
-            .get("status")
-            .with_context(|| "missing transaction metadata field: status")?
-            .clone(),
+        status: TransactionStatus::parse(
+            string_fields
+                .get("status")
+                .with_context(|| "missing transaction metadata field: status")?,
+        )?,
         started_at_unix: parse_number("started_at_unix")?,
         snapshot_id: string_fields.get("snapshot_id").cloned(),
     })

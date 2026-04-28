@@ -473,7 +473,7 @@ fn begin_transaction(
         version: 1,
         txid,
         operation: operation.to_string(),
-        status: "planning".to_string(),
+        status: TransactionStatus::Planning,
         started_at_unix,
         snapshot_id: snapshot_id.map(ToOwned::to_owned),
     };
@@ -488,7 +488,7 @@ fn begin_transaction(
     Ok(metadata)
 }
 
-fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
+fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: TransactionStatus) -> Result<()> {
     update_transaction_status(layout, txid, status)
 }
 
@@ -505,9 +505,9 @@ where
     let tx = begin_transaction(layout, operation, snapshot_id, started_at_unix)?;
 
     let run_result = (|| -> Result<()> {
-        set_transaction_status(layout, &tx.txid, "applying")?;
+        set_transaction_status(layout, &tx.txid, TransactionStatus::Applying)?;
         run(&tx)?;
-        set_transaction_status(layout, &tx.txid, "committed")?;
+        set_transaction_status(layout, &tx.txid, TransactionStatus::Committed)?;
         clear_active_transaction(layout)?;
         Ok(())
     })();
@@ -520,27 +520,41 @@ where
                 .flatten()
                 .map(|metadata| metadata.status);
             let preserve_recovery_state = current_status
-                .as_deref()
+                .as_ref()
                 .map(|status| {
                     matches!(
                         status,
-                        "rolling_back" | "rolled_back" | "committed" | "failed"
+                        TransactionStatus::RollingBack
+                            | TransactionStatus::RolledBack
+                            | TransactionStatus::Completed
+                            | TransactionStatus::Committed
+                            | TransactionStatus::Failed
                     )
                 })
                 .unwrap_or(false);
-            if matches!(current_status.as_deref(), Some("rolled_back" | "committed")) {
+            if matches!(
+                current_status,
+                Some(
+                    TransactionStatus::RolledBack
+                        | TransactionStatus::Completed
+                        | TransactionStatus::Committed
+                )
+            ) {
                 let _ = clear_active_transaction(layout);
             }
             if !preserve_recovery_state {
-                let _ = set_transaction_status(layout, &tx.txid, "failed");
+                let _ = set_transaction_status(layout, &tx.txid, TransactionStatus::Failed);
             }
             Err(err)
         }
     }
 }
 
-fn status_allows_stale_marker_cleanup(status: &str) -> bool {
-    matches!(status, "committed" | "rolled_back")
+fn status_allows_stale_marker_cleanup(status: &TransactionStatus) -> bool {
+    matches!(
+        status,
+        TransactionStatus::Completed | TransactionStatus::Committed | TransactionStatus::RolledBack
+    )
 }
 
 fn normalize_command_token(command: &str) -> String {
@@ -586,12 +600,12 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
                 clear_active_transaction(layout)?;
                 return Ok(());
             }
-            if metadata.status == "rolling_back" {
+            if metadata.status == TransactionStatus::RollingBack {
                 return Err(anyhow!(
                     "transaction {txid} requires repair (reason=rolling_back)"
                 ));
             }
-            if metadata.status == "failed" {
+            if metadata.status == TransactionStatus::Failed {
                 return Err(anyhow!(
                     "transaction {txid} requires repair (reason=failed)"
                 ));
@@ -644,10 +658,10 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         ));
     };
 
-    if metadata.status == "rolling_back" {
+    if metadata.status == TransactionStatus::RollingBack {
         return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
     }
-    if metadata.status == "failed" {
+    if metadata.status == TransactionStatus::Failed {
         return Ok(format!("transaction: failed {txid} (reason=failed)"));
     }
     if status_allows_stale_marker_cleanup(&metadata.status) {

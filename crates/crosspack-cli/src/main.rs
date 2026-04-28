@@ -36,7 +36,7 @@ use crosspack_installer::{
     ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
     InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, IntegrationProjection,
     NativeServiceAction, NativeServiceOutcome, PrefixLayout, TransactionJournalEntry,
-    TransactionMetadata, UninstallResult, UninstallStatus,
+    TransactionMetadata, TransactionStatus, UninstallResult, UninstallStatus,
 };
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,

@@ -108,7 +108,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-upgrade-command".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_258,
             snapshot_id: None,
         };
@@ -137,7 +137,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-upgrade-dispatch".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_258,
             snapshot_id: None,
         };
@@ -177,7 +177,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-uninstall-command".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_259,
             snapshot_id: None,
         };
@@ -206,7 +206,7 @@ mod tests {
             version: 1,
             txid: "tx-needs-rollback".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_262,
             snapshot_id: None,
         };
@@ -274,7 +274,7 @@ mod tests {
             version: 1,
             txid: "tx-needs-repair".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_263,
             snapshot_id: None,
         };
@@ -342,7 +342,7 @@ mod tests {
             version: 1,
             txid: "tx-applying-repair".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_265,
             snapshot_id: None,
         };
@@ -410,7 +410,7 @@ mod tests {
             version: 1,
             txid: "tx-needs-replay".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_266,
             snapshot_id: None,
         };
@@ -562,7 +562,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_266,
             snapshot_id: None,
         };
@@ -775,7 +775,7 @@ mod tests {
                 version: 1,
                 txid: txid.to_string(),
                 operation: "upgrade".to_string(),
-                status: "failed".to_string(),
+                status: TransactionStatus::Failed,
                 started_at_unix: 1_771_001_307,
                 snapshot_id: None,
             },
@@ -854,7 +854,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_266,
             snapshot_id: None,
         };
@@ -985,7 +985,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_300,
             snapshot_id: None,
         };
@@ -1107,7 +1107,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_269,
             snapshot_id: None,
         };
@@ -1188,23 +1188,28 @@ mod tests {
 
     #[test]
     fn run_repair_command_recovers_interrupted_statuses_when_rollback_possible() {
-        for status in ["planning", "applying", "rolling_back", "failed"] {
+        for (status, token) in [
+            (TransactionStatus::Planning, "planning"),
+            (TransactionStatus::Applying, "applying"),
+            (TransactionStatus::RollingBack, "rolling_back"),
+            (TransactionStatus::Failed, "failed"),
+        ] {
             let layout = test_layout();
             layout.ensure_base_dirs().expect("must create dirs");
 
-            let txid = format!("tx-repair-{}", status.replace('_', "-"));
+            let txid = format!("tx-repair-{}", token.replace('_', "-"));
             let metadata = TransactionMetadata {
                 version: 1,
                 txid: txid.clone(),
                 operation: "install".to_string(),
-                status: status.to_string(),
+                status,
                 started_at_unix: 1_771_001_267,
                 snapshot_id: None,
             };
             write_transaction_metadata(&layout, &metadata).expect("must write metadata");
             set_active_transaction(&layout, &txid).expect("must set active marker");
 
-            let package_name = format!("pkg-{status}");
+            let package_name = format!("pkg-{token}");
             let snapshot_root = layout
                 .transaction_staging_path(&txid)
                 .join("rollback")
@@ -1259,7 +1264,7 @@ mod tests {
             let updated = read_transaction_metadata(&layout, &txid)
                 .expect("must read updated metadata")
                 .expect("metadata should exist");
-            assert_eq!(updated.status, "rolled_back", "status={status}");
+            assert_eq!(updated.status, "rolled_back", "status={token}");
             assert!(
                 read_active_transaction(&layout)
                     .expect("must read active transaction")
@@ -1291,7 +1296,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_268,
             snapshot_id: None,
         };
@@ -1407,7 +1412,7 @@ mod tests {
             version: 1,
             txid: "tx-uninstall-no-journal".to_string(),
             operation: "uninstall".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_267,
             snapshot_id: None,
         };
@@ -1440,7 +1445,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_267,
             snapshot_id: None,
         };
@@ -1534,7 +1539,7 @@ mod tests {
             version: 1,
             txid: "tx-old-failed".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_100,
             snapshot_id: None,
         };
@@ -1542,7 +1547,7 @@ mod tests {
             version: 1,
             txid: "tx-new-failed".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_200,
             snapshot_id: None,
         };
@@ -1612,7 +1617,7 @@ mod tests {
             version: 1,
             txid: txid.clone(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: current_unix_timestamp().expect("must read current timestamp"),
             snapshot_id: None,
         };
@@ -1684,7 +1689,7 @@ mod tests {
             version: 1,
             txid: txid.clone(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: current_unix_timestamp().expect("must read current timestamp"),
             snapshot_id: None,
         };
@@ -1756,7 +1761,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_260,
             snapshot_id: None,
         };
@@ -1784,7 +1789,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-normalized".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_261,
             snapshot_id: None,
         };
@@ -1812,7 +1817,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-empty-command".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_262,
             snapshot_id: None,
         };
@@ -1859,7 +1864,7 @@ mod tests {
             version: 1,
             txid: "tx-rolling-diagnostic".to_string(),
             operation: "upgrade".to_string(),
-            status: "rolling_back".to_string(),
+            status: TransactionStatus::RollingBack,
             started_at_unix: 1_771_001_700,
             snapshot_id: None,
         };
@@ -1887,7 +1892,7 @@ mod tests {
             version: 1,
             txid: "tx-failed-diagnostic".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_710,
             snapshot_id: None,
         };
@@ -1961,7 +1966,7 @@ mod tests {
             version: 1,
             txid: "tx-abc".to_string(),
             operation: "install".to_string(),
-            status: "paused".to_string(),
+            status: TransactionStatus::Planning,
             started_at_unix: 1_771_001_300,
             snapshot_id: None,
         };
@@ -1972,7 +1977,7 @@ mod tests {
             .expect_err("active transaction must include status context");
         assert!(
             err.to_string()
-                .contains("transaction tx-abc is active (reason=active_status status=paused)"),
+                .contains("transaction tx-abc is active (reason=active_status status=planning)"),
             "unexpected error: {err}"
         );
 
@@ -1988,7 +1993,7 @@ mod tests {
             version: 1,
             txid: "tx-committed".to_string(),
             operation: "install".to_string(),
-            status: "committed".to_string(),
+            status: TransactionStatus::Committed,
             started_at_unix: 1_771_001_360,
             snapshot_id: None,
         };
@@ -2017,7 +2022,7 @@ mod tests {
             version: 1,
             txid: "tx-planning".to_string(),
             operation: "install".to_string(),
-            status: "planning".to_string(),
+            status: TransactionStatus::Planning,
             started_at_unix: 1_771_001_420,
             snapshot_id: None,
         };
@@ -2057,7 +2062,7 @@ mod tests {
             version: 1,
             txid: "tx-rolled-back".to_string(),
             operation: "upgrade".to_string(),
-            status: "rolled_back".to_string(),
+            status: TransactionStatus::RolledBack,
             started_at_unix: 1_771_001_430,
             snapshot_id: None,
         };
@@ -2088,7 +2093,7 @@ mod tests {
         let tx = begin_transaction(&layout, "install", None, 1_771_001_500)
             .expect("must create transaction");
 
-        set_transaction_status(&layout, &tx.txid, "applying").expect("must update status");
+        set_transaction_status(&layout, &tx.txid, TransactionStatus::Applying).expect("must update status");
 
         let metadata = read_transaction_metadata(&layout, &tx.txid)
             .expect("must read metadata")
@@ -2164,7 +2169,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "rolling_back")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::RollingBack)?;
             Err(anyhow::anyhow!("rollback in progress"))
         })
         .expect_err("failing rollback transaction must return error");
@@ -2188,7 +2193,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "uninstall", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::RolledBack)?;
             Err(anyhow::anyhow!("post-rollback cleanup failed"))
         })
         .expect_err("rolled_back transaction should preserve status on error");
@@ -2212,7 +2217,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::RolledBack)?;
             Err(anyhow::anyhow!("cleanup warning"))
         })
         .expect_err("rolled_back error path should still return original error");
@@ -2241,7 +2246,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "install", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "committed")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::Committed)?;
             Err(anyhow::anyhow!("post-commit warning"))
         })
         .expect_err("committed transaction should preserve final status on error");
@@ -2271,7 +2276,7 @@ mod tests {
             version: 1,
             txid: "tx-applying".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_560,
             snapshot_id: None,
         };
@@ -2313,7 +2318,7 @@ mod tests {
             version: 1,
             txid: "tx-rolling-back".to_string(),
             operation: "install".to_string(),
-            status: "rolling_back".to_string(),
+            status: TransactionStatus::RollingBack,
             started_at_unix: 1_771_001_580,
             snapshot_id: None,
         };
@@ -2345,7 +2350,7 @@ mod tests {
             version: 1,
             txid: "tx-failed".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_620,
             snapshot_id: None,
         };
@@ -2368,7 +2373,7 @@ mod tests {
             version: 1,
             txid: "tx-rolling-back".to_string(),
             operation: "uninstall".to_string(),
-            status: "rolling_back".to_string(),
+            status: TransactionStatus::RollingBack,
             started_at_unix: 1_771_001_630,
             snapshot_id: None,
         };
@@ -2452,7 +2457,7 @@ mod tests {
             version: 1,
             txid: "tx-applying-health".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_645,
             snapshot_id: None,
         };
@@ -2475,7 +2480,7 @@ mod tests {
             version: 1,
             txid: "tx-active".to_string(),
             operation: "upgrade".to_string(),
-            status: "paused".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_640,
             snapshot_id: None,
         };
@@ -2498,7 +2503,7 @@ mod tests {
             version: 1,
             txid: "tx-committed".to_string(),
             operation: "install".to_string(),
-            status: "committed".to_string(),
+            status: TransactionStatus::Committed,
             started_at_unix: 1_771_001_660,
             snapshot_id: None,
         };
@@ -2521,7 +2526,7 @@ mod tests {
             version: 1,
             txid: "tx-planning".to_string(),
             operation: "install".to_string(),
-            status: "planning".to_string(),
+            status: TransactionStatus::Planning,
             started_at_unix: 1_771_001_670,
             snapshot_id: None,
         };
@@ -2544,7 +2549,7 @@ mod tests {
             version: 1,
             txid: "tx-stale".to_string(),
             operation: "upgrade".to_string(),
-            status: "committed".to_string(),
+            status: TransactionStatus::Committed,
             started_at_unix: 1_771_001_680,
             snapshot_id: None,
         };

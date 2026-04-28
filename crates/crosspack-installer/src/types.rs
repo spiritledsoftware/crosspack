@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallReceipt {
@@ -75,9 +76,59 @@ pub struct TransactionMetadata {
     pub version: u32,
     pub txid: String,
     pub operation: String,
-    pub status: String,
+    pub status: TransactionStatus,
     pub started_at_unix: u64,
     pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStatus {
+    Planning,
+    Applying,
+    Completed,
+    Committed,
+    RollingBack,
+    RolledBack,
+    Failed,
+}
+
+impl TransactionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Applying => "applying",
+            Self::Completed => "completed",
+            Self::Committed => "committed",
+            Self::RollingBack => "rolling_back",
+            Self::RolledBack => "rolled_back",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "planning" => Ok(Self::Planning),
+            "applying" => Ok(Self::Applying),
+            "completed" => Ok(Self::Completed),
+            "committed" => Ok(Self::Committed),
+            "rolling_back" => Ok(Self::RollingBack),
+            "rolled_back" => Ok(Self::RolledBack),
+            "failed" => Ok(Self::Failed),
+            _ => Err(anyhow!("invalid transaction status: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for TransactionStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for TransactionStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
