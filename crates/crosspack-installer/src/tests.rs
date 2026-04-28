@@ -35,6 +35,9 @@ use crate::native::{
 };
 use crate::receipts::parse_receipt;
 
+const TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-1\",\n  \"operation\": \"install\",\n  \"status\": \"applying\",\n  \"started_at_unix\": 1771001234,\n  \"snapshot_id\": \"git:abc123\"\n}\n";
+const TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-2\",\n  \"operation\": \"repair\",\n  \"status\": \"failed\",\n  \"started_at_unix\": 1771001235\n}\n";
+
 #[test]
 fn parse_old_receipt_shape() {
     let raw = "name=fd\nversion=10.2.0\ninstalled_at_unix=123\n";
@@ -110,6 +113,399 @@ fn receipt_unknown_install_mode_falls_back_to_managed() {
     let raw = "name=fd\nversion=10.2.0\ninstall_mode=native-v2\ninstalled_at_unix=123\n";
     let receipt = parse_receipt(raw).expect("must parse unknown install mode tokens");
     assert_eq!(receipt.install_mode, InstallMode::Managed);
+}
+
+fn legacy_installed_state_fixture(layout: &PrefixLayout) {
+    write_install_receipt(
+        layout,
+        &InstallReceipt {
+            name: "demo".to_string(),
+            version: "1.2.3".to_string(),
+            dependencies: vec!["shared@1.0.0".to_string()],
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: Some("https://example.test/demo-1.2.3.tar.zst".to_string()),
+            artifact_sha256: Some("abc123".to_string()),
+            cache_path: Some("/tmp/crosspack/demo-1.2.3.tar.zst".to_string()),
+            exposed_bins: vec!["demo".to_string()],
+            exposed_completions: vec!["packages/bash/demo--completions--demo.bash".to_string()],
+            snapshot_id: Some("git:1234567890abcdef".to_string()),
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 123,
+        },
+    )
+    .expect("must write legacy receipt fixture");
+    write_gui_exposure_state(
+        layout,
+        "demo",
+        &[GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "apps/demo.desktop".to_string(),
+        }],
+    )
+    .expect("must write legacy gui sidecar fixture");
+    write_gui_native_state(
+        layout,
+        "demo",
+        &[GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: "/tmp/demo.desktop".to_string(),
+        }],
+    )
+    .expect("must write legacy native sidecar fixture");
+    write_declared_services_state(
+        layout,
+        "demo",
+        &[ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo.service".to_string()),
+        }],
+    )
+    .expect("must write legacy services sidecar fixture");
+    write_integration_state(
+        layout,
+        "demo",
+        &[IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "demo".to_string(),
+            rel_path: "path/demo/demo".to_string(),
+        }],
+    )
+    .expect("must write legacy integrations sidecar fixture");
+}
+
+#[test]
+fn legacy_installed_state_fixture_writes_expected_files() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+
+    assert!(layout.receipt_path("demo").exists());
+    assert!(layout.gui_state_path("demo").exists());
+    assert!(layout.gui_native_state_path("demo").exists());
+    assert!(layout.declared_services_state_path("demo").exists());
+    assert!(layout.integration_state_path("demo").exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn legacy_installed_state_fixture_readers_load_all_sidecars() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+
+    let receipts = read_install_receipts(&layout).expect("must read receipts");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].name, "demo");
+    assert_eq!(receipts[0].version, "1.2.3");
+    assert_eq!(receipts[0].dependencies, vec!["shared@1.0.0"]);
+    assert_eq!(
+        receipts[0].target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert_eq!(receipts[0].exposed_bins, vec!["demo"]);
+    assert_eq!(
+        receipts[0].exposed_completions,
+        vec!["packages/bash/demo--completions--demo.bash"]
+    );
+    assert_eq!(receipts[0].install_reason, InstallReason::Root);
+
+    let gui_assets = read_gui_exposure_state(&layout, "demo").expect("must read gui state");
+    assert_eq!(
+        gui_assets,
+        vec![GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "apps/demo.desktop".to_string(),
+        }]
+    );
+
+    let native_records = read_gui_native_state(&layout, "demo").expect("must read native state");
+    assert_eq!(
+        native_records,
+        vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: "/tmp/demo.desktop".to_string(),
+        }]
+    );
+
+    let services = read_declared_services_state(&layout, "demo").expect("must read services");
+    assert_eq!(
+        services,
+        vec![ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo.service".to_string()),
+        }]
+    );
+
+    let integrations = read_integration_state(&layout, "demo").expect("must read integrations");
+    assert_eq!(
+        integrations,
+        vec![IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "demo".to_string(),
+            rel_path: "path/demo/demo".to_string(),
+        }]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_state_hydrates_legacy_receipt_and_sidecars() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+
+    let state = read_installed_package_state(&layout, "demo")
+        .expect("must read installed package state")
+        .expect("demo must be installed");
+    assert_eq!(state.version, "1.2.3");
+    assert_eq!(state.receipt.name, "demo");
+    assert_eq!(state.identity.profile, "default");
+    assert_eq!(
+        state.identity.target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert_eq!(state.identity.package, "demo");
+    assert_eq!(state.receipt.version, "1.2.3");
+    assert_eq!(state.receipt.dependencies, vec!["shared@1.0.0"]);
+    assert_eq!(
+        state.receipt.target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert_eq!(state.receipt.exposed_bins, vec!["demo"]);
+    assert_eq!(
+        state.receipt.exposed_completions,
+        vec!["packages/bash/demo--completions--demo.bash"]
+    );
+    assert_eq!(state.receipt.install_reason, InstallReason::Root);
+    assert_eq!(
+        state.gui_assets,
+        vec![GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "apps/demo.desktop".to_string(),
+        }]
+    );
+    assert_eq!(
+        state.native_gui_records,
+        vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: "/tmp/demo.desktop".to_string(),
+        }]
+    );
+    assert_eq!(
+        state.services,
+        vec![ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo.service".to_string()),
+        }]
+    );
+    assert_eq!(
+        state.integrations,
+        vec![IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "demo".to_string(),
+            rel_path: "path/demo/demo".to_string(),
+        }]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_identity_imports_legacy_receipt_and_builds_deterministic_key() {
+    let receipt = InstallReceipt {
+        name: "demo".to_string(),
+        version: "1.2.3".to_string(),
+        dependencies: Vec::new(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+
+    let identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+    assert_eq!(identity.profile, "default");
+    assert_eq!(identity.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
+    assert_eq!(identity.package, "demo");
+    assert_eq!(
+        identity.state_key(),
+        "default--x86_64-unknown-linux-gnu--demo"
+    );
+}
+
+#[test]
+fn installed_package_state_document_round_trip_prefers_document_over_legacy_sidecars() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    let state = read_installed_package_state(&layout, "demo")
+        .expect("must hydrate legacy state")
+        .expect("demo must be installed");
+
+    let path = write_installed_package_state(&layout, &state).expect("must write state document");
+    assert_eq!(
+        path,
+        layout.installed_identity_state_document_path(&state.identity)
+    );
+    assert!(layout.receipt_path("demo").exists());
+    assert!(path.exists());
+
+    write_declared_services_state(&layout, "demo", &[]).expect("must mutate legacy sidecar");
+
+    let loaded = read_installed_package_state(&layout, "demo")
+        .expect("must read installed package state")
+        .expect("demo must be installed");
+    assert_eq!(loaded.services, state.services);
+    assert_eq!(loaded.gui_assets, state.gui_assets);
+    assert_eq!(loaded.native_gui_records, state.native_gui_records);
+    assert_eq!(loaded.integrations, state.integrations);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_state_reads_legacy_name_keyed_document() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    let state = read_installed_package_state(&layout, "demo")
+        .expect("must hydrate legacy state")
+        .expect("demo must be installed");
+    let identity_path =
+        write_installed_package_state(&layout, &state).expect("must write document");
+    fs::rename(identity_path, layout.installed_state_document_path("demo"))
+        .expect("must move to legacy document path");
+
+    write_declared_services_state(&layout, "demo", &[]).expect("must mutate legacy sidecar");
+
+    let loaded = read_installed_package_state(&layout, "demo")
+        .expect("must read legacy document")
+        .expect("demo must be installed");
+    assert_eq!(loaded.services, state.services);
+    assert_eq!(loaded.identity, state.identity);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_all_installed_package_states_returns_sorted_states() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    let mut other = read_installed_package_state(&layout, "demo")
+        .expect("must hydrate legacy state")
+        .expect("demo must be installed");
+    other.receipt.name = "alpha".to_string();
+    other.receipt.version = "9.9.9".to_string();
+    other.identity = InstalledPackageIdentity::from_legacy_receipt(&other.receipt);
+    other.version = other.receipt.version.clone();
+    write_install_receipt(&layout, &other.receipt).expect("must write second receipt");
+    write_installed_package_state(&layout, &other).expect("must write second state document");
+
+    let states = read_all_installed_package_states(&layout).expect("must read all states");
+    let names = states
+        .iter()
+        .map(|state| state.receipt.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha", "demo"]);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn find_installed_states_by_package_name_returns_all_matching_identities() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    let mut linux = read_installed_package_state(&layout, "demo")
+        .expect("must hydrate legacy state")
+        .expect("demo must be installed");
+    linux.receipt.target = Some("x86_64-unknown-linux-gnu".to_string());
+    linux.identity = InstalledPackageIdentity::from_legacy_receipt(&linux.receipt);
+    write_installed_package_state(&layout, &linux).expect("must write linux state");
+
+    let mut macos = linux.clone();
+    macos.receipt.target = Some("aarch64-apple-darwin".to_string());
+    macos.identity = InstalledPackageIdentity::from_legacy_receipt(&macos.receipt);
+    write_installed_package_state(&layout, &macos).expect("must write macos state");
+
+    let states = find_installed_states_by_package_name(&layout, "demo")
+        .expect("must find states by package");
+    let keys = states
+        .iter()
+        .map(|state| state.identity.state_key())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        vec![
+            "default--aarch64-apple-darwin--demo".to_string(),
+            "default--x86_64-unknown-linux-gnu--demo".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_state_hydrates_with_empty_integrations_when_sidecar_missing() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    fs::remove_file(layout.integration_state_path("demo")).expect("must remove integrations state");
+
+    let state = read_installed_package_state(&layout, "demo")
+        .expect("must read installed package state")
+        .expect("demo must be installed");
+    assert!(state.integrations.is_empty());
+    assert_eq!(state.gui_assets.len(), 1);
+    assert_eq!(state.native_gui_records.len(), 1);
+    assert_eq!(state.services.len(), 1);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_state_returns_parse_error_for_malformed_gui_native_sidecar() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    fs::write(
+        layout.gui_native_state_path("demo"),
+        "uninstall_action=missing-fields\n",
+    )
+    .expect("must write malformed native sidecar");
+
+    let err = read_installed_package_state(&layout, "demo")
+        .expect_err("malformed native sidecar must fail hydration");
+    assert!(
+        err.to_string()
+            .contains("failed to parse native sidecar state"),
+        "unexpected error: {err:?}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
 }
 
 #[test]
@@ -212,7 +608,7 @@ fn write_transaction_metadata_and_active_file() {
         version: 1,
         txid: "tx-1771001234-000042".to_string(),
         operation: "upgrade".to_string(),
-        status: "applying".to_string(),
+        status: TransactionStatus::Applying,
         started_at_unix: 1_771_001_234,
         snapshot_id: Some("git:5f1b3d8a1f2a4d0e".to_string()),
     };
@@ -246,7 +642,7 @@ fn read_transaction_metadata_round_trip() {
         version: 1,
         txid: "tx-meta-1".to_string(),
         operation: "upgrade".to_string(),
-        status: "applying".to_string(),
+        status: TransactionStatus::Applying,
         started_at_unix: 1_771_001_240,
         snapshot_id: Some("git:abc123".to_string()),
     };
@@ -257,6 +653,141 @@ fn read_transaction_metadata_round_trip() {
         .expect("metadata should exist");
 
     assert_eq!(loaded, metadata);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_metadata_parses_compatibility_fixture_with_snapshot() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    fs::write(
+        layout.transaction_metadata_path("tx-fixture-1"),
+        TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT,
+    )
+    .expect("must write fixture");
+
+    let metadata = read_transaction_metadata(&layout, "tx-fixture-1")
+        .expect("must parse fixture")
+        .expect("fixture metadata must exist");
+    assert_eq!(
+        metadata,
+        TransactionMetadata {
+            version: 1,
+            txid: "tx-fixture-1".to_string(),
+            operation: "install".to_string(),
+            status: TransactionStatus::Applying,
+            started_at_unix: 1_771_001_234,
+            snapshot_id: Some("git:abc123".to_string()),
+        }
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_metadata_parses_compatibility_fixture_without_snapshot() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    fs::write(
+        layout.transaction_metadata_path("tx-fixture-2"),
+        TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT,
+    )
+    .expect("must write fixture");
+
+    let metadata = read_transaction_metadata(&layout, "tx-fixture-2")
+        .expect("must parse fixture")
+        .expect("fixture metadata must exist");
+    assert_eq!(metadata.snapshot_id, None);
+    assert_eq!(metadata.status, TransactionStatus::Failed);
+    assert_eq!(metadata.operation, "repair");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_metadata_parser_keeps_legacy_line_fallback() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let txid = "tx-legacy-line-shape";
+    let raw = "version: 1\ntxid: \"tx-legacy-line-shape\"\noperation: \"upgrade\"\nstatus: \"committed\"\nstarted_at_unix: 1771001236\nsnapshot_id: \"git:legacy\"\n";
+    fs::write(layout.transaction_metadata_path(txid), raw).expect("must write legacy fixture");
+
+    let metadata = read_transaction_metadata(&layout, txid)
+        .expect("must parse legacy fixture")
+        .expect("legacy fixture metadata must exist");
+    assert_eq!(metadata.txid, txid);
+    assert_eq!(metadata.status, TransactionStatus::Committed);
+    assert_eq!(metadata.snapshot_id.as_deref(), Some("git:legacy"));
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_status_parses_all_supported_tokens() {
+    let cases = [
+        ("planning", TransactionStatus::Planning),
+        ("applying", TransactionStatus::Applying),
+        ("completed", TransactionStatus::Completed),
+        ("committed", TransactionStatus::Committed),
+        ("rolling_back", TransactionStatus::RollingBack),
+        ("rolled_back", TransactionStatus::RolledBack),
+        ("failed", TransactionStatus::Failed),
+    ];
+
+    for (token, expected) in cases {
+        assert_eq!(
+            TransactionStatus::parse(token).expect("status should parse"),
+            expected
+        );
+        assert_eq!(expected.as_str(), token);
+    }
+}
+
+#[test]
+fn transaction_status_rejects_unknown_status() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let txid = "tx-unknown-status";
+    let raw = "{\n  \"version\": 1,\n  \"txid\": \"tx-unknown-status\",\n  \"operation\": \"install\",\n  \"status\": \"paused\",\n  \"started_at_unix\": 1771001250\n}\n";
+    fs::write(layout.transaction_metadata_path(txid), raw).expect("must write metadata file");
+
+    let err = read_transaction_metadata(&layout, txid)
+        .expect_err("unknown transaction status should be rejected");
+    let err_text = format!("{err:#}");
+    assert!(
+        err_text.contains("invalid transaction status: paused"),
+        "unexpected error: {err_text}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_status_serializes_current_metadata_shape() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let metadata = TransactionMetadata {
+        version: 1,
+        txid: "tx-status-shape".to_string(),
+        operation: "install".to_string(),
+        status: TransactionStatus::Completed,
+        started_at_unix: 1_771_001_260,
+        snapshot_id: None,
+    };
+
+    let metadata_path =
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+    let metadata_raw = fs::read_to_string(metadata_path).expect("must read metadata file");
+    assert_eq!(
+        metadata_raw,
+        "{\n  \"version\": 1,\n  \"txid\": \"tx-status-shape\",\n  \"operation\": \"install\",\n  \"status\": \"completed\",\n  \"started_at_unix\": 1771001260\n}\n"
+    );
 
     let _ = fs::remove_dir_all(layout.prefix());
 }
@@ -291,18 +822,68 @@ fn update_transaction_status_rewrites_metadata_status() {
         version: 1,
         txid: "tx-status-1".to_string(),
         operation: "install".to_string(),
-        status: "planning".to_string(),
+        status: TransactionStatus::Planning,
         started_at_unix: 1_771_001_250,
         snapshot_id: None,
     };
 
     write_transaction_metadata(&layout, &metadata).expect("must write metadata");
-    update_transaction_status(&layout, "tx-status-1", "applying").expect("must update status");
+    update_transaction_status(&layout, "tx-status-1", TransactionStatus::Applying)
+        .expect("must update status");
 
     let loaded = read_transaction_metadata(&layout, "tx-status-1")
         .expect("must read metadata")
         .expect("metadata should exist");
     assert_eq!(loaded.status, "applying");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_coordinator_begin_writes_metadata_and_active_marker() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let tx = TransactionCoordinator::new(&layout)
+        .begin("install", Some("git:abc123"), 1_771_001_500)
+        .expect("must begin transaction");
+
+    assert_eq!(tx.metadata.operation, "install");
+    assert_eq!(tx.metadata.status, TransactionStatus::Planning);
+    assert_eq!(tx.metadata.snapshot_id.as_deref(), Some("git:abc123"));
+    assert_eq!(
+        read_active_transaction(&layout)
+            .expect("must read active marker")
+            .as_deref(),
+        Some(tx.metadata.txid.as_str())
+    );
+    assert_eq!(
+        read_transaction_metadata(&layout, &tx.metadata.txid)
+            .expect("must read metadata")
+            .expect("metadata must exist"),
+        tx.metadata
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_coordinator_begin_rejects_existing_active_marker_and_cleans_metadata() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    set_active_transaction(&layout, "tx-existing").expect("must seed active marker");
+
+    let err = TransactionCoordinator::new(&layout)
+        .begin("upgrade", None, 1_771_001_501)
+        .expect_err("active marker should reject new transaction");
+    assert!(
+        err.to_string()
+            .contains("active transaction marker already exists"),
+        "unexpected error: {err}"
+    );
+    let rejected_txid = format!("tx-{}-{}", 1_771_001_501_u64, std::process::id());
+    assert!(!layout.transaction_metadata_path(&rejected_txid).exists());
+    assert!(!layout.transaction_staging_path(&rejected_txid).exists());
 
     let _ = fs::remove_dir_all(layout.prefix());
 }
@@ -2668,31 +3249,45 @@ fn uninstall_removes_package_dir_and_receipt() {
     )
     .expect("must write native gui state");
 
-    write_install_receipt(
+    let receipt = InstallReceipt {
+        name: "demo".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: None,
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: vec![completion_rel_path],
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    write_install_receipt(&layout, &receipt).expect("must write receipt");
+    let state_path = write_installed_package_state(
         &layout,
-        &InstallReceipt {
-            name: "demo".to_string(),
-            version: "1.0.0".to_string(),
-            dependencies: Vec::new(),
-            target: None,
-            artifact_url: None,
-            artifact_sha256: None,
-            cache_path: None,
-            exposed_bins: Vec::new(),
-            exposed_completions: vec![completion_rel_path],
-            snapshot_id: None,
-            install_mode: InstallMode::Managed,
-            install_reason: InstallReason::Root,
-            install_status: "installed".to_string(),
-            installed_at_unix: 1,
+        &InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&receipt),
+            version: receipt.version.clone(),
+            receipt: receipt.clone(),
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
         },
     )
-    .expect("must write receipt");
+    .expect("must write installed state document");
+    let legacy_state_path = layout.installed_state_document_path("demo");
+    fs::copy(&state_path, &legacy_state_path).expect("must seed legacy state document");
 
     let result = uninstall_package(&layout, "demo").expect("must uninstall");
     assert_eq!(result.status, UninstallStatus::Uninstalled);
     assert_eq!(result.version.as_deref(), Some("1.0.0"));
     assert!(!layout.receipt_path("demo").exists());
+    assert!(!state_path.exists());
+    assert!(!legacy_state_path.exists());
     assert!(!package_dir.exists());
     assert!(!completion_path.exists());
     assert!(!gui_path.exists());
@@ -3557,6 +4152,32 @@ fn build_test_layout_path_disambiguates_same_timestamp_calls() {
         first, second,
         "installer test layout paths must remain unique when timestamp granularity is coarse"
     );
+}
+
+#[test]
+fn installed_state_document_path_uses_installed_state_directory() {
+    let layout = PrefixLayout::new("/tmp/crosspack-test-prefix");
+
+    assert_eq!(
+        layout.installed_state_document_path("ripgrep"),
+        PathBuf::from("/tmp/crosspack-test-prefix/state/installed/ripgrep.state.json")
+    );
+}
+
+#[test]
+fn atomic_write_replaces_existing_file_contents() {
+    let layout = test_layout();
+    let path = layout.installed_state_document_path("tool");
+
+    crate::atomic_write::write_file_atomically(&path, b"old").expect("must write old content");
+    crate::atomic_write::write_file_atomically(&path, b"new").expect("must replace content");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("must read replaced file"),
+        "new"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
 }
 
 fn test_layout() -> PrefixLayout {

@@ -2,11 +2,13 @@
 
 This document defines v0.5 transactional behavior for Crosspack installs, upgrades, and uninstalls. It adds crash recovery, rollback support, and reproducibility metadata so state transitions are safe and auditable.
 
-**Status:** roadmap draft (non-GA). This document is a design target and does not change shipped GA guarantees until implementation is merged and released.
+**Status:** roadmap draft with partially shipped behavior. Current shipped typed transaction status, coordinator routing, rollback, repair, and doctor behavior is summarized in `docs/architecture.md` and `docs/install-flow.md`; this document remains the broader design target for recovery policy expansion.
 
 ## Current v0.3 Recovery Contract (shipped)
 
 Current shipped behavior already includes deterministic rollback snapshot/replay for package-level mutating steps.
+
+Current code also uses typed transaction status values and installer-owned coordinator APIs for transaction begin/status/active-marker cleanup.
 
 Snapshot payload captured per package:
 

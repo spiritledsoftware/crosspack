@@ -108,7 +108,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-upgrade-command".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_258,
             snapshot_id: None,
         };
@@ -137,7 +137,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-upgrade-dispatch".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_258,
             snapshot_id: None,
         };
@@ -177,7 +177,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-uninstall-command".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_259,
             snapshot_id: None,
         };
@@ -206,7 +206,7 @@ mod tests {
             version: 1,
             txid: "tx-needs-rollback".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_262,
             snapshot_id: None,
         };
@@ -274,7 +274,7 @@ mod tests {
             version: 1,
             txid: "tx-needs-repair".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_263,
             snapshot_id: None,
         };
@@ -342,7 +342,7 @@ mod tests {
             version: 1,
             txid: "tx-applying-repair".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_265,
             snapshot_id: None,
         };
@@ -410,7 +410,7 @@ mod tests {
             version: 1,
             txid: "tx-needs-replay".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_266,
             snapshot_id: None,
         };
@@ -562,7 +562,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_266,
             snapshot_id: None,
         };
@@ -775,7 +775,7 @@ mod tests {
                 version: 1,
                 txid: txid.to_string(),
                 operation: "upgrade".to_string(),
-                status: "failed".to_string(),
+                status: TransactionStatus::Failed,
                 started_at_unix: 1_771_001_307,
                 snapshot_id: None,
             },
@@ -854,7 +854,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_266,
             snapshot_id: None,
         };
@@ -985,7 +985,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_300,
             snapshot_id: None,
         };
@@ -1107,7 +1107,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_269,
             snapshot_id: None,
         };
@@ -1188,23 +1188,28 @@ mod tests {
 
     #[test]
     fn run_repair_command_recovers_interrupted_statuses_when_rollback_possible() {
-        for status in ["planning", "applying", "rolling_back", "failed"] {
+        for (status, token) in [
+            (TransactionStatus::Planning, "planning"),
+            (TransactionStatus::Applying, "applying"),
+            (TransactionStatus::RollingBack, "rolling_back"),
+            (TransactionStatus::Failed, "failed"),
+        ] {
             let layout = test_layout();
             layout.ensure_base_dirs().expect("must create dirs");
 
-            let txid = format!("tx-repair-{}", status.replace('_', "-"));
+            let txid = format!("tx-repair-{}", token.replace('_', "-"));
             let metadata = TransactionMetadata {
                 version: 1,
                 txid: txid.clone(),
                 operation: "install".to_string(),
-                status: status.to_string(),
+                status,
                 started_at_unix: 1_771_001_267,
                 snapshot_id: None,
             };
             write_transaction_metadata(&layout, &metadata).expect("must write metadata");
             set_active_transaction(&layout, &txid).expect("must set active marker");
 
-            let package_name = format!("pkg-{status}");
+            let package_name = format!("pkg-{token}");
             let snapshot_root = layout
                 .transaction_staging_path(&txid)
                 .join("rollback")
@@ -1259,7 +1264,7 @@ mod tests {
             let updated = read_transaction_metadata(&layout, &txid)
                 .expect("must read updated metadata")
                 .expect("metadata should exist");
-            assert_eq!(updated.status, "rolled_back", "status={status}");
+            assert_eq!(updated.status, "rolled_back", "status={token}");
             assert!(
                 read_active_transaction(&layout)
                     .expect("must read active transaction")
@@ -1291,7 +1296,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_268,
             snapshot_id: None,
         };
@@ -1407,7 +1412,7 @@ mod tests {
             version: 1,
             txid: "tx-uninstall-no-journal".to_string(),
             operation: "uninstall".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_267,
             snapshot_id: None,
         };
@@ -1440,7 +1445,7 @@ mod tests {
             version: 1,
             txid: txid.to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_267,
             snapshot_id: None,
         };
@@ -1534,7 +1539,7 @@ mod tests {
             version: 1,
             txid: "tx-old-failed".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_100,
             snapshot_id: None,
         };
@@ -1542,7 +1547,7 @@ mod tests {
             version: 1,
             txid: "tx-new-failed".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_200,
             snapshot_id: None,
         };
@@ -1612,7 +1617,7 @@ mod tests {
             version: 1,
             txid: txid.clone(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: current_unix_timestamp().expect("must read current timestamp"),
             snapshot_id: None,
         };
@@ -1684,7 +1689,7 @@ mod tests {
             version: 1,
             txid: txid.clone(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: current_unix_timestamp().expect("must read current timestamp"),
             snapshot_id: None,
         };
@@ -1756,7 +1761,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_260,
             snapshot_id: None,
         };
@@ -1784,7 +1789,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-normalized".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_261,
             snapshot_id: None,
         };
@@ -1812,7 +1817,7 @@ mod tests {
             version: 1,
             txid: "tx-blocked-empty-command".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_262,
             snapshot_id: None,
         };
@@ -1859,7 +1864,7 @@ mod tests {
             version: 1,
             txid: "tx-rolling-diagnostic".to_string(),
             operation: "upgrade".to_string(),
-            status: "rolling_back".to_string(),
+            status: TransactionStatus::RollingBack,
             started_at_unix: 1_771_001_700,
             snapshot_id: None,
         };
@@ -1887,7 +1892,7 @@ mod tests {
             version: 1,
             txid: "tx-failed-diagnostic".to_string(),
             operation: "upgrade".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_710,
             snapshot_id: None,
         };
@@ -1961,7 +1966,7 @@ mod tests {
             version: 1,
             txid: "tx-abc".to_string(),
             operation: "install".to_string(),
-            status: "paused".to_string(),
+            status: TransactionStatus::Planning,
             started_at_unix: 1_771_001_300,
             snapshot_id: None,
         };
@@ -1972,7 +1977,7 @@ mod tests {
             .expect_err("active transaction must include status context");
         assert!(
             err.to_string()
-                .contains("transaction tx-abc is active (reason=active_status status=paused)"),
+                .contains("transaction tx-abc is active (reason=active_status status=planning)"),
             "unexpected error: {err}"
         );
 
@@ -1988,7 +1993,7 @@ mod tests {
             version: 1,
             txid: "tx-committed".to_string(),
             operation: "install".to_string(),
-            status: "committed".to_string(),
+            status: TransactionStatus::Committed,
             started_at_unix: 1_771_001_360,
             snapshot_id: None,
         };
@@ -2017,7 +2022,7 @@ mod tests {
             version: 1,
             txid: "tx-planning".to_string(),
             operation: "install".to_string(),
-            status: "planning".to_string(),
+            status: TransactionStatus::Planning,
             started_at_unix: 1_771_001_420,
             snapshot_id: None,
         };
@@ -2057,7 +2062,7 @@ mod tests {
             version: 1,
             txid: "tx-rolled-back".to_string(),
             operation: "upgrade".to_string(),
-            status: "rolled_back".to_string(),
+            status: TransactionStatus::RolledBack,
             started_at_unix: 1_771_001_430,
             snapshot_id: None,
         };
@@ -2088,7 +2093,7 @@ mod tests {
         let tx = begin_transaction(&layout, "install", None, 1_771_001_500)
             .expect("must create transaction");
 
-        set_transaction_status(&layout, &tx.txid, "applying").expect("must update status");
+        set_transaction_status(&layout, &tx.txid, TransactionStatus::Applying).expect("must update status");
 
         let metadata = read_transaction_metadata(&layout, &tx.txid)
             .expect("must read metadata")
@@ -2164,7 +2169,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "rolling_back")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::RollingBack)?;
             Err(anyhow::anyhow!("rollback in progress"))
         })
         .expect_err("failing rollback transaction must return error");
@@ -2188,7 +2193,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "uninstall", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::RolledBack)?;
             Err(anyhow::anyhow!("post-rollback cleanup failed"))
         })
         .expect_err("rolled_back transaction should preserve status on error");
@@ -2212,7 +2217,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "upgrade", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "rolled_back")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::RolledBack)?;
             Err(anyhow::anyhow!("cleanup warning"))
         })
         .expect_err("rolled_back error path should still return original error");
@@ -2241,7 +2246,7 @@ mod tests {
         let mut txid = None;
         let err = execute_with_transaction(&layout, "install", None, |tx| {
             txid = Some(tx.txid.clone());
-            set_transaction_status(&layout, &tx.txid, "committed")?;
+            set_transaction_status(&layout, &tx.txid, TransactionStatus::Committed)?;
             Err(anyhow::anyhow!("post-commit warning"))
         })
         .expect_err("committed transaction should preserve final status on error");
@@ -2271,7 +2276,7 @@ mod tests {
             version: 1,
             txid: "tx-applying".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_560,
             snapshot_id: None,
         };
@@ -2313,7 +2318,7 @@ mod tests {
             version: 1,
             txid: "tx-rolling-back".to_string(),
             operation: "install".to_string(),
-            status: "rolling_back".to_string(),
+            status: TransactionStatus::RollingBack,
             started_at_unix: 1_771_001_580,
             snapshot_id: None,
         };
@@ -2345,7 +2350,7 @@ mod tests {
             version: 1,
             txid: "tx-failed".to_string(),
             operation: "install".to_string(),
-            status: "failed".to_string(),
+            status: TransactionStatus::Failed,
             started_at_unix: 1_771_001_620,
             snapshot_id: None,
         };
@@ -2368,7 +2373,7 @@ mod tests {
             version: 1,
             txid: "tx-rolling-back".to_string(),
             operation: "uninstall".to_string(),
-            status: "rolling_back".to_string(),
+            status: TransactionStatus::RollingBack,
             started_at_unix: 1_771_001_630,
             snapshot_id: None,
         };
@@ -2452,7 +2457,7 @@ mod tests {
             version: 1,
             txid: "tx-applying-health".to_string(),
             operation: "install".to_string(),
-            status: "applying".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_645,
             snapshot_id: None,
         };
@@ -2475,7 +2480,7 @@ mod tests {
             version: 1,
             txid: "tx-active".to_string(),
             operation: "upgrade".to_string(),
-            status: "paused".to_string(),
+            status: TransactionStatus::Applying,
             started_at_unix: 1_771_001_640,
             snapshot_id: None,
         };
@@ -2498,7 +2503,7 @@ mod tests {
             version: 1,
             txid: "tx-committed".to_string(),
             operation: "install".to_string(),
-            status: "committed".to_string(),
+            status: TransactionStatus::Committed,
             started_at_unix: 1_771_001_660,
             snapshot_id: None,
         };
@@ -2521,7 +2526,7 @@ mod tests {
             version: 1,
             txid: "tx-planning".to_string(),
             operation: "install".to_string(),
-            status: "planning".to_string(),
+            status: TransactionStatus::Planning,
             started_at_unix: 1_771_001_670,
             snapshot_id: None,
         };
@@ -2544,7 +2549,7 @@ mod tests {
             version: 1,
             txid: "tx-stale".to_string(),
             operation: "upgrade".to_string(),
-            status: "committed".to_string(),
+            status: TransactionStatus::Committed,
             started_at_unix: 1_771_001_680,
             snapshot_id: None,
         };
@@ -3540,6 +3545,39 @@ ripgrep-legacy = "*"
 
         let reason = determine_install_reason("ripgrep", &[], &[], &replacement);
         assert_eq!(reason, InstallReason::Root);
+    }
+
+    #[test]
+    fn install_plan_application_skips_missing_replacement_receipts() {
+        let plan = crosspack_resolver::InstallPlan {
+            operation: crosspack_resolver::PlanOperation::Upgrade,
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            packages: vec![crosspack_resolver::PlannedPackage {
+                name: "ripgrep".to_string(),
+                version: "14.1.1".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                install_reason: "root".to_string(),
+                dependencies: Vec::new(),
+            }],
+            removals: Vec::new(),
+            replacements: vec![crosspack_resolver::PlannedReplacement {
+                removed_name: "ripgrep-legacy".to_string(),
+                removed_version: "13.0.0".to_string(),
+                replacement_name: "ripgrep".to_string(),
+                replacement_version: "14.1.1".to_string(),
+                requirement: "<14.0.0".to_string(),
+            }],
+            transitions: Vec::new(),
+            provider_substitutions: Vec::new(),
+            conflicts: Vec::new(),
+            risk_flags: Vec::new(),
+        };
+
+        let application = install_plan_application_for_package(&plan, "ripgrep", &[], &[])
+            .expect("missing replacement receipt should not abort plan application");
+
+        assert!(application.replacement_receipts.is_empty());
+        assert_eq!(application.install_reason, InstallReason::Root);
     }
 
     #[test]
@@ -4893,6 +4931,43 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn lifecycle_boundary_types_construct_and_render_lines() {
+        let install = InstallCommandRequest {
+            spec: "ripgrep@^14".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            dry_run: true,
+            force_redownload: false,
+            build_from_source: false,
+            explain: true,
+            provider_overrides: vec!["compiler=clang".to_string()],
+        };
+        assert_eq!(install.spec, "ripgrep@^14");
+        assert!(install.dry_run);
+
+        let upgrade = UpgradeCommandRequest {
+            spec: Some("ripgrep@^14".to_string()),
+            target: None,
+            dry_run: true,
+            force_redownload: true,
+            build_from_source: false,
+            explain: false,
+            provider_overrides: Vec::new(),
+        };
+        assert_eq!(upgrade.spec.as_deref(), Some("ripgrep@^14"));
+        assert!(upgrade.force_redownload);
+
+        let uninstall = UninstallCommandRequest {
+            name: "ripgrep".to_string(),
+        };
+        assert_eq!(uninstall.name, "ripgrep");
+
+        let lines = render_lifecycle_outcome(LifecycleCommandOutcome::Lines(vec![
+            "ok".to_string(),
+        ]));
+        assert_eq!(lines, vec!["ok".to_string()]);
+    }
+
+    #[test]
     fn render_transaction_preview_lines_is_deterministic_and_script_friendly() {
         let preview = build_transaction_preview(
             "upgrade",
@@ -4940,6 +5015,167 @@ ripgrep-legacy = "*"
         );
         assert_eq!(lines[5], "change_replace from=old-tool@0.9.0 to=tool@2.0.0");
         assert_eq!(lines[6], "change_transition name=tool from=1.0.0 to=2.0.0");
+    }
+
+    #[test]
+    fn install_plan_preview_lines_match_existing_transaction_preview_output() {
+        let preview = build_transaction_preview(
+            "upgrade",
+            &[
+                PlannedPackageChange {
+                    name: "tool".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "2.0.0".to_string(),
+                    old_version: Some("1.0.0".to_string()),
+                    replacement_removals: vec![PlannedRemoval {
+                        name: "old-tool".to_string(),
+                        version: "0.9.0".to_string(),
+                    }],
+                },
+                PlannedPackageChange {
+                    name: "dep".to_string(),
+                    target: "x86_64-unknown-linux-gnu".to_string(),
+                    new_version: "1.1.0".to_string(),
+                    old_version: None,
+                    replacement_removals: Vec::new(),
+                },
+            ],
+        );
+        let plan = install_plan_from_transaction_preview(
+            PlanOperation::Upgrade,
+            Some("x86_64-unknown-linux-gnu".to_string()),
+            &preview,
+        );
+
+        assert_eq!(
+            render_install_plan_preview_lines(&plan, TransactionPreviewMode::DryRun, None),
+            render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None)
+        );
+    }
+
+    #[test]
+    fn install_transaction_preview_dry_run_output_matches_lifecycle_contract() {
+        let resolved = vec![resolved_install("tool", "1.2.3")];
+        let planned = build_planned_package_changes(&resolved, &[])
+            .expect("install dry-run planned changes must build");
+        let preview = build_transaction_preview("install", &planned);
+
+        let lines = render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "transaction_preview operation=install mode=dry-run".to_string(),
+                "transaction_summary adds=1 removals=0 replacements=0 transitions=0".to_string(),
+                "risk_flags=adds".to_string(),
+                "change_add name=tool version=1.2.3 target=x86_64-unknown-linux-gnu".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_named_transaction_preview_dry_run_output_matches_lifecycle_contract() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "tool"
+version = "2.0.0"
+
+[replaces]
+old-tool = "<1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/tool-2.0.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+        let resolved = vec![ResolvedInstall {
+            artifact: manifest.artifacts[0].clone(),
+            manifest,
+            resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+            archive_type: ArchiveType::TarZst,
+            source_build: None,
+        }];
+        let receipts = vec![
+            install_receipt("tool", "1.0.0", InstallReason::Root, &[]),
+            install_receipt("old-tool", "0.9.0", InstallReason::Root, &[]),
+        ];
+        let planned = build_planned_package_changes(&resolved, &receipts)
+            .expect("upgrade dry-run planned changes must build");
+        let preview = build_transaction_preview("upgrade", &planned);
+
+        let lines = render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "transaction_preview operation=upgrade mode=dry-run".to_string(),
+                "transaction_summary adds=0 removals=1 replacements=1 transitions=1".to_string(),
+                "risk_flags=removals,replacements,version-transitions".to_string(),
+                "change_remove name=old-tool version=0.9.0 reason=replacement".to_string(),
+                "change_replace from=old-tool@0.9.0 to=tool@2.0.0".to_string(),
+                "change_transition name=tool from=1.0.0 to=2.0.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_all_transaction_preview_dry_run_output_matches_lifecycle_contract() {
+        let resolved = vec![resolved_install("app", "2.0.0"), resolved_install("dep", "1.1.0")];
+        let receipts = vec![install_receipt(
+            "app",
+            "1.0.0",
+            InstallReason::Root,
+            &["dep@1.0.0"],
+        )];
+        let planned = build_planned_package_changes(&resolved, &receipts)
+            .expect("upgrade-all dry-run planned changes must build");
+        let preview = build_transaction_preview("upgrade", &planned);
+
+        let lines = render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "transaction_preview operation=upgrade mode=dry-run".to_string(),
+                "transaction_summary adds=1 removals=0 replacements=0 transitions=1".to_string(),
+                "risk_flags=adds,multi-package-transaction,version-transitions".to_string(),
+                "change_add name=dep version=1.1.0 target=x86_64-unknown-linux-gnu".to_string(),
+                "change_transition name=app from=1.0.0 to=2.0.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn uninstall_blocked_by_dependents_transaction_preview_contract_matches_lifecycle_output() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("app-a", "1.0.0", InstallReason::Root, &["shared@1.0.0"]),
+        )
+        .expect("must seed first root receipt");
+        write_install_receipt(
+            &layout,
+            &install_receipt("app-b", "1.0.0", InstallReason::Root, &["shared@1.0.0"]),
+        )
+        .expect("must seed second root receipt");
+        write_install_receipt(
+            &layout,
+            &install_receipt("shared", "1.0.0", InstallReason::Dependency, &[]),
+        )
+        .expect("must seed shared dependency receipt");
+
+        let result = uninstall_package(&layout, "shared").expect("uninstall should be blocked");
+        let lines = format_uninstall_messages(&result);
+
+        assert_eq!(
+            lines,
+            vec!["cannot uninstall shared 1.0.0: still required by roots app-a, app-b".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
@@ -6156,6 +6392,21 @@ old-cc = "<2.0.0"
                 "[WARN] No installed packages".to_string(),
                 "[..] Run `crosspack install <name>` to install a package.".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn render_list_command_outcome_preserves_receipt_order_and_plain_output() {
+        let receipts = vec![
+            install_receipt("zeta", "2.0.0", InstallReason::Root, &[]),
+            install_receipt("alpha", "1.0.0", InstallReason::Root, &[]),
+        ];
+
+        let outcome = build_list_command_outcome(receipts);
+
+        assert_eq!(
+            render_list_command_outcome(outcome),
+            vec!["zeta 2.0.0".to_string(), "alpha 1.0.0".to_string()]
         );
     }
 
@@ -7611,6 +7862,128 @@ sha256 = "abc"
         );
     }
 
+    #[test]
+    fn install_resolved_writes_legacy_receipt_and_state_document() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut resolved = resolved_install("demo-bin", "1.0.0");
+        resolved.archive_type = ArchiveType::Bin;
+        resolved.artifact.url = "https://example.test/demo-bin".to_string();
+        resolved.artifact.sha256 = EMPTY_SHA256.to_string();
+        resolved.artifact.archive = Some("bin".to_string());
+        resolved.artifact.binaries = vec![crosspack_core::ArtifactBinary {
+            name: "demo-bin".to_string(),
+            path: "demo-bin".to_string(),
+        }];
+        let cache_path = resolved_artifact_cache_path(
+            &layout,
+            &resolved.manifest.name,
+            &resolved.manifest.version.to_string(),
+            &resolved.resolved_target,
+            resolved.archive_type,
+            &resolved.artifact.url,
+        )
+        .expect("must resolve bin cache path");
+        std::fs::create_dir_all(cache_path.parent().expect("cache path must have parent"))
+            .expect("must create cache dir");
+        std::fs::write(cache_path, b"").expect("must seed cached bin artifact");
+        let install_plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(resolved.resolved_target.clone()),
+            std::slice::from_ref(&resolved),
+            &[],
+            &[RootInstallRequest {
+                name: "demo-bin".to_string(),
+                requirement: VersionReq::STAR,
+            }],
+        );
+
+        install_resolved(
+            &layout,
+            &resolved,
+            &["demo-bin@1.0.0".to_string()],
+            InstallResolvedPlanContext {
+                root_names: &["demo-bin".to_string()],
+                install_plan: &install_plan,
+                planned_dependency_overrides: &HashMap::new(),
+            },
+            InstallResolvedOptions {
+                snapshot_id: None,
+                force_redownload: false,
+                interaction_policy: InstallInteractionPolicy::default(),
+                install_progress_mode: InstallProgressMode::Disabled,
+            },
+            None,
+        )
+        .expect("install should succeed");
+
+        assert!(layout.receipt_path("demo-bin").exists());
+        assert!(layout
+            .installed_identity_state_document_path(&InstalledPackageIdentity {
+                profile: "default".to_string(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                package: "demo-bin".to_string(),
+            })
+            .exists());
+        let state = read_installed_package_state(&layout, "demo-bin")
+            .expect("must read installed state")
+            .expect("demo-bin must be installed");
+        assert_eq!(state.receipt.name, "demo-bin");
+        assert_eq!(state.receipt.exposed_bins, vec!["demo-bin"]);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ambiguous_installed_package_name_blocks_uninstall_with_identity_guidance() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut linux_receipt = install_receipt("demo", "1.0.0", InstallReason::Root, &[]);
+        linux_receipt.target = Some("x86_64-unknown-linux-gnu".to_string());
+        let linux_state = InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&linux_receipt),
+            version: linux_receipt.version.clone(),
+            receipt: linux_receipt,
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
+        };
+        write_installed_package_state(&layout, &linux_state).expect("must write linux state");
+
+        let mut macos_receipt = install_receipt("demo", "1.0.0", InstallReason::Root, &[]);
+        macos_receipt.target = Some("aarch64-apple-darwin".to_string());
+        let macos_state = InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&macos_receipt),
+            version: macos_receipt.version.clone(),
+            receipt: macos_receipt,
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
+        };
+        write_installed_package_state(&layout, &macos_state).expect("must write macos state");
+
+        let err = run_uninstall_command(&layout, "demo".to_string())
+            .expect_err("ambiguous package should fail before uninstall");
+        let message = err.to_string();
+        assert!(
+            message.contains(
+                "installed package name 'demo' is ambiguous; this command cannot disambiguate target/profile yet"
+            ),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("default--aarch64-apple-darwin--demo")
+                && message.contains("default--x86_64-unknown-linux-gnu--demo"),
+            "error should list matching identities: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn install_reports_actionable_error_for_unsupported_exe_host() {
@@ -7623,13 +7996,23 @@ sha256 = "abc"
         resolved.artifact.sha256 = EMPTY_SHA256.to_string();
 
         seed_cached_artifact(&layout, &resolved, b"");
+        let install_plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(resolved.resolved_target.clone()),
+            std::slice::from_ref(&resolved),
+            &[],
+            &[],
+        );
 
         let err = install_resolved(
             &layout,
             &resolved,
             &[],
-            &[],
-            &HashMap::new(),
+            InstallResolvedPlanContext {
+                root_names: &[],
+                install_plan: &install_plan,
+                planned_dependency_overrides: &HashMap::new(),
+            },
             InstallResolvedOptions {
                 snapshot_id: None,
                 force_redownload: false,
@@ -7659,13 +8042,23 @@ sha256 = "abc"
         resolved.artifact.sha256 = EMPTY_SHA256.to_string();
 
         seed_cached_artifact(&layout, &resolved, b"");
+        let install_plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(resolved.resolved_target.clone()),
+            std::slice::from_ref(&resolved),
+            &[],
+            &[],
+        );
 
         let err = install_resolved(
             &layout,
             &resolved,
             &[],
-            &[],
-            &HashMap::new(),
+            InstallResolvedPlanContext {
+                root_names: &[],
+                install_plan: &install_plan,
+                planned_dependency_overrides: &HashMap::new(),
+            },
             InstallResolvedOptions {
                 snapshot_id: None,
                 force_redownload: false,
@@ -8589,6 +8982,30 @@ sha256 = "abc"
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarZst,
             source_build: None,
+        }
+    }
+
+    fn install_receipt(
+        name: &str,
+        version: &str,
+        install_reason: InstallReason,
+        dependencies: &[&str],
+    ) -> InstallReceipt {
+        InstallReceipt {
+            name: name.to_string(),
+            version: version.to_string(),
+            dependencies: dependencies.iter().map(|dependency| dependency.to_string()).collect(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
         }
     }
 

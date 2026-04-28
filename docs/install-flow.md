@@ -13,55 +13,61 @@
    - merge dependency constraints transitively,
    - apply pin constraints to root and transitive packages,
    - produce dependency-first install order.
-3. Select install plan for each resolved package for requested target (`--target` or host triple):
+3. Build typed `InstallPlan` data from the resolved graph and installed summaries:
+   - planned adds, removals, replacements, and version transitions,
+   - provider substitutions and conflict/replacement explainability evidence,
+   - replacement root-intent preservation for packages that replace an installed root.
+4. Select install plan for each resolved package for requested target (`--target` or host triple):
    - binary artifact path when target artifact is available,
    - source-build path when `--build-from-source` is set and validated `source_build` metadata is present.
-4. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `bin`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`.
+5. Determine artifact kind (`artifact.archive` or infer from URL suffix): `zip`, `tar.gz`, `tar.zst`, `bin`, `msi`, `dmg`, `appimage`, `exe`, `pkg`, `msix`, `appx`.
    - Extensionless final URL path segments infer to `bin`.
    - Pre-1.0 scope reset: `deb` and `rpm` are removed from the supported artifact contract and are rejected.
-5. For each resolved package, resolve cache path at:
+6. For each resolved package, resolve cache path at:
    - `<prefix>/cache/artifacts/<name>/<version>/<target>/artifact.<ext>`
-6. Download selected payload if needed (or if `--force-redownload`):
+7. Download selected payload if needed (or if `--force-redownload`):
    - binary artifact URL for binary installs,
    - `source_build.url` for source installs.
    - backend selection env var: `CROSSPACK_DOWNLOAD_BACKEND` supports `in-process` (default) or `external`.
    - default (`in-process`) uses reqwest with bounded retry (up to 3 attempts) and falls back to external backend on failure.
    - `external` forces external downloader backend and skips in-process attempts.
    - external backend is cross-platform (`curl`/`wget` with Windows PowerShell support).
-7. Verify SHA-256 before execution:
+8. Verify SHA-256 before execution:
    - binary installs verify artifact bytes against manifest `sha256`,
    - source installs verify source archive bytes against `source_build.archive_sha256`.
-8. Stage payload into temporary state directory with deterministic adapters:
+9. Stage payload into temporary state directory with deterministic adapters:
    - managed mode adapters: `zip`, `tar.gz`, `tar.zst` (archive extraction), `bin` (copy payload using the cached file name; requires `strip_components=0` and no `artifact_root`), `dmg` (attach/copy/detach extraction on macOS), `appimage` (copy payload as `artifact.appimage` on Linux; requires `strip_components=0` and no `artifact_root`),
    - native mode defaults: `pkg` on macOS, `exe`/`msi`/`msix`/`appx` on Windows,
    - native mode still uses deterministic non-UI adapter execution; vendor installer fallback is not attempted.
-9. Source-build path (when selected):
+10. Source-build path (when selected):
     - extract source archive,
     - run deterministic `build_commands`,
     - run deterministic `install_commands`,
     - install staged output from `CROSSPACK_STAGE_DIR` into `<prefix>/pkgs/<name>/<version>/`.
-10. Apply `strip_components` during staging copy where supported (binary artifact path).
-11. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
-12. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
-13. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
-14. Expose declared binaries:
+11. Apply `strip_components` during staging copy where supported (binary artifact path).
+12. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
+13. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
+14. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
+15. Apply replacement handoff from `InstallPlan` removals/replacements, failing before mutation if replaced packages are still required by remaining roots.
+16. Expose declared binaries:
     - Unix: symlink `<prefix>/bin/<name>` to installed package path.
     - Windows: write `<prefix>/bin/<name>.cmd` shim to installed package path.
-15. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
-16. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
-17. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
+17. Expose declared package completion files to `<prefix>/share/completions/packages/<shell>/`.
+18. Expose declared GUI application assets under `<prefix>/share/gui/` (launcher + handler metadata).
+19. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
     - macOS `.app` registration uses bundle-copy deployment and tries `/Applications/<App>.app` before `~/Applications/<App>.app`.
     - Existing unmanaged app bundles at either macOS destination are not overwritten; registration emits warnings and continues.
-18. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
-19. Persist declared manifest services to `<prefix>/state/installed/<name>.services` for service-command lookup.
-20. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+20. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
+21. Persist declared manifest services to `<prefix>/state/installed/<name>.services` for service-command lookup.
+22. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
       - persist `install_mode=managed|native` from artifact-kind defaults,
       - set `install_reason=root` for requested roots,
       - set `install_reason=dependency` for transitive-only packages,
       - preserve existing `install_reason=root` when upgrading already-rooted packages.
-21. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
+23. Write a versioned installed-state document keyed by imported identity while preserving legacy receipt/sidecar files.
+24. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
-`crosspack install --dry-run` executes the same planning and emits deterministic, script-friendly preview lines:
+`crosspack install --dry-run` executes the same planning and renders deterministic, script-friendly preview lines from typed `InstallPlan` data:
 - `transaction_preview operation=... mode=dry-run`
 - `transaction_summary adds=... removals=... replacements=... transitions=...`
 - `risk_flags=...`
@@ -100,7 +106,7 @@ Mutating commands (`install`, `upgrade`, `uninstall`, `rollback`, `repair`, `sel
 
 ## Transaction Phases and Recovery (current shipped behavior)
 
-Crosspack executes install/upgrade/uninstall mutations under a transaction state machine with persisted status markers:
+Crosspack executes install/upgrade/uninstall mutations under a transaction state machine with persisted typed status markers coordinated by installer-owned transaction APIs:
 
 1. `planning`: resolve graph, artifact selection, and preflight checks.
 2. `applying`: stage/extract/apply package and binary mutations.
@@ -119,13 +125,9 @@ Operator commands:
 - `repair`: clear stale markers and reconcile recoverable interrupted state.
 - `doctor`: surface transaction health and prefix diagnostics.
 
-## Planned Dependency Policy Extensions (non-GA)
+## Dependency Policy Behavior
 
-The following install-flow extensions are planned in `docs/dependency-policy-spec.md` and are not GA behavior yet:
-
-- provider capability selection (`provides`) with deterministic tie-breaks,
-- conflict gating (`conflicts`) during resolution/apply preflight,
-- replacement semantics (`replaces`) with ownership-aware binary handoff.
+Current behavior includes provider capability selection (`provides`), conflict gating (`conflicts`) during resolution/preflight, and replacement semantics (`replaces`) with ownership-aware binary handoff. `docs/dependency-policy-spec.md` remains the broader design reference for future policy expansion.
 
 ## Receipt Fields
 
@@ -141,6 +143,7 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
 - `state/installed/<name>.gui-native` sidecar (optional): native uninstall action records (`key`, `kind`, `path`) for deterministic uninstall/rollback cleanup.
 - `state/installed/<name>.services` sidecar (optional): declared service records (`name`, optional `native_id`) for deterministic service command routing.
+- `state/installed/default--<target-or-host>--<name>.state.json` document (optional current format): versioned hydrated package state including identity, receipt, GUI/native/service/integration projections; legacy `<name>.state.json` documents and receipt sidecars remain readable.
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)
@@ -214,10 +217,10 @@ The following install-flow extensions are planned in `docs/dependency-policy-spe
 
 ## Forward-Looking Extensions
 
-The current flow describes shipped behavior on the current release line. Planned extensions are specified in:
+The current flow describes shipped behavior on the current release line. Broader design references are specified in:
 
-- Dependency policy and replacement/provider behavior: `docs/dependency-policy-spec.md`.
-- Transaction journal, rollback, and crash recovery behavior: `docs/transaction-rollback-spec.md`.
+- Dependency policy expansion beyond current provider/conflict/replacement behavior: `docs/dependency-policy-spec.md`.
+- Transaction journal, rollback, and crash recovery policy expansion beyond current shipped rollback/repair behavior: `docs/transaction-rollback-spec.md`.
 
 Related docs:
 - Runtime architecture: `docs/architecture.md`

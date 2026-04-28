@@ -3,6 +3,8 @@ use crosspack_core::{ArchiveType, ArtifactCompletionShell};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::InstalledPackageIdentity;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixLayout {
     prefix: PathBuf,
@@ -92,6 +94,19 @@ impl PrefixLayout {
 
     pub fn receipt_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.receipt"))
+    }
+
+    pub fn installed_state_document_path(&self, package_name: &str) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{package_name}.state.json"))
+    }
+
+    pub fn installed_identity_state_document_path(
+        &self,
+        identity: &InstalledPackageIdentity,
+    ) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.state.json", identity.state_key()))
     }
 
     pub fn gui_state_path(&self, name: &str) -> PathBuf {

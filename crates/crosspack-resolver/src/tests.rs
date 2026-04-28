@@ -6,6 +6,48 @@ use semver::VersionReq;
 use super::*;
 
 #[test]
+fn install_plan_constructor_preserves_package_details() {
+    let plan = InstallPlan {
+        operation: PlanOperation::Install,
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        packages: vec![PlannedPackage {
+            name: "ripgrep".to_string(),
+            version: "14.1.1".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            install_reason: "requested".to_string(),
+            dependencies: vec!["pcre2".to_string()],
+        }],
+        removals: Vec::new(),
+        replacements: Vec::new(),
+        transitions: Vec::new(),
+        provider_substitutions: Vec::new(),
+        conflicts: Vec::new(),
+        risk_flags: vec!["downloads_executable".to_string()],
+    };
+
+    assert_eq!(
+        plan,
+        InstallPlan {
+            operation: PlanOperation::Install,
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            packages: vec![PlannedPackage {
+                name: "ripgrep".to_string(),
+                version: "14.1.1".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                install_reason: "requested".to_string(),
+                dependencies: vec!["pcre2".to_string()],
+            }],
+            removals: Vec::new(),
+            replacements: Vec::new(),
+            transitions: Vec::new(),
+            provider_substitutions: Vec::new(),
+            conflicts: Vec::new(),
+            risk_flags: vec!["downloads_executable".to_string()],
+        }
+    );
+}
+
+#[test]
 fn selects_latest_matching_version() {
     let one = manifest(
         r#"
@@ -433,6 +475,14 @@ sha256 = "compiler"
             .name,
         "compiler"
     );
+
+    let plan = plan_from_resolved_graph(PlanOperation::Install, None, &graph);
+    assert!(
+        plan.packages
+            .iter()
+            .any(|package| package.name == "compiler"),
+        "direct package should be visible in install plan: {plan:?}"
+    );
 }
 
 #[test]
@@ -498,6 +548,12 @@ sha256 = "gcc"
             .expect("provider for compiler must be selected")
             .name,
         "gcc"
+    );
+
+    let plan = plan_from_resolved_graph(PlanOperation::Install, None, &graph);
+    assert!(
+        plan.packages.iter().any(|package| package.name == "gcc"),
+        "selected provider should be visible in install plan: {plan:?}"
     );
 }
 
@@ -631,6 +687,149 @@ sha256 = "bar"
             .contains("no compatible dependency graph found"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn install_plan_represents_selected_graph_conflict_evidence() {
+    let foo = manifest(
+        r#"
+name = "foo"
+version = "1.0.0"
+[conflicts]
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+    );
+    let bar = manifest(
+        r#"
+name = "bar"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#,
+    );
+    let graph = ResolvedGraph {
+        manifests: BTreeMap::from([("foo".to_string(), foo), ("bar".to_string(), bar)]),
+        install_order: vec!["bar".to_string(), "foo".to_string()],
+    };
+
+    let plan = plan_from_resolved_graph_with_installed(
+        PlanOperation::Install,
+        Some("x86_64-unknown-linux-gnu".to_string()),
+        &graph,
+        &[],
+        &["foo".to_string()],
+    );
+
+    assert_eq!(
+        plan.conflicts,
+        vec![ConflictConstraint {
+            selected: "foo".to_string(),
+            selected_version: "1.0.0".to_string(),
+            conflicts_with: "bar".to_string(),
+            requirement: "*".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn install_plan_represents_installed_conflict_evidence() {
+    let foo = manifest(
+        r#"
+name = "foo"
+version = "1.0.0"
+[conflicts]
+bar = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#,
+    );
+    let graph = ResolvedGraph {
+        manifests: BTreeMap::from([("foo".to_string(), foo)]),
+        install_order: vec!["foo".to_string()],
+    };
+    let installed = vec![InstalledPackageSummary {
+        name: "bar".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        install_reason: "root".to_string(),
+    }];
+
+    let plan = plan_from_resolved_graph_with_installed(
+        PlanOperation::Install,
+        Some("x86_64-unknown-linux-gnu".to_string()),
+        &graph,
+        &installed,
+        &["foo".to_string()],
+    );
+
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|conflict| conflict.conflicts_with == "bar" && conflict.requirement == "*"),
+        "installed conflict should be visible as plan evidence: {plan:?}"
+    );
+}
+
+#[test]
+fn install_plan_represents_replacement_removal_and_root_preservation() {
+    let clang = manifest(
+        r#"
+name = "clang"
+version = "18.0.0"
+[replaces]
+old-cc = "<2.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/clang-18.0.0.tar.zst"
+sha256 = "clang"
+"#,
+    );
+    let graph = ResolvedGraph {
+        manifests: BTreeMap::from([("clang".to_string(), clang)]),
+        install_order: vec!["clang".to_string()],
+    };
+    let installed = vec![InstalledPackageSummary {
+        name: "old-cc".to_string(),
+        version: "1.5.0".to_string(),
+        dependencies: Vec::new(),
+        install_reason: "root".to_string(),
+    }];
+
+    let plan = plan_from_resolved_graph_with_installed(
+        PlanOperation::Install,
+        Some("x86_64-unknown-linux-gnu".to_string()),
+        &graph,
+        &installed,
+        &[],
+    );
+
+    assert_eq!(
+        plan.removals,
+        vec![PlannedRemoval {
+            name: "old-cc".to_string(),
+            version: "1.5.0".to_string(),
+            reason: "replacement".to_string(),
+        }]
+    );
+    assert_eq!(
+        plan.replacements,
+        vec![PlannedReplacement {
+            removed_name: "old-cc".to_string(),
+            removed_version: "1.5.0".to_string(),
+            replacement_name: "clang".to_string(),
+            replacement_version: "18.0.0".to_string(),
+            requirement: "<2.0.0".to_string(),
+        }]
+    );
+    assert_eq!(plan.packages[0].install_reason, "root");
 }
 
 fn manifest(raw: &str) -> PackageManifest {

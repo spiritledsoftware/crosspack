@@ -2,7 +2,7 @@
 
 This document defines v0.4 dependency-policy behavior for Crosspack. It introduces package conflict policy, package replacement policy, and virtual capability providers while preserving deterministic resolution.
 
-**Status:** roadmap draft (non-GA). This document is a design target and does not change shipped GA guarantees until implementation is merged and released.
+**Status:** roadmap draft with partially shipped behavior. Current shipped provider/conflict/replacement behavior is summarized in `docs/architecture.md` and `docs/install-flow.md`; this document remains the broader design target for policy expansion.
 
 ## Scope
 

@@ -158,17 +158,17 @@ fn run_cli(cli: Cli) -> Result<()> {
                 for package in &resolved {
                     validate_install_preflight_for_resolved(&layout, package, &receipts)?;
                 }
-                let planned_changes = build_planned_package_changes(&resolved, &receipts)?;
-                let preview = build_transaction_preview("install", &planned_changes);
-                let explainability = if explain {
-                    Some(build_dependency_policy_explainability(
-                        &resolved, &receipts, &roots,
-                    )?)
-                } else {
-                    None
-                };
-                for line in render_dry_run_output_lines(
-                    &preview,
+                let install_plan = build_install_plan_from_resolved(
+                    PlanOperation::Install,
+                    target.clone(),
+                    &resolved,
+                    &receipts,
+                    &roots,
+                );
+                let explainability =
+                    explain.then(|| dependency_policy_explainability_from_install_plan(&install_plan));
+                for line in render_install_plan_preview_lines(
+                    &install_plan,
                     TransactionPreviewMode::DryRun,
                     explainability.as_ref(),
                 ) {
@@ -206,6 +206,13 @@ fn run_cli(cli: Cli) -> Result<()> {
                 journal_seq += 1;
 
                 let planned_dependency_overrides = build_planned_dependency_overrides(&resolved);
+                let install_plan = build_install_plan_from_resolved(
+                    PlanOperation::Install,
+                    target.clone(),
+                    &resolved,
+                    &read_install_receipts(&layout)?,
+                    &roots,
+                );
 
                 for package in &resolved {
                     let snapshot_path =
@@ -247,8 +254,11 @@ fn run_cli(cli: Cli) -> Result<()> {
                         &layout,
                         package,
                         &dependencies,
-                        &root_names,
-                        &planned_dependency_overrides,
+                        InstallResolvedPlanContext {
+                            root_names: &root_names,
+                            install_plan: &install_plan,
+                            planned_dependency_overrides: &planned_dependency_overrides,
+                        },
                         InstallResolvedOptions {
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload,
@@ -325,11 +335,15 @@ fn run_cli(cli: Cli) -> Result<()> {
             run_uninstall_command(&layout, name)?;
         }
         Commands::List => {
+            let _request = ListCommandRequest;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            let receipts = read_install_receipts(&layout)?;
-            let output_style = current_output_style();
-            for line in format_installed_list_lines_for_style(output_style, &receipts) {
+            let receipts = read_all_installed_package_states(&layout)?
+                .into_iter()
+                .map(|state| state.receipt)
+                .collect();
+            let outcome = build_list_command_outcome(receipts);
+            for line in render_list_command_outcome(outcome) {
                 println!("{line}");
             }
         }

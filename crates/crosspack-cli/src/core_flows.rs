@@ -468,28 +468,43 @@ fn begin_transaction(
     snapshot_id: Option<&str>,
     started_at_unix: u64,
 ) -> Result<TransactionMetadata> {
-    let txid = format!("tx-{started_at_unix}-{}", std::process::id());
-    let metadata = TransactionMetadata {
-        version: 1,
-        txid,
-        operation: operation.to_string(),
-        status: "planning".to_string(),
-        started_at_unix,
-        snapshot_id: snapshot_id.map(ToOwned::to_owned),
-    };
-
-    write_transaction_metadata(layout, &metadata)?;
-    if let Err(err) = set_active_transaction(layout, &metadata.txid) {
-        let _ = remove_file_if_exists(&layout.transaction_metadata_path(&metadata.txid));
-        let _ = std::fs::remove_dir_all(layout.transaction_staging_path(&metadata.txid));
-        return Err(err);
-    }
-
-    Ok(metadata)
+    Ok(TransactionCoordinator::new(layout)
+        .begin(operation, snapshot_id, started_at_unix)?
+        .metadata)
 }
 
-fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: &str) -> Result<()> {
-    update_transaction_status(layout, txid, status)
+fn set_transaction_status(layout: &PrefixLayout, txid: &str, status: TransactionStatus) -> Result<()> {
+    let coordinator = TransactionCoordinator::new(layout);
+    match status {
+        TransactionStatus::Planning => update_transaction_status(layout, txid, status),
+        TransactionStatus::Applying => coordinator.mark_applying(txid),
+        TransactionStatus::Completed => update_transaction_status(layout, txid, status),
+        TransactionStatus::Committed => coordinator.mark_committed(txid),
+        TransactionStatus::RollingBack => coordinator.mark_rolling_back(txid),
+        TransactionStatus::RolledBack => coordinator.mark_rolled_back(txid),
+        TransactionStatus::Failed => coordinator.mark_failed(txid),
+    }
+}
+
+fn resolve_unambiguous_installed_package(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Option<InstalledPackageState>> {
+    let matches = find_installed_states_by_package_name(layout, package_name)?;
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => {
+            let identities = matches
+                .iter()
+                .map(|state| state.identity.state_key())
+                .collect::<Vec<_>>()
+                .join(",");
+            Err(anyhow!(
+                "installed package name '{package_name}' is ambiguous; this command cannot disambiguate target/profile yet; matches={identities}"
+            ))
+        }
+    }
 }
 
 fn execute_with_transaction<F>(
@@ -505,10 +520,10 @@ where
     let tx = begin_transaction(layout, operation, snapshot_id, started_at_unix)?;
 
     let run_result = (|| -> Result<()> {
-        set_transaction_status(layout, &tx.txid, "applying")?;
+        set_transaction_status(layout, &tx.txid, TransactionStatus::Applying)?;
         run(&tx)?;
-        set_transaction_status(layout, &tx.txid, "committed")?;
-        clear_active_transaction(layout)?;
+        set_transaction_status(layout, &tx.txid, TransactionStatus::Committed)?;
+        TransactionCoordinator::new(layout).clear_active()?;
         Ok(())
     })();
 
@@ -520,27 +535,41 @@ where
                 .flatten()
                 .map(|metadata| metadata.status);
             let preserve_recovery_state = current_status
-                .as_deref()
+                .as_ref()
                 .map(|status| {
                     matches!(
                         status,
-                        "rolling_back" | "rolled_back" | "committed" | "failed"
+                        TransactionStatus::RollingBack
+                            | TransactionStatus::RolledBack
+                            | TransactionStatus::Completed
+                            | TransactionStatus::Committed
+                            | TransactionStatus::Failed
                     )
                 })
                 .unwrap_or(false);
-            if matches!(current_status.as_deref(), Some("rolled_back" | "committed")) {
-                let _ = clear_active_transaction(layout);
+            if matches!(
+                current_status,
+                Some(
+                    TransactionStatus::RolledBack
+                        | TransactionStatus::Completed
+                        | TransactionStatus::Committed
+                )
+            ) {
+                let _ = TransactionCoordinator::new(layout).clear_active();
             }
             if !preserve_recovery_state {
-                let _ = set_transaction_status(layout, &tx.txid, "failed");
+                let _ = set_transaction_status(layout, &tx.txid, TransactionStatus::Failed);
             }
             Err(err)
         }
     }
 }
 
-fn status_allows_stale_marker_cleanup(status: &str) -> bool {
-    matches!(status, "committed" | "rolled_back")
+fn status_allows_stale_marker_cleanup(status: &TransactionStatus) -> bool {
+    matches!(
+        status,
+        TransactionStatus::Completed | TransactionStatus::Committed | TransactionStatus::RolledBack
+    )
 }
 
 fn normalize_command_token(command: &str) -> String {
@@ -583,15 +612,15 @@ fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
 
         if let Some(metadata) = metadata {
             if status_allows_stale_marker_cleanup(&metadata.status) {
-                clear_active_transaction(layout)?;
+                TransactionCoordinator::new(layout).clear_active()?;
                 return Ok(());
             }
-            if metadata.status == "rolling_back" {
+            if metadata.status == TransactionStatus::RollingBack {
                 return Err(anyhow!(
                     "transaction {txid} requires repair (reason=rolling_back)"
                 ));
             }
-            if metadata.status == "failed" {
+            if metadata.status == TransactionStatus::Failed {
                 return Err(anyhow!(
                     "transaction {txid} requires repair (reason=failed)"
                 ));
@@ -644,14 +673,14 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
         ));
     };
 
-    if metadata.status == "rolling_back" {
+    if metadata.status == TransactionStatus::RollingBack {
         return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
     }
-    if metadata.status == "failed" {
+    if metadata.status == TransactionStatus::Failed {
         return Ok(format!("transaction: failed {txid} (reason=failed)"));
     }
     if status_allows_stale_marker_cleanup(&metadata.status) {
-        clear_active_transaction(layout)?;
+        TransactionCoordinator::new(layout).clear_active()?;
         return Ok("transaction: clean".to_string());
     }
 
@@ -1051,6 +1080,218 @@ fn build_transaction_preview(
     }
 }
 
+fn build_install_plan_from_resolved(
+    operation: PlanOperation,
+    target: Option<String>,
+    resolved: &[ResolvedInstall],
+    receipts: &[InstallReceipt],
+    roots: &[RootInstallRequest],
+) -> InstallPlan {
+    let manifests = resolved
+        .iter()
+        .map(|package| (package.manifest.name.clone(), package.manifest.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let install_order = resolved
+        .iter()
+        .map(|package| package.manifest.name.clone())
+        .collect::<Vec<_>>();
+    let graph = ResolvedGraph {
+        manifests,
+        install_order,
+    };
+    let installed = receipts
+        .iter()
+        .map(|receipt| InstalledPackageSummary {
+            name: receipt.name.clone(),
+            version: receipt.version.clone(),
+            dependencies: receipt.dependencies.clone(),
+            install_reason: if receipt.install_reason == InstallReason::Root {
+                "root".to_string()
+            } else {
+                "dependency".to_string()
+            },
+        })
+        .collect::<Vec<_>>();
+    let root_names = roots.iter().map(|root| root.name.clone()).collect::<Vec<_>>();
+
+    let mut plan = plan_from_resolved_graph_with_installed(operation, target, &graph, &installed, &root_names);
+    let resolved_targets = resolved
+        .iter()
+        .map(|package| {
+            (
+                package.manifest.name.as_str(),
+                package.resolved_target.as_str(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for package in &mut plan.packages {
+        if let Some(target) = resolved_targets.get(package.name.as_str()) {
+            package.target = (*target).to_string();
+        }
+    }
+    plan
+}
+
+fn merge_install_plans(
+    operation: PlanOperation,
+    target: Option<String>,
+    plans: &[InstallPlan],
+) -> InstallPlan {
+    let mut packages = BTreeMap::new();
+    let mut removals = BTreeMap::new();
+    let mut replacements = BTreeMap::new();
+    let mut transitions = BTreeMap::new();
+    let mut provider_substitutions = BTreeMap::new();
+    let mut conflicts = BTreeMap::new();
+
+    for plan in plans {
+        for package in &plan.packages {
+            packages.insert(package.name.clone(), package.clone());
+        }
+        for removal in &plan.removals {
+            removals.insert(removal.name.clone(), removal.clone());
+        }
+        for replacement in &plan.replacements {
+            replacements.insert(replacement.removed_name.clone(), replacement.clone());
+        }
+        for transition in &plan.transitions {
+            transitions.insert(transition.name.clone(), transition.clone());
+        }
+        for substitution in &plan.provider_substitutions {
+            provider_substitutions.insert(
+                (substitution.capability.clone(), substitution.provider.clone()),
+                substitution.clone(),
+            );
+        }
+        for conflict in &plan.conflicts {
+            conflicts.insert(
+                (conflict.selected.clone(), conflict.conflicts_with.clone()),
+                conflict.clone(),
+            );
+        }
+    }
+
+    let packages = packages.into_values().collect::<Vec<_>>();
+    let removals = removals.into_values().collect::<Vec<_>>();
+    let replacements = replacements.into_values().collect::<Vec<_>>();
+    let transitions = transitions.into_values().collect::<Vec<_>>();
+    let risk_flags = install_plan_risk_flags(&packages, &removals, &replacements, &transitions);
+
+    InstallPlan {
+        operation,
+        target,
+        packages,
+        removals,
+        replacements,
+        transitions,
+        provider_substitutions: provider_substitutions.into_values().collect(),
+        conflicts: conflicts.into_values().collect(),
+        risk_flags,
+    }
+}
+
+fn install_plan_risk_flags(
+    packages: &[InstallPlanPackage],
+    removals: &[InstallPlanRemoval],
+    replacements: &[InstallPlanReplacement],
+    transitions: &[InstallPlanTransition],
+) -> Vec<String> {
+    let mut risk_flags = BTreeSet::new();
+    if !packages.is_empty() {
+        risk_flags.insert("adds".to_string());
+    }
+    if !removals.is_empty() {
+        risk_flags.insert("removals".to_string());
+    }
+    if !replacements.is_empty() {
+        risk_flags.insert("replacements".to_string());
+    }
+    if !transitions.is_empty() {
+        risk_flags.insert("version-transitions".to_string());
+    }
+    let mut mutating_packages = packages
+        .iter()
+        .map(|package| package.name.clone())
+        .chain(transitions.iter().map(|transition| transition.name.clone()))
+        .collect::<BTreeSet<_>>();
+    mutating_packages.extend(
+        replacements
+            .iter()
+            .map(|replacement| replacement.replacement_name.clone()),
+    );
+    if mutating_packages.len() > 1 {
+        risk_flags.insert("multi-package-transaction".to_string());
+    }
+    if risk_flags.is_empty() {
+        risk_flags.insert("none".to_string());
+    }
+    risk_flags.into_iter().collect()
+}
+
+fn install_plan_operation_name(operation: &PlanOperation) -> &'static str {
+    match operation {
+        PlanOperation::Install => "install",
+        PlanOperation::Upgrade => "upgrade",
+        PlanOperation::Uninstall => "uninstall",
+        PlanOperation::BundleApply => "bundle-apply",
+    }
+}
+
+#[cfg(test)]
+fn install_plan_from_transaction_preview(
+    operation: PlanOperation,
+    target: Option<String>,
+    preview: &TransactionPreview,
+) -> InstallPlan {
+    InstallPlan {
+        operation,
+        target,
+        packages: preview
+            .adds
+            .iter()
+            .map(|add| InstallPlanPackage {
+                name: add.name.clone(),
+                version: add.version.clone(),
+                target: add.target.clone(),
+                install_reason: "add".to_string(),
+                dependencies: Vec::new(),
+            })
+            .collect(),
+        removals: preview
+            .removals
+            .iter()
+            .map(|removal| InstallPlanRemoval {
+                name: removal.name.clone(),
+                version: removal.version.clone(),
+                reason: "replacement".to_string(),
+            })
+            .collect(),
+        replacements: preview
+            .replacements
+            .iter()
+            .map(|replacement| InstallPlanReplacement {
+                removed_name: replacement.from_name.clone(),
+                removed_version: replacement.from_version.clone(),
+                replacement_name: replacement.to_name.clone(),
+                replacement_version: replacement.to_version.clone(),
+                requirement: String::new(),
+            })
+            .collect(),
+        transitions: preview
+            .transitions
+            .iter()
+            .map(|transition| InstallPlanTransition {
+                name: transition.name.clone(),
+                from_version: transition.from_version.clone(),
+                to_version: transition.to_version.clone(),
+            })
+            .collect(),
+        provider_substitutions: Vec::new(),
+        conflicts: Vec::new(),
+        risk_flags: preview.risk_flags.clone(),
+    }
+}
+
 fn render_transaction_preview_lines(
     preview: &TransactionPreview,
     mode: TransactionPreviewMode,
@@ -1101,91 +1342,113 @@ fn render_transaction_preview_lines(
     lines
 }
 
+fn render_install_plan_preview_lines(
+    plan: &InstallPlan,
+    mode: TransactionPreviewMode,
+    explainability: Option<&DependencyPolicyExplainability>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "transaction_preview operation={} mode={}",
+        install_plan_operation_name(&plan.operation),
+        mode.as_str()
+    ));
+    lines.push(format!(
+        "transaction_summary adds={} removals={} replacements={} transitions={}",
+        plan.packages.len(),
+        plan.removals.len(),
+        plan.replacements.len(),
+        plan.transitions.len()
+    ));
+    lines.push(format!("risk_flags={}", plan.risk_flags.join(",")));
+
+    for package in &plan.packages {
+        lines.push(format!(
+            "change_add name={} version={} target={}",
+            package.name, package.version, package.target
+        ));
+    }
+    for removal in &plan.removals {
+        lines.push(format!(
+            "change_remove name={} version={} reason={}",
+            removal.name, removal.version, removal.reason
+        ));
+    }
+    for replacement in &plan.replacements {
+        lines.push(format!(
+            "change_replace from={}@{} to={}@{}",
+            replacement.removed_name,
+            replacement.removed_version,
+            replacement.replacement_name,
+            replacement.replacement_version
+        ));
+    }
+    for transition in &plan.transitions {
+        lines.push(format!(
+            "change_transition name={} from={} to={}",
+            transition.name, transition.from_version, transition.to_version
+        ));
+    }
+
+    if let Some(explainability) = explainability {
+        lines.extend(render_dependency_policy_explainability_lines(
+            explainability,
+        ));
+    }
+
+    lines
+}
+
 fn build_dependency_policy_explainability(
     resolved: &[ResolvedInstall],
     receipts: &[InstallReceipt],
     roots: &[RootInstallRequest],
 ) -> Result<DependencyPolicyExplainability> {
-    let mut explainability = DependencyPolicyExplainability::default();
+    let plan = build_install_plan_from_resolved(
+        PlanOperation::Install,
+        resolved.first().map(|package| package.resolved_target.clone()),
+        resolved,
+        receipts,
+        roots,
+    );
+    Ok(dependency_policy_explainability_from_install_plan(&plan))
+}
 
-    let mut requested_tokens = roots
-        .iter()
-        .map(|root| root.name.clone())
-        .collect::<BTreeSet<_>>();
-    for package in resolved {
-        requested_tokens.extend(package.manifest.dependencies.keys().cloned());
-    }
-
-    for capability in requested_tokens {
-        let mut provider_candidates = resolved
+fn dependency_policy_explainability_from_install_plan(
+    plan: &InstallPlan,
+) -> DependencyPolicyExplainability {
+    DependencyPolicyExplainability {
+        provider_substitutions: plan
+            .provider_substitutions
             .iter()
-            .filter(|package| {
-                package.manifest.name == capability
-                    || package
-                        .manifest
-                        .provides
-                        .iter()
-                        .any(|provided| provided == &capability)
+            .map(|substitution| PolicyProviderSubstitution {
+                capability: substitution.capability.clone(),
+                selected_package: substitution.provider.clone(),
+                selected_version: substitution.provider_version.clone(),
             })
-            .collect::<Vec<_>>();
-
-        if provider_candidates
+            .collect(),
+        replacement_removals: plan
+            .replacements
             .iter()
-            .any(|candidate| candidate.manifest.name == capability)
-        {
-            continue;
-        }
-
-        provider_candidates.sort_by(|left, right| {
-            left.manifest
-                .name
-                .cmp(&right.manifest.name)
-                .then_with(|| right.manifest.version.cmp(&left.manifest.version))
-        });
-
-        for selected in provider_candidates {
-            explainability
-                .provider_substitutions
-                .push(PolicyProviderSubstitution {
-                    capability: capability.clone(),
-                    selected_package: selected.manifest.name.clone(),
-                    selected_version: selected.manifest.version.to_string(),
-                });
-        }
+            .map(|replacement| PolicyReplacementRemoval {
+                selected_package: replacement.replacement_name.clone(),
+                selected_version: replacement.replacement_version.clone(),
+                removed_package: replacement.removed_name.clone(),
+                removed_version: replacement.removed_version.clone(),
+                replacement_requirement: replacement.requirement.clone(),
+            })
+            .collect(),
+        conflict_constraints: plan
+            .conflicts
+            .iter()
+            .map(|conflict| PolicyConflictConstraint {
+                selected_package: conflict.selected.clone(),
+                selected_version: conflict.selected_version.clone(),
+                conflict_package: conflict.conflicts_with.clone(),
+                conflict_requirement: conflict.requirement.clone(),
+            })
+            .collect(),
     }
-
-    let mut ordered_resolved = resolved.iter().collect::<Vec<_>>();
-    ordered_resolved.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
-
-    for package in &ordered_resolved {
-        let replacement_receipts = collect_replacement_receipts(&package.manifest, receipts)?;
-        for replacement in replacement_receipts {
-            if let Some(requirement) = package.manifest.replaces.get(&replacement.name) {
-                explainability
-                    .replacement_removals
-                    .push(PolicyReplacementRemoval {
-                        selected_package: package.manifest.name.clone(),
-                        selected_version: package.manifest.version.to_string(),
-                        removed_package: replacement.name,
-                        removed_version: replacement.version,
-                        replacement_requirement: requirement.to_string(),
-                    });
-            }
-        }
-
-        for (conflict_package, conflict_requirement) in &package.manifest.conflicts {
-            explainability
-                .conflict_constraints
-                .push(PolicyConflictConstraint {
-                    selected_package: package.manifest.name.clone(),
-                    selected_version: package.manifest.version.to_string(),
-                    conflict_package: conflict_package.clone(),
-                    conflict_requirement: conflict_requirement.to_string(),
-                });
-        }
-    }
-
-    Ok(explainability)
 }
 
 fn merge_dependency_policy_explainability(
@@ -1444,12 +1707,64 @@ struct SourceBuildJournal<'a> {
     seq: &'a mut u64,
 }
 
+struct InstallResolvedPlanContext<'a> {
+    root_names: &'a [String],
+    install_plan: &'a InstallPlan,
+    planned_dependency_overrides: &'a HashMap<String, Vec<String>>,
+}
+
+struct InstallPlanApplication {
+    replacement_receipts: Vec<InstallReceipt>,
+    install_reason: InstallReason,
+}
+
+fn install_plan_application_for_package(
+    plan: &InstallPlan,
+    package_name: &str,
+    receipts: &[InstallReceipt],
+    root_names: &[String],
+) -> Result<InstallPlanApplication> {
+    let replacement_receipts = plan
+        .replacements
+        .iter()
+        .filter(|replacement| replacement.replacement_name == package_name)
+        .filter_map(|replacement| {
+            receipts
+                .iter()
+                .find(|receipt| receipt.name == replacement.removed_name)
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    let planned_install_reason = plan
+        .packages
+        .iter()
+        .find(|package| package.name == package_name)
+        .map(|package| package.install_reason.as_str());
+
+    let install_reason = if root_names.iter().any(|root| root == package_name)
+        || planned_install_reason == Some("root")
+        || replacement_receipts
+            .iter()
+            .any(|receipt| receipt.install_reason == InstallReason::Root)
+    {
+        InstallReason::Root
+    } else if let Some(existing) = receipts.iter().find(|receipt| receipt.name == package_name) {
+        existing.install_reason.clone()
+    } else {
+        InstallReason::Dependency
+    };
+
+    Ok(InstallPlanApplication {
+        replacement_receipts,
+        install_reason,
+    })
+}
+
 fn install_resolved(
     layout: &PrefixLayout,
     resolved: &ResolvedInstall,
     dependency_receipts: &[String],
-    root_names: &[String],
-    planned_dependency_overrides: &HashMap<String, Vec<String>>,
+    plan_context: InstallResolvedPlanContext<'_>,
     options: InstallResolvedOptions<'_>,
     mut source_build_journal: Option<&mut SourceBuildJournal<'_>>,
 ) -> Result<InstallOutcome> {
@@ -1464,8 +1779,12 @@ fn install_resolved(
 
     let receipts = read_install_receipts(layout)?;
     validate_install_preflight_for_resolved(layout, resolved, &receipts)?;
-
-    let replacement_receipts = collect_replacement_receipts(&resolved.manifest, &receipts)?;
+    let plan_application = install_plan_application_for_package(
+        plan_context.install_plan,
+        &resolved.manifest.name,
+        &receipts,
+        plan_context.root_names,
+    )?;
 
     let exposed_bins = collect_declared_binaries(&resolved.artifact)?;
     let declared_completions = collect_declared_completions(&resolved.artifact)?;
@@ -1568,7 +1887,11 @@ fn install_resolved(
     };
 
     if let Err(err) =
-        apply_replacement_handoff(layout, &replacement_receipts, planned_dependency_overrides)
+        apply_replacement_handoff(
+            layout,
+            &plan_application.replacement_receipts,
+            plan_context.planned_dependency_overrides,
+        )
     {
         let _ = std::fs::remove_dir_all(&install_root);
         return Err(err);
@@ -1662,17 +1985,24 @@ fn install_resolved(
         exposed_completions: exposed_completions.clone(),
         snapshot_id: options.snapshot_id.map(ToOwned::to_owned),
         install_mode: selected_install_mode,
-        install_reason: determine_install_reason(
-            &resolved.manifest.name,
-            root_names,
-            &receipts,
-            &replacement_receipts,
-        ),
+        install_reason: plan_application.install_reason,
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
     write_declared_services_state(layout, &resolved.manifest.name, &resolved.manifest.services)?;
     let receipt_path = write_install_receipt(layout, &receipt)?;
+    write_installed_package_state(
+        layout,
+        &InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&receipt),
+            version: receipt.version.clone(),
+            receipt: receipt.clone(),
+            gui_assets: exposed_gui_assets.clone(),
+            native_gui_records: native_gui_records.clone(),
+            services: resolved.manifest.services.clone(),
+            integrations: exposed_integrations.clone(),
+        },
+    )?;
     progress.update("complete", 7, None);
     progress.finish();
 
@@ -2372,6 +2702,7 @@ fn build_planned_dependency_overrides(
         .collect()
 }
 
+#[cfg(test)]
 fn determine_install_reason(
     package_name: &str,
     root_names: &[String],
