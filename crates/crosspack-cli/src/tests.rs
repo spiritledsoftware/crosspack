@@ -6322,6 +6322,21 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn render_list_command_outcome_preserves_receipt_order_and_plain_output() {
+        let receipts = vec![
+            install_receipt("zeta", "2.0.0", InstallReason::Root, &[]),
+            install_receipt("alpha", "1.0.0", InstallReason::Root, &[]),
+        ];
+
+        let outcome = build_list_command_outcome(receipts);
+
+        assert_eq!(
+            render_list_command_outcome(outcome),
+            vec!["zeta 2.0.0".to_string(), "alpha 1.0.0".to_string()]
+        );
+    }
+
+    #[test]
     fn format_registry_add_lines_matches_source_management_spec() {
         let lines = format_registry_add_lines(
             "official",

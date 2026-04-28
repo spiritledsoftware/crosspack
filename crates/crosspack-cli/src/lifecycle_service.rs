@@ -26,6 +26,18 @@ struct UninstallCommandRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ListCommandRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListCommandOutcome {
+    receipts: Vec<InstallReceipt>,
+}
+
+fn build_list_command_outcome(receipts: Vec<InstallReceipt>) -> ListCommandOutcome {
+    ListCommandOutcome { receipts }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LifecycleCommandOutcome {
     Lines(Vec<String>),
 }

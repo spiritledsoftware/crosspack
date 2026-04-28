@@ -325,11 +325,12 @@ fn run_cli(cli: Cli) -> Result<()> {
             run_uninstall_command(&layout, name)?;
         }
         Commands::List => {
+            let _request = ListCommandRequest;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             let receipts = read_install_receipts(&layout)?;
-            let output_style = current_output_style();
-            for line in format_installed_list_lines_for_style(output_style, &receipts) {
+            let outcome = build_list_command_outcome(receipts);
+            for line in render_list_command_outcome(outcome) {
                 println!("{line}");
             }
         }
