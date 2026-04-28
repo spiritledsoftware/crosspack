@@ -1,6 +1,7 @@
 mod artifact;
 mod exposure;
 mod fs_utils;
+mod installed_state;
 mod layout;
 mod native;
 mod pins;
@@ -20,6 +21,7 @@ pub use exposure::{
     write_integration_state,
 };
 pub use fs_utils::remove_file_if_exists;
+pub use installed_state::{read_installed_package_state, InstalledPackageState};
 pub use layout::{default_user_prefix, PrefixLayout};
 pub use native::{
     clear_gui_native_state, clear_native_sidecar_state, read_all_gui_native_states,

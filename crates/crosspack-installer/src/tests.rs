@@ -254,6 +254,106 @@ fn legacy_installed_state_fixture_readers_load_all_sidecars() {
 }
 
 #[test]
+fn installed_package_state_hydrates_legacy_receipt_and_sidecars() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+
+    let state = read_installed_package_state(&layout, "demo")
+        .expect("must read installed package state")
+        .expect("demo must be installed");
+    assert_eq!(state.version, "1.2.3");
+    assert_eq!(state.receipt.name, "demo");
+    assert_eq!(state.receipt.version, "1.2.3");
+    assert_eq!(state.receipt.dependencies, vec!["shared@1.0.0"]);
+    assert_eq!(
+        state.receipt.target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert_eq!(state.receipt.exposed_bins, vec!["demo"]);
+    assert_eq!(
+        state.receipt.exposed_completions,
+        vec!["packages/bash/demo--completions--demo.bash"]
+    );
+    assert_eq!(state.receipt.install_reason, InstallReason::Root);
+    assert_eq!(
+        state.gui_assets,
+        vec![GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "apps/demo.desktop".to_string(),
+        }]
+    );
+    assert_eq!(
+        state.native_gui_records,
+        vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: "/tmp/demo.desktop".to_string(),
+        }]
+    );
+    assert_eq!(
+        state.services,
+        vec![ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo.service".to_string()),
+        }]
+    );
+    assert_eq!(
+        state.integrations,
+        vec![IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "demo".to_string(),
+            rel_path: "path/demo/demo".to_string(),
+        }]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_state_hydrates_with_empty_integrations_when_sidecar_missing() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    fs::remove_file(layout.integration_state_path("demo")).expect("must remove integrations state");
+
+    let state = read_installed_package_state(&layout, "demo")
+        .expect("must read installed package state")
+        .expect("demo must be installed");
+    assert!(state.integrations.is_empty());
+    assert_eq!(state.gui_assets.len(), 1);
+    assert_eq!(state.native_gui_records.len(), 1);
+    assert_eq!(state.services.len(), 1);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn installed_package_state_returns_parse_error_for_malformed_gui_native_sidecar() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+    fs::write(
+        layout.gui_native_state_path("demo"),
+        "uninstall_action=missing-fields\n",
+    )
+    .expect("must write malformed native sidecar");
+
+    let err = read_installed_package_state(&layout, "demo")
+        .expect_err("malformed native sidecar must fail hydration");
+    assert!(
+        err.to_string()
+            .contains("failed to parse native sidecar state"),
+        "unexpected error: {err:?}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
 fn declared_services_state_round_trip() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
