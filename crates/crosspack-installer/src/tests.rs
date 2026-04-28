@@ -112,6 +112,147 @@ fn receipt_unknown_install_mode_falls_back_to_managed() {
     assert_eq!(receipt.install_mode, InstallMode::Managed);
 }
 
+fn legacy_installed_state_fixture(layout: &PrefixLayout) {
+    write_install_receipt(
+        layout,
+        &InstallReceipt {
+            name: "demo".to_string(),
+            version: "1.2.3".to_string(),
+            dependencies: vec!["shared@1.0.0".to_string()],
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: Some("https://example.test/demo-1.2.3.tar.zst".to_string()),
+            artifact_sha256: Some("abc123".to_string()),
+            cache_path: Some("/tmp/crosspack/demo-1.2.3.tar.zst".to_string()),
+            exposed_bins: vec!["demo".to_string()],
+            exposed_completions: vec!["packages/bash/demo--completions--demo.bash".to_string()],
+            snapshot_id: Some("git:1234567890abcdef".to_string()),
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 123,
+        },
+    )
+    .expect("must write legacy receipt fixture");
+    write_gui_exposure_state(
+        layout,
+        "demo",
+        &[GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "apps/demo.desktop".to_string(),
+        }],
+    )
+    .expect("must write legacy gui sidecar fixture");
+    write_gui_native_state(
+        layout,
+        "demo",
+        &[GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: "/tmp/demo.desktop".to_string(),
+        }],
+    )
+    .expect("must write legacy native sidecar fixture");
+    write_declared_services_state(
+        layout,
+        "demo",
+        &[ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo.service".to_string()),
+        }],
+    )
+    .expect("must write legacy services sidecar fixture");
+    write_integration_state(
+        layout,
+        "demo",
+        &[IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "demo".to_string(),
+            rel_path: "path/demo/demo".to_string(),
+        }],
+    )
+    .expect("must write legacy integrations sidecar fixture");
+}
+
+#[test]
+fn legacy_installed_state_fixture_writes_expected_files() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+
+    assert!(layout.receipt_path("demo").exists());
+    assert!(layout.gui_state_path("demo").exists());
+    assert!(layout.gui_native_state_path("demo").exists());
+    assert!(layout.declared_services_state_path("demo").exists());
+    assert!(layout.integration_state_path("demo").exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn legacy_installed_state_fixture_readers_load_all_sidecars() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    legacy_installed_state_fixture(&layout);
+
+    let receipts = read_install_receipts(&layout).expect("must read receipts");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].name, "demo");
+    assert_eq!(receipts[0].version, "1.2.3");
+    assert_eq!(receipts[0].dependencies, vec!["shared@1.0.0"]);
+    assert_eq!(
+        receipts[0].target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert_eq!(receipts[0].exposed_bins, vec!["demo"]);
+    assert_eq!(
+        receipts[0].exposed_completions,
+        vec!["packages/bash/demo--completions--demo.bash"]
+    );
+    assert_eq!(receipts[0].install_reason, InstallReason::Root);
+
+    let gui_assets = read_gui_exposure_state(&layout, "demo").expect("must read gui state");
+    assert_eq!(
+        gui_assets,
+        vec![GuiExposureAsset {
+            key: "app:demo".to_string(),
+            rel_path: "apps/demo.desktop".to_string(),
+        }]
+    );
+
+    let native_records = read_gui_native_state(&layout, "demo").expect("must read native state");
+    assert_eq!(
+        native_records,
+        vec![GuiNativeRegistrationRecord {
+            key: "app:demo".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: "/tmp/demo.desktop".to_string(),
+        }]
+    );
+
+    let services = read_declared_services_state(&layout, "demo").expect("must read services");
+    assert_eq!(
+        services,
+        vec![ServiceDeclaration {
+            name: "demo".to_string(),
+            native_id: Some("demo.service".to_string()),
+        }]
+    );
+
+    let integrations = read_integration_state(&layout, "demo").expect("must read integrations");
+    assert_eq!(
+        integrations,
+        vec![IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "demo".to_string(),
+            rel_path: "path/demo/demo".to_string(),
+        }]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
 #[test]
 fn declared_services_state_round_trip() {
     let layout = test_layout();
