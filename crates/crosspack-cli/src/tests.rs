@@ -4943,6 +4943,131 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn install_transaction_preview_dry_run_output_matches_lifecycle_contract() {
+        let resolved = vec![resolved_install("tool", "1.2.3")];
+        let planned = build_planned_package_changes(&resolved, &[])
+            .expect("install dry-run planned changes must build");
+        let preview = build_transaction_preview("install", &planned);
+
+        let lines = render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "transaction_preview operation=install mode=dry-run".to_string(),
+                "transaction_summary adds=1 removals=0 replacements=0 transitions=0".to_string(),
+                "risk_flags=adds".to_string(),
+                "change_add name=tool version=1.2.3 target=x86_64-unknown-linux-gnu".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_named_transaction_preview_dry_run_output_matches_lifecycle_contract() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "tool"
+version = "2.0.0"
+
+[replaces]
+old-tool = "<1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/tool-2.0.0.tar.zst"
+sha256 = "abc"
+"#,
+        )
+        .expect("manifest should parse");
+        let resolved = vec![ResolvedInstall {
+            artifact: manifest.artifacts[0].clone(),
+            manifest,
+            resolved_target: "x86_64-unknown-linux-gnu".to_string(),
+            archive_type: ArchiveType::TarZst,
+            source_build: None,
+        }];
+        let receipts = vec![
+            install_receipt("tool", "1.0.0", InstallReason::Root, &[]),
+            install_receipt("old-tool", "0.9.0", InstallReason::Root, &[]),
+        ];
+        let planned = build_planned_package_changes(&resolved, &receipts)
+            .expect("upgrade dry-run planned changes must build");
+        let preview = build_transaction_preview("upgrade", &planned);
+
+        let lines = render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "transaction_preview operation=upgrade mode=dry-run".to_string(),
+                "transaction_summary adds=0 removals=1 replacements=1 transitions=1".to_string(),
+                "risk_flags=removals,replacements,version-transitions".to_string(),
+                "change_remove name=old-tool version=0.9.0 reason=replacement".to_string(),
+                "change_replace from=old-tool@0.9.0 to=tool@2.0.0".to_string(),
+                "change_transition name=tool from=1.0.0 to=2.0.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_all_transaction_preview_dry_run_output_matches_lifecycle_contract() {
+        let resolved = vec![resolved_install("app", "2.0.0"), resolved_install("dep", "1.1.0")];
+        let receipts = vec![install_receipt(
+            "app",
+            "1.0.0",
+            InstallReason::Root,
+            &["dep@1.0.0"],
+        )];
+        let planned = build_planned_package_changes(&resolved, &receipts)
+            .expect("upgrade-all dry-run planned changes must build");
+        let preview = build_transaction_preview("upgrade", &planned);
+
+        let lines = render_dry_run_output_lines(&preview, TransactionPreviewMode::DryRun, None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "transaction_preview operation=upgrade mode=dry-run".to_string(),
+                "transaction_summary adds=1 removals=0 replacements=0 transitions=1".to_string(),
+                "risk_flags=adds,multi-package-transaction,version-transitions".to_string(),
+                "change_add name=dep version=1.1.0 target=x86_64-unknown-linux-gnu".to_string(),
+                "change_transition name=app from=1.0.0 to=2.0.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn uninstall_blocked_by_dependents_transaction_preview_contract_matches_lifecycle_output() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("app-a", "1.0.0", InstallReason::Root, &["shared@1.0.0"]),
+        )
+        .expect("must seed first root receipt");
+        write_install_receipt(
+            &layout,
+            &install_receipt("app-b", "1.0.0", InstallReason::Root, &["shared@1.0.0"]),
+        )
+        .expect("must seed second root receipt");
+        write_install_receipt(
+            &layout,
+            &install_receipt("shared", "1.0.0", InstallReason::Dependency, &[]),
+        )
+        .expect("must seed shared dependency receipt");
+
+        let result = uninstall_package(&layout, "shared").expect("uninstall should be blocked");
+        let lines = format_uninstall_messages(&result);
+
+        assert_eq!(
+            lines,
+            vec!["cannot uninstall shared 1.0.0: still required by roots app-a, app-b".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn transaction_preview_dry_run_output_is_stable_for_same_plan() {
         let preview = build_transaction_preview(
             "install",
@@ -8589,6 +8714,30 @@ sha256 = "abc"
             resolved_target: "x86_64-unknown-linux-gnu".to_string(),
             archive_type: ArchiveType::TarZst,
             source_build: None,
+        }
+    }
+
+    fn install_receipt(
+        name: &str,
+        version: &str,
+        install_reason: InstallReason,
+        dependencies: &[&str],
+    ) -> InstallReceipt {
+        InstallReceipt {
+            name: name.to_string(),
+            version: version.to_string(),
+            dependencies: dependencies.iter().map(|dependency| dependency.to_string()).collect(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
         }
     }
 
