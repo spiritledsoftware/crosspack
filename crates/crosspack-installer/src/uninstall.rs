@@ -15,8 +15,8 @@ use crate::native::{
 };
 use crate::receipts::clear_declared_services_state;
 use crate::{
-    read_all_installed_package_states, InstallMode, InstallReason, InstallReceipt, PrefixLayout,
-    UninstallResult, UninstallStatus,
+    clear_installed_package_state_document, read_all_installed_package_states, InstallMode,
+    InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
 };
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
@@ -279,6 +279,7 @@ fn remove_receipt_artifacts(
         )
     })?;
     clear_declared_services_state(layout, &receipt.name)?;
+    clear_installed_package_state_document(layout, receipt)?;
 
     Ok(if package_existed {
         UninstallStatus::Uninstalled

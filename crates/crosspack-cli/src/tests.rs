@@ -3548,6 +3548,39 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn install_plan_application_skips_missing_replacement_receipts() {
+        let plan = crosspack_resolver::InstallPlan {
+            operation: crosspack_resolver::PlanOperation::Upgrade,
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            packages: vec![crosspack_resolver::PlannedPackage {
+                name: "ripgrep".to_string(),
+                version: "14.1.1".to_string(),
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                install_reason: "root".to_string(),
+                dependencies: Vec::new(),
+            }],
+            removals: Vec::new(),
+            replacements: vec![crosspack_resolver::PlannedReplacement {
+                removed_name: "ripgrep-legacy".to_string(),
+                removed_version: "13.0.0".to_string(),
+                replacement_name: "ripgrep".to_string(),
+                replacement_version: "14.1.1".to_string(),
+                requirement: "<14.0.0".to_string(),
+            }],
+            transitions: Vec::new(),
+            provider_substitutions: Vec::new(),
+            conflicts: Vec::new(),
+            risk_flags: Vec::new(),
+        };
+
+        let application = install_plan_application_for_package(&plan, "ripgrep", &[], &[])
+            .expect("missing replacement receipt should not abort plan application");
+
+        assert!(application.replacement_receipts.is_empty());
+        assert_eq!(application.install_reason, InstallReason::Root);
+    }
+
+    #[test]
     fn build_upgrade_roots_uses_only_root_receipts() {
         let receipts = vec![
             InstallReceipt {

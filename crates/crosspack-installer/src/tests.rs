@@ -3249,31 +3249,45 @@ fn uninstall_removes_package_dir_and_receipt() {
     )
     .expect("must write native gui state");
 
-    write_install_receipt(
+    let receipt = InstallReceipt {
+        name: "demo".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: None,
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: vec![completion_rel_path],
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    write_install_receipt(&layout, &receipt).expect("must write receipt");
+    let state_path = write_installed_package_state(
         &layout,
-        &InstallReceipt {
-            name: "demo".to_string(),
-            version: "1.0.0".to_string(),
-            dependencies: Vec::new(),
-            target: None,
-            artifact_url: None,
-            artifact_sha256: None,
-            cache_path: None,
-            exposed_bins: Vec::new(),
-            exposed_completions: vec![completion_rel_path],
-            snapshot_id: None,
-            install_mode: InstallMode::Managed,
-            install_reason: InstallReason::Root,
-            install_status: "installed".to_string(),
-            installed_at_unix: 1,
+        &InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&receipt),
+            version: receipt.version.clone(),
+            receipt: receipt.clone(),
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
         },
     )
-    .expect("must write receipt");
+    .expect("must write installed state document");
+    let legacy_state_path = layout.installed_state_document_path("demo");
+    fs::copy(&state_path, &legacy_state_path).expect("must seed legacy state document");
 
     let result = uninstall_package(&layout, "demo").expect("must uninstall");
     assert_eq!(result.status, UninstallStatus::Uninstalled);
     assert_eq!(result.version.as_deref(), Some("1.0.0"));
     assert!(!layout.receipt_path("demo").exists());
+    assert!(!state_path.exists());
+    assert!(!legacy_state_path.exists());
     assert!(!package_dir.exists());
     assert!(!completion_path.exists());
     assert!(!gui_path.exists());

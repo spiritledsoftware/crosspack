@@ -1728,21 +1728,21 @@ fn install_plan_application_for_package(
         .replacements
         .iter()
         .filter(|replacement| replacement.replacement_name == package_name)
-        .map(|replacement| {
+        .filter_map(|replacement| {
             receipts
                 .iter()
                 .find(|receipt| receipt.name == replacement.removed_name)
                 .cloned()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "install plan replacement target '{}' is not installed",
-                        replacement.removed_name
-                    )
-                })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
+    let planned_install_reason = plan
+        .packages
+        .iter()
+        .find(|package| package.name == package_name)
+        .map(|package| package.install_reason.as_str());
 
     let install_reason = if root_names.iter().any(|root| root == package_name)
+        || planned_install_reason == Some("root")
         || replacement_receipts
             .iter()
             .any(|receipt| receipt.install_reason == InstallReason::Root)

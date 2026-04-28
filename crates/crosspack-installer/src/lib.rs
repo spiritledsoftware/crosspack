@@ -26,8 +26,9 @@ pub use exposure::{
 pub use fs_utils::remove_file_if_exists;
 pub use identity::InstalledPackageIdentity;
 pub use installed_state::{
-    find_installed_states_by_package_name, read_all_installed_package_states,
-    read_installed_package_state, write_installed_package_state, InstalledPackageState,
+    clear_installed_package_state_document, find_installed_states_by_package_name,
+    read_all_installed_package_states, read_installed_package_state, write_installed_package_state,
+    InstalledPackageState,
 };
 pub use layout::{default_user_prefix, PrefixLayout};
 pub use native::{

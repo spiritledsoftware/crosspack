@@ -254,6 +254,31 @@ pub fn write_installed_package_state(
     Ok(path)
 }
 
+pub fn clear_installed_package_state_document(
+    layout: &PrefixLayout,
+    receipt: &InstallReceipt,
+) -> Result<()> {
+    let identity_path = layout.installed_identity_state_document_path(
+        &InstalledPackageIdentity::from_legacy_receipt(receipt),
+    );
+    crate::remove_file_if_exists(&identity_path).with_context(|| {
+        format!(
+            "failed to remove installed state document: {}",
+            identity_path.display()
+        )
+    })?;
+
+    let legacy_path = layout.installed_state_document_path(&receipt.name);
+    crate::remove_file_if_exists(&legacy_path).with_context(|| {
+        format!(
+            "failed to remove legacy installed state document: {}",
+            legacy_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
 fn read_installed_package_state_document(
     layout: &PrefixLayout,
     package_name: &str,
