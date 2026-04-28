@@ -4893,6 +4893,43 @@ ripgrep-legacy = "*"
     }
 
     #[test]
+    fn lifecycle_boundary_types_construct_and_render_lines() {
+        let install = InstallCommandRequest {
+            spec: "ripgrep@^14".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            dry_run: true,
+            force_redownload: false,
+            build_from_source: false,
+            explain: true,
+            provider_overrides: vec!["compiler=clang".to_string()],
+        };
+        assert_eq!(install.spec, "ripgrep@^14");
+        assert!(install.dry_run);
+
+        let upgrade = UpgradeCommandRequest {
+            spec: Some("ripgrep@^14".to_string()),
+            target: None,
+            dry_run: true,
+            force_redownload: true,
+            build_from_source: false,
+            explain: false,
+            provider_overrides: Vec::new(),
+        };
+        assert_eq!(upgrade.spec.as_deref(), Some("ripgrep@^14"));
+        assert!(upgrade.force_redownload);
+
+        let uninstall = UninstallCommandRequest {
+            name: "ripgrep".to_string(),
+        };
+        assert_eq!(uninstall.name, "ripgrep");
+
+        let lines = render_lifecycle_outcome(LifecycleCommandOutcome::Lines(vec![
+            "ok".to_string(),
+        ]));
+        assert_eq!(lines, vec!["ok".to_string()]);
+    }
+
+    #[test]
     fn render_transaction_preview_lines_is_deterministic_and_script_friendly() {
         let preview = build_transaction_preview(
             "upgrade",

@@ -686,6 +686,10 @@ include!("metadata.rs");
 
 include!("render.rs");
 
+include!("lifecycle_service.rs");
+
+include!("lifecycle_render.rs");
+
 include!("command_flows.rs");
 
 include!("core_flows.rs");
