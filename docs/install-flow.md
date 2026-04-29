@@ -43,9 +43,9 @@
     - extract source archive,
     - run deterministic `build_commands`,
     - run deterministic `install_commands`,
-    - install staged output from `CROSSPACK_STAGE_DIR` into `<prefix>/pkgs/<name>/<version>/`.
+    - install staged output from `CROSSPACK_STAGE_DIR` into the selected identity payload root.
 11. Apply `strip_components` during staging copy where supported (binary artifact path).
-12. Move staged content into `<prefix>/pkgs/<name>/<version>/`.
+12. Move staged content into `<prefix>/pkgs/identities/v1/<profile>/<target>/<namespace>/<name>/<version>/` for new installs; legacy payload roots remain readable for compatibility.
 13. Preflight binary exposure collisions against existing receipts and on-disk `<prefix>/bin` entries.
 14. Preflight package completion exposure collisions against existing receipts and on-disk completion files under `<prefix>/share/completions/packages/<shell>/`.
 15. Apply replacement handoff from `InstallPlan` removals/replacements, failing before mutation if replaced packages are still required by remaining roots.
@@ -58,13 +58,13 @@
     - macOS `.app` registration uses bundle-copy deployment and tries `/Applications/<App>.app` before `~/Applications/<App>.app`.
     - Existing unmanaged app bundles at either macOS destination are not overwritten; registration emits warnings and continues.
 20. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
-21. Persist declared manifest services to `<prefix>/state/installed/<name>.services` for service-command lookup.
-22. Write install receipt to `<prefix>/state/installed/<name>.receipt`.
+21. Persist declared manifest services to identity-keyed service state for service-command lookup.
+22. Write install receipt to an identity-keyed receipt path.
       - persist `install_mode=managed|native` from artifact-kind defaults,
       - set `install_reason=root` for requested roots,
       - set `install_reason=dependency` for transitive-only packages,
       - preserve existing `install_reason=root` when upgrading already-rooted packages.
-23. Write a versioned installed-state document keyed by imported identity while preserving legacy receipt/sidecar files.
+23. Write a versioned installed-state document keyed by installed identity while preserving legacy receipt/sidecar reads.
 24. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
 `crosspack install --dry-run` executes the same planning and renders deterministic, script-friendly preview lines from typed `InstallPlan` data:
@@ -103,6 +103,8 @@ Mutating commands (`install`, `upgrade`, `uninstall`, `rollback`, `repair`, `sel
 
 `upgrade` with no package argument runs one dependency solve per target group derived from installed root receipts.
 `crosspack upgrade --dry-run` emits the same preview format and performs planning without mutation.
+
+Lifecycle commands resolve installed package selectors before mutation. A bare package name succeeds only when it matches exactly one installed identity. Ambiguous names fail before transaction start and print selector guidance using target/profile/source namespace fields. Legacy receipts hydrate as `profile=default`, `source_namespace=default`, and `source_provenance=unknown`.
 
 ## Transaction Phases and Recovery (current shipped behavior)
 
@@ -143,7 +145,8 @@ Current behavior includes provider capability selection (`provides`), conflict g
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
 - `state/installed/<name>.gui-native` sidecar (optional): native uninstall action records (`key`, `kind`, `path`) for deterministic uninstall/rollback cleanup.
 - `state/installed/<name>.services` sidecar (optional): declared service records (`name`, optional `native_id`) for deterministic service command routing.
-- `state/installed/default--<target-or-host>--<name>.state.json` document (optional current format): versioned hydrated package state including identity, receipt, GUI/native/service/integration projections; legacy `<name>.state.json` documents and receipt sidecars remain readable.
+- `identity_profile`, `identity_target`, `identity_source_namespace`, `identity_source_provenance`, and `identity_package` (identity-keyed receipts)
+- `state/installed/default--<target-or-host>--default--<name>.state.json` document (optional current format): versioned hydrated package state including identity, receipt, GUI/native/service/integration projections; legacy `<name>.state.json` and previous three-part identity-key documents remain readable.
 - `dependency` (repeated `name@version`, optional)
 - `install_reason` (`root` or `dependency`; legacy receipts default to `root`)
 - `install_status` (`installed`)

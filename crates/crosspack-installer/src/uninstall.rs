@@ -15,12 +15,90 @@ use crate::native::{
 };
 use crate::receipts::clear_declared_services_state;
 use crate::{
-    clear_installed_package_state_document, read_all_installed_package_states, InstallMode,
-    InstallReason, InstallReceipt, PrefixLayout, UninstallResult, UninstallStatus,
+    clear_installed_package_state_document, read_all_installed_package_states,
+    read_identity_install_receipt, InstallMode, InstallReason, InstallReceipt,
+    InstalledPackageIdentity, PrefixLayout, UninstallResult, UninstallStatus,
 };
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
     uninstall_package_with_dependency_overrides(layout, name, &HashMap::new())
+}
+
+pub fn uninstall_package_identity(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<UninstallResult> {
+    let state = read_all_installed_package_states(layout)?
+        .into_iter()
+        .find(|state| &state.identity == identity);
+    let receipt = if let Some(state) = state.as_ref() {
+        state.receipt.clone()
+    } else if let Some(identity_receipt) = read_identity_install_receipt(layout, identity)? {
+        identity_receipt.receipt
+    } else {
+        return Ok(UninstallResult {
+            name: identity.package.clone(),
+            version: None,
+            status: UninstallStatus::NotInstalled,
+            pruned_dependencies: Vec::new(),
+            blocked_by_roots: Vec::new(),
+        });
+    };
+
+    let package_dir = layout.identity_package_dir(identity, &receipt.version);
+    let package_existed = package_dir.exists();
+    if package_existed {
+        fs::remove_dir_all(&package_dir)
+            .with_context(|| format!("failed to remove package dir: {}", package_dir.display()))?;
+    }
+
+    for exposed_bin in &receipt.exposed_bins {
+        remove_exposed_binary(layout, exposed_bin)?;
+    }
+    for exposed_completion in &receipt.exposed_completions {
+        remove_exposed_completion(layout, exposed_completion)?;
+    }
+    if let Some(state) = state {
+        for asset in &state.gui_assets {
+            remove_exposed_gui_asset(layout, asset)?;
+        }
+        for projection in &state.integrations {
+            remove_exposed_integration(layout, projection)?;
+        }
+    }
+
+    remove_file_if_exists(&layout.identity_receipt_path(identity)).with_context(|| {
+        format!(
+            "failed to remove install receipt: {}",
+            layout.identity_receipt_path(identity).display()
+        )
+    })?;
+    remove_file_if_exists(&layout.installed_identity_state_document_path(identity)).with_context(
+        || {
+            format!(
+                "failed to remove installed state document: {}",
+                layout
+                    .installed_identity_state_document_path(identity)
+                    .display()
+            )
+        },
+    )?;
+    remove_file_if_exists(&layout.identity_gui_state_path(identity))?;
+    remove_file_if_exists(&layout.identity_gui_native_state_path(identity))?;
+    remove_file_if_exists(&layout.identity_declared_services_state_path(identity))?;
+    remove_file_if_exists(&layout.identity_integration_state_path(identity))?;
+
+    Ok(UninstallResult {
+        name: receipt.name,
+        version: Some(receipt.version),
+        status: if package_existed {
+            UninstallStatus::Uninstalled
+        } else {
+            UninstallStatus::RepairedStaleState
+        },
+        pruned_dependencies: Vec::new(),
+        blocked_by_roots: Vec::new(),
+    })
 }
 
 pub fn uninstall_package_with_dependency_overrides(

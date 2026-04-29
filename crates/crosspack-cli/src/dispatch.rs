@@ -328,31 +328,70 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             run_repair_command(&layout)?;
         }
-        Commands::Uninstall { name, escalation } => {
+        Commands::Uninstall {
+            name,
+            target,
+            profile,
+            source,
+            escalation,
+        } => {
             let _escalation_policy = resolve_escalation_policy(escalation);
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            run_uninstall_command(&layout, name)?;
+            run_uninstall_command_with_selector(&layout, name, target, profile, source)?;
         }
-        Commands::List => {
+        Commands::List { identity } => {
             let _request = ListCommandRequest;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
-            let receipts = read_all_installed_package_states(&layout)?
-                .into_iter()
-                .map(|state| state.receipt)
-                .collect();
-            let outcome = build_list_command_outcome(receipts);
-            for line in render_list_command_outcome(outcome) {
-                println!("{line}");
+            if identity {
+                for line in format_installed_identity_list_lines(
+                    current_output_style(),
+                    &read_all_installed_package_states(&layout)?,
+                ) {
+                    println!("{line}");
+                }
+            } else {
+                let receipts = read_all_installed_package_states(&layout)?
+                    .into_iter()
+                    .map(|state| state.receipt)
+                    .collect();
+                let outcome = build_list_command_outcome(receipts);
+                for line in render_list_command_outcome(outcome) {
+                    println!("{line}");
+                }
             }
         }
-        Commands::Pin { spec } => {
+        Commands::Pin {
+            spec,
+            target,
+            profile,
+            source,
+        } => {
             let (name, requirement) = parse_pin_spec(&spec)?;
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             layout.ensure_base_dirs()?;
-            let pin_path = write_pin(&layout, &name, &requirement.to_string())?;
+            let selector = InstalledPackageSelector {
+                package: name.clone(),
+                target,
+                profile,
+                source_namespace: source,
+            };
+            let pin_path = if selector.target.is_some()
+                || selector.profile.is_some()
+                || selector.source_namespace.is_some()
+            {
+                let Some(state) = resolve_installed_selector_for_cli(&layout, &selector)? else {
+                    return Err(anyhow!(
+                        "cannot pin '{}': installed identity not found",
+                        selector.package
+                    ));
+                };
+                write_identity_pin(&layout, &state.identity, &requirement.to_string())?
+            } else {
+                write_pin(&layout, &name, &requirement.to_string())?
+            };
             for line in
                 format_pin_status_lines(current_output_style(), &name, &requirement, &pin_path)
             {
@@ -504,6 +543,10 @@ fn run_cli(cli: Cli) -> Result<()> {
                     "step",
                     &doctor_transaction_health_line(&layout)?
                 )
+            );
+            println!(
+                "{}",
+                render_status_line(output_style, "step", &doctor_installed_state_line(&layout))
             );
         }
         Commands::Version => {

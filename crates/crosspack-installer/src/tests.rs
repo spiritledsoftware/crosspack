@@ -33,7 +33,7 @@ use crate::native::{
     register_native_gui_app_best_effort_with_executor, run_native_service_action_with_executor,
     select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
-use crate::receipts::parse_receipt;
+use crate::receipts::{parse_identity_receipt, parse_receipt};
 
 const TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-1\",\n  \"operation\": \"install\",\n  \"status\": \"applying\",\n  \"started_at_unix\": 1771001234,\n  \"snapshot_id\": \"git:abc123\"\n}\n";
 const TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-2\",\n  \"operation\": \"repair\",\n  \"status\": \"failed\",\n  \"started_at_unix\": 1771001235\n}\n";
@@ -342,11 +342,50 @@ fn installed_package_identity_imports_legacy_receipt_and_builds_deterministic_ke
     let identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
     assert_eq!(identity.profile, "default");
     assert_eq!(identity.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
+    assert_eq!(identity.source_namespace, "default");
+    assert_eq!(identity.source_provenance.as_deref(), Some("unknown"));
     assert_eq!(identity.package, "demo");
     assert_eq!(
         identity.state_key(),
-        "default--x86_64-unknown-linux-gnu--demo"
+        "default--x86_64-unknown-linux-gnu--default--demo"
     );
+    assert_eq!(
+        identity.selector_display(),
+        "demo --target x86_64-unknown-linux-gnu --profile default --source default"
+    );
+}
+
+#[test]
+fn installed_package_selector_matches_only_requested_dimensions() {
+    let identity = InstalledPackageIdentity {
+        profile: "tools".to_string(),
+        target: Some("aarch64-apple-darwin".to_string()),
+        source_namespace: "community".to_string(),
+        source_provenance: Some("community".to_string()),
+        package: "ripgrep".to_string(),
+    };
+
+    assert!(InstalledPackageSelector {
+        package: "ripgrep".to_string(),
+        target: None,
+        profile: None,
+        source_namespace: None,
+    }
+    .matches(&identity));
+    assert!(InstalledPackageSelector {
+        package: "ripgrep".to_string(),
+        target: Some("aarch64-apple-darwin".to_string()),
+        profile: Some("tools".to_string()),
+        source_namespace: Some("community".to_string()),
+    }
+    .matches(&identity));
+    assert!(!InstalledPackageSelector {
+        package: "ripgrep".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        profile: Some("tools".to_string()),
+        source_namespace: Some("community".to_string()),
+    }
+    .matches(&identity));
 }
 
 #[test]
@@ -406,6 +445,191 @@ fn installed_package_state_reads_legacy_name_keyed_document() {
 }
 
 #[test]
+fn installed_package_state_reads_identity_document_without_source_fields() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let receipt = InstallReceipt {
+        name: "demo".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    write_install_receipt(&layout, &receipt).expect("must write receipt");
+
+    let identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+    let raw = r#"{
+  "version": 1,
+  "identity": {
+    "profile": "default",
+    "target": "x86_64-unknown-linux-gnu",
+    "package": "demo"
+  },
+  "receipt": {
+    "name": "demo",
+    "version": "1.0.0",
+    "dependencies": [],
+    "target": "x86_64-unknown-linux-gnu",
+    "artifact_url": null,
+    "artifact_sha256": null,
+    "cache_path": null,
+    "exposed_bins": [],
+    "exposed_completions": [],
+    "snapshot_id": null,
+    "install_mode": "managed",
+    "install_reason": "root",
+    "install_status": "installed",
+    "installed_at_unix": 1
+  },
+  "gui_assets": [],
+  "native_gui_records": [],
+  "services": [],
+  "integrations": []
+}"#;
+    fs::write(
+        layout.installed_legacy_identity_state_document_path(&identity),
+        raw,
+    )
+    .expect("must write legacy identity state document");
+
+    let loaded = read_installed_package_state(&layout, "demo")
+        .expect("must read state")
+        .expect("demo must be installed");
+    assert_eq!(loaded.identity.source_namespace, "default");
+    assert_eq!(
+        loaded.identity.source_provenance.as_deref(),
+        Some("unknown")
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn identity_storage_paths_do_not_collide_for_same_name_and_version() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let linux = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "community".to_string(),
+        source_provenance: Some("community".to_string()),
+        package: "demo".to_string(),
+    };
+    let macos = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("aarch64-apple-darwin".to_string()),
+        source_namespace: "community".to_string(),
+        source_provenance: Some("community".to_string()),
+        package: "demo".to_string(),
+    };
+
+    assert_eq!(
+        layout.identity_package_dir(&linux, "1.0.0"),
+        layout
+            .pkgs_dir()
+            .join("identities")
+            .join("v1")
+            .join("default")
+            .join("x86_64-unknown-linux-gnu")
+            .join("community")
+            .join("demo")
+            .join("1.0.0")
+    );
+    assert!(layout.identity_pkgs_dir().exists());
+    assert_ne!(
+        layout.identity_package_dir(&linux, "1.0.0"),
+        layout.identity_package_dir(&macos, "1.0.0")
+    );
+    assert_ne!(
+        layout.identity_receipt_path(&linux),
+        layout.identity_receipt_path(&macos)
+    );
+    assert_ne!(
+        layout.identity_gui_state_path(&linux),
+        layout.identity_gui_state_path(&macos)
+    );
+    assert_ne!(
+        layout.identity_integration_state_path(&linux),
+        layout.identity_integration_state_path(&macos)
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn identity_receipt_round_trip_preserves_identity_fields() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let receipt = InstallReceipt {
+        name: "demo".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: receipt.target.clone(),
+        source_namespace: "community".to_string(),
+        source_provenance: Some("community".to_string()),
+        package: receipt.name.clone(),
+    };
+
+    write_identity_install_receipt(&layout, &identity, &receipt)
+        .expect("must write identity receipt");
+    let loaded = read_identity_install_receipt(&layout, &identity)
+        .expect("must read identity receipt")
+        .expect("receipt must exist");
+
+    assert_eq!(loaded.receipt.name, "demo");
+    assert_eq!(loaded.identity, identity);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn parse_identity_receipt_hydrates_legacy_and_accepts_identity_source_as_provenance() {
+    let legacy = parse_identity_receipt("name=fd\nversion=10.2.0\ninstalled_at_unix=123\n")
+        .expect("must parse legacy identity receipt");
+    assert_eq!(legacy.identity.package, "fd");
+    assert_eq!(legacy.identity.source_namespace, "default");
+    assert_eq!(
+        legacy.identity.source_provenance.as_deref(),
+        Some("unknown")
+    );
+
+    let legacy_source = parse_identity_receipt(
+        "name=fd\nversion=10.2.0\nidentity_profile=tools\nidentity_source=legacy-registry\nidentity_package=fd\ninstalled_at_unix=123\n",
+    )
+    .expect("must parse identity_source alias");
+    assert_eq!(legacy_source.identity.source_namespace, "default");
+    assert_eq!(
+        legacy_source.identity.source_provenance.as_deref(),
+        Some("legacy-registry")
+    );
+}
+
+#[test]
 fn read_all_installed_package_states_returns_sorted_states() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
@@ -458,10 +682,125 @@ fn find_installed_states_by_package_name_returns_all_matching_identities() {
     assert_eq!(
         keys,
         vec![
-            "default--aarch64-apple-darwin--demo".to_string(),
-            "default--x86_64-unknown-linux-gnu--demo".to_string(),
+            "default--aarch64-apple-darwin--default--demo".to_string(),
+            "default--x86_64-unknown-linux-gnu--default--demo".to_string(),
         ]
     );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn resolve_installed_package_selector_returns_exact_match_and_sorted_ambiguity() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"] {
+        let receipt = InstallReceipt {
+            name: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some(target.to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let state = InstalledPackageState {
+            identity: InstalledPackageIdentity::from_legacy_receipt(&receipt),
+            version: receipt.version.clone(),
+            receipt,
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
+        };
+        write_installed_package_state(&layout, &state).expect("must write state");
+    }
+
+    let selected = resolve_installed_package_selector(
+        &layout,
+        &InstalledPackageSelector {
+            package: "demo".to_string(),
+            target: Some("aarch64-apple-darwin".to_string()),
+            profile: Some("default".to_string()),
+            source_namespace: Some("default".to_string()),
+        },
+    )
+    .expect("selector resolution should succeed")
+    .expect("selector should not be ambiguous")
+    .expect("selector should match");
+    assert_eq!(
+        selected.identity.target.as_deref(),
+        Some("aarch64-apple-darwin")
+    );
+
+    let ambiguity = resolve_installed_package_selector(
+        &layout,
+        &InstalledPackageSelector {
+            package: "demo".to_string(),
+            target: None,
+            profile: None,
+            source_namespace: None,
+        },
+    )
+    .expect("selector resolution should succeed")
+    .expect_err("bare selector must be ambiguous");
+    assert_eq!(ambiguity.matches.len(), 2);
+    assert_eq!(
+        ambiguity.matches[0].identity.target.as_deref(),
+        Some("aarch64-apple-darwin")
+    );
+    assert_eq!(
+        ambiguity.matches[1].identity.target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_all_installed_package_states_rejects_duplicate_identity_documents() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let receipt = InstallReceipt {
+        name: "demo".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    let state = InstalledPackageState {
+        identity: InstalledPackageIdentity::from_legacy_receipt(&receipt),
+        version: receipt.version.clone(),
+        receipt,
+        gui_assets: Vec::new(),
+        native_gui_records: Vec::new(),
+        services: Vec::new(),
+        integrations: Vec::new(),
+    };
+    let path = write_installed_package_state(&layout, &state).expect("must write state");
+    fs::copy(path, layout.installed_state_document_path("demo-copy"))
+        .expect("must duplicate state");
+
+    let err = read_all_installed_package_states(&layout)
+        .expect_err("duplicate identity must fail closed");
+    assert!(err.to_string().contains("duplicate installed identity"));
 
     let _ = fs::remove_dir_all(layout.prefix());
 }

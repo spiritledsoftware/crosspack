@@ -29,6 +29,42 @@ fn parse_pin_spec(spec: &str) -> Result<(String, VersionReq)> {
     Ok((name.to_string(), requirement))
 }
 
+fn parse_installed_package_selector(
+    raw: &str,
+    target_flag: Option<String>,
+    profile_flag: Option<String>,
+    source_flag: Option<String>,
+) -> Result<InstalledPackageSelector> {
+    let (name_and_target, compact_profile) = match raw.split_once('#') {
+        Some((left, right)) if !right.is_empty() => (left, Some(right.to_string())),
+        Some(_) => return Err(anyhow!("profile selector must not be empty")),
+        None => (raw, None),
+    };
+    let (package, compact_target) = match name_and_target.split_once('@') {
+        Some((left, right)) if !left.is_empty() && !right.is_empty() => {
+            (left.to_string(), Some(right.to_string()))
+        }
+        Some(_) => return Err(anyhow!("target selector must include package and target")),
+        None => (name_and_target.to_string(), None),
+    };
+    if package.trim().is_empty() {
+        return Err(anyhow!("package selector must not be empty"));
+    }
+    if compact_target.is_some() && target_flag.is_some() {
+        return Err(anyhow!("target specified twice"));
+    }
+    if compact_profile.is_some() && profile_flag.is_some() {
+        return Err(anyhow!("profile specified twice"));
+    }
+
+    Ok(InstalledPackageSelector {
+        package,
+        target: target_flag.or(compact_target),
+        profile: profile_flag.or(compact_profile),
+        source_namespace: source_flag,
+    })
+}
+
 fn parse_provider_overrides(values: &[String]) -> Result<BTreeMap<String, String>> {
     let mut overrides = BTreeMap::new();
     for value in values {
@@ -490,18 +526,34 @@ fn resolve_unambiguous_installed_package(
     layout: &PrefixLayout,
     package_name: &str,
 ) -> Result<Option<InstalledPackageState>> {
-    let matches = find_installed_states_by_package_name(layout, package_name)?;
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.into_iter().next()),
-        _ => {
-            let identities = matches
+    resolve_installed_selector_for_cli(
+        layout,
+        &InstalledPackageSelector {
+            package: package_name.to_string(),
+            target: None,
+            profile: None,
+            source_namespace: None,
+        },
+    )
+}
+
+fn resolve_installed_selector_for_cli(
+    layout: &PrefixLayout,
+    selector: &InstalledPackageSelector,
+) -> Result<Option<InstalledPackageState>> {
+    match resolve_installed_package_selector(layout, selector)? {
+        Ok(state) => Ok(state),
+        Err(ambiguity) => {
+            let choices = ambiguity
+                .matches
                 .iter()
-                .map(|state| state.identity.state_key())
+                .map(|state| format!("  {}", state.identity.selector_display()))
                 .collect::<Vec<_>>()
-                .join(",");
+                .join("\n");
             Err(anyhow!(
-                "installed package name '{package_name}' is ambiguous; this command cannot disambiguate target/profile yet; matches={identities}"
+                "installed package name '{}' is ambiguous; specify one of:\n{}",
+                ambiguity.selector.package,
+                choices
             ))
         }
     }
@@ -685,6 +737,16 @@ fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
     }
 
     Ok(format!("transaction: active {txid}"))
+}
+
+fn doctor_installed_state_line(layout: &PrefixLayout) -> String {
+    match read_all_installed_package_states(layout) {
+        Ok(_) => "installed_state: clean".to_string(),
+        Err(err) if err.to_string().contains("duplicate installed identity") => {
+            "installed_state: error duplicate-installed-identity".to_string()
+        }
+        Err(err) => format!("installed_state: error read-failed detail={err}"),
+    }
 }
 
 fn resolve_install_graph(
@@ -1842,14 +1904,23 @@ fn install_resolved(
         ));
     }
 
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some(resolved.resolved_target.clone()),
+        source_namespace: "default".to_string(),
+        source_provenance: Some("unknown".to_string()),
+        package: resolved.manifest.name.clone(),
+    };
+    let identity_package_dir =
+        layout.identity_package_dir(&identity, &resolved.manifest.version.to_string());
+
     progress.update("install", 4, None);
     let (install_root, selected_install_mode) = if let Some(source_build) =
         resolved.source_build.as_ref()
     {
-        let install_root = install_from_source_archive(
+        let install_root = install_from_source_archive_to_dir(
             layout,
-            &resolved.manifest.name,
-            &resolved.manifest.version.to_string(),
+            &identity_package_dir,
             &cache_path,
             source_build.archive_type,
             &source_build.build_commands,
@@ -1875,10 +1946,9 @@ fn install_resolved(
         (install_root, InstallMode::Managed)
     } else {
         let install_options = build_artifact_install_options(resolved, options.interaction_policy);
-        let install_root = install_from_artifact(
+        let install_root = install_from_artifact_to_dir(
             layout,
-            &resolved.manifest.name,
-            &resolved.manifest.version.to_string(),
+            &identity_package_dir,
             &cache_path,
             resolved.archive_type,
             install_options,
@@ -1950,7 +2020,7 @@ fn install_resolved(
     }) {
         remove_exposed_gui_asset(layout, stale_gui_asset)?;
     }
-    write_gui_exposure_state(layout, &resolved.manifest.name, &exposed_gui_assets)?;
+    write_identity_gui_exposure_state(layout, &identity, &exposed_gui_assets)?;
 
     let exposed_integrations = sync_integration_projection_state(
         layout,
@@ -1989,12 +2059,14 @@ fn install_resolved(
         install_status: "installed".to_string(),
         installed_at_unix: current_unix_timestamp()?,
     };
-    write_declared_services_state(layout, &resolved.manifest.name, &resolved.manifest.services)?;
-    let receipt_path = write_install_receipt(layout, &receipt)?;
+    write_identity_declared_services_state(layout, &identity, &resolved.manifest.services)?;
+    write_identity_gui_native_state(layout, &identity, &native_gui_records)?;
+    write_identity_integration_state(layout, &identity, &exposed_integrations)?;
+    let receipt_path = write_identity_install_receipt(layout, &identity, &receipt)?;
     write_installed_package_state(
         layout,
         &InstalledPackageState {
-            identity: InstalledPackageIdentity::from_legacy_receipt(&receipt),
+            identity,
             version: receipt.version.clone(),
             receipt: receipt.clone(),
             gui_assets: exposed_gui_assets.clone(),

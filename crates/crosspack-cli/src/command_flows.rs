@@ -56,7 +56,21 @@ fn parse_receipt_dependency_name(entry: &str) -> Option<&str> {
     entry.split_once('@').map(|(name, _)| name)
 }
 
+fn ensure_installed_name_unambiguous(layout: &PrefixLayout, name: &str) -> Result<()> {
+    resolve_installed_selector_for_cli(
+        layout,
+        &InstalledPackageSelector {
+            package: name.to_string(),
+            target: None,
+            profile: None,
+            source_namespace: None,
+        },
+    )
+    .map(|_| ())
+}
+
 fn run_depends_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_installed_name_unambiguous(layout, name)?;
     let receipts = read_install_receipts(layout)?;
     let Some(target) = receipts.iter().find(|receipt| receipt.name == name) else {
         println!("No installed package found: {name}");
@@ -114,6 +128,7 @@ fn run_uses_command(layout: &PrefixLayout, name: &str) -> Result<()> {
 }
 
 fn run_why_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_installed_name_unambiguous(layout, name)?;
     let receipts = read_install_receipts(layout)?;
     let receipt_map = receipts
         .iter()
@@ -366,6 +381,7 @@ fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServ
 }
 
 fn run_service_status_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
     let native_outcome = run_native_service_action(
         NativeServiceAction::Status,
@@ -381,6 +397,7 @@ fn run_service_status_command(layout: &PrefixLayout, name: &str) -> Result<()> {
 }
 
 fn run_service_start_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
     let native_outcome = run_native_service_action(
         NativeServiceAction::Start,
@@ -403,6 +420,7 @@ fn run_service_start_command(layout: &PrefixLayout, name: &str) -> Result<()> {
 }
 
 fn run_service_stop_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
     let native_outcome = run_native_service_action(
         NativeServiceAction::Stop,
@@ -425,6 +443,7 @@ fn run_service_stop_command(layout: &PrefixLayout, name: &str) -> Result<()> {
 }
 
 fn run_service_restart_command(layout: &PrefixLayout, name: &str) -> Result<()> {
+    ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
     let native_outcome = run_native_service_action(
         NativeServiceAction::Restart,
@@ -2216,15 +2235,29 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
+    run_uninstall_command_with_selector(layout, name, None, None, None)
+}
+
+fn run_uninstall_command_with_selector(
+    layout: &PrefixLayout,
+    name: String,
+    target: Option<String>,
+    profile: Option<String>,
+    source: Option<String>,
+) -> Result<()> {
     let output_style = current_output_style();
     let renderer = TerminalRenderer::from_style(output_style);
     layout.ensure_base_dirs()?;
     ensure_no_active_transaction_for(layout, "uninstall")?;
-    let Some(_installed_state) = resolve_unambiguous_installed_package(layout, &name)? else {
-        println!("Package not installed: {name}");
+    let selector = parse_installed_package_selector(&name, target, profile, source)?;
+    let Some(installed_state) = resolve_installed_selector_for_cli(layout, &selector)? else {
+        println!("Package not installed: {}", selector.package);
         return Ok(());
     };
+    let identity = installed_state.identity.clone();
+    let name = installed_state.receipt.name.clone();
 
     renderer.print_section(&format!("Uninstall {name}"));
 
@@ -2237,7 +2270,11 @@ fn run_uninstall_command(layout: &PrefixLayout, name: String) -> Result<()> {
             snapshot_paths.insert(receipt.name, snapshot_path);
         }
 
-        let result = uninstall_package(layout, &name)?;
+        let result = if layout.identity_receipt_path(&identity).exists() {
+            uninstall_package_identity(layout, &identity)?
+        } else {
+            uninstall_package(layout, &name)?
+        };
 
         if let Some(snapshot_path) = snapshot_paths.get(&name) {
             append_transaction_journal_entry(
@@ -2527,6 +2564,53 @@ fn format_installed_list_lines_for_style(
     let mut rows = vec![vec!["name".to_string(), "version".to_string()]];
     for receipt in receipts {
         rows.push(vec![receipt.name.clone(), receipt.version.clone()]);
+    }
+    render_compact_table(style, &rows)
+}
+
+fn format_installed_identity_list_lines(
+    style: OutputStyle,
+    states: &[InstalledPackageState],
+) -> Vec<String> {
+    if states.is_empty() {
+        return render_empty_state(
+            style,
+            "No installed packages",
+            Some("Run `crosspack install <name>` to install a package."),
+        );
+    }
+
+    if style == OutputStyle::Plain {
+        return states
+            .iter()
+            .map(|state| {
+                format!(
+                    "{} {} target={} profile={} source={}",
+                    state.receipt.name,
+                    state.receipt.version,
+                    state.identity.target_label(),
+                    state.identity.profile,
+                    state.identity.source_namespace_label()
+                )
+            })
+            .collect();
+    }
+
+    let mut rows = vec![vec![
+        "name".to_string(),
+        "version".to_string(),
+        "target".to_string(),
+        "profile".to_string(),
+        "source".to_string(),
+    ]];
+    for state in states {
+        rows.push(vec![
+            state.receipt.name.clone(),
+            state.receipt.version.clone(),
+            state.identity.target_label().to_string(),
+            state.identity.profile.clone(),
+            state.identity.source_namespace_label().to_string(),
+        ]);
     }
     render_compact_table(style, &rows)
 }
