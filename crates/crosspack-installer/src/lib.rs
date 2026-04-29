@@ -48,8 +48,8 @@ pub use pins::{
 };
 pub use receipts::{
     clear_declared_services_state, parse_identity_receipt, read_all_declared_services_states,
-    read_declared_services_state, read_identity_install_receipt, read_install_receipts,
-    write_declared_services_state, write_identity_declared_services_state,
+    read_declared_services_state, read_identity_install_receipt, read_identity_install_receipts,
+    read_install_receipts, write_declared_services_state, write_identity_declared_services_state,
     write_identity_install_receipt, write_install_receipt, IdentityInstallReceipt,
 };
 pub use transaction_coordinator::{StartedTransaction, TransactionCoordinator};

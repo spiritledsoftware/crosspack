@@ -106,6 +106,15 @@ pub fn read_identity_install_receipt(
 }
 
 pub fn read_install_receipts(layout: &PrefixLayout) -> Result<Vec<InstallReceipt>> {
+    Ok(read_identity_install_receipts(layout)?
+        .into_iter()
+        .map(|entry| entry.receipt)
+        .collect())
+}
+
+pub fn read_identity_install_receipts(
+    layout: &PrefixLayout,
+) -> Result<Vec<IdentityInstallReceipt>> {
     let dir = layout.installed_state_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -127,12 +136,17 @@ pub fn read_install_receipts(layout: &PrefixLayout) -> Result<Vec<InstallReceipt
 
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read install receipt: {}", path.display()))?;
-        let receipt = parse_receipt(&raw)
+        let receipt = parse_identity_receipt(&raw)
             .with_context(|| format!("failed to parse install receipt: {}", path.display()))?;
         receipts.push(receipt);
     }
 
-    receipts.sort_by(|a, b| a.name.cmp(&b.name));
+    receipts.sort_by(|a, b| {
+        a.receipt
+            .name
+            .cmp(&b.receipt.name)
+            .then_with(|| a.identity.cmp(&b.identity))
+    });
     Ok(receipts)
 }
 

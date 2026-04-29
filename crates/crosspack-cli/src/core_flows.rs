@@ -2060,6 +2060,7 @@ fn install_resolved(
         installed_at_unix: current_unix_timestamp()?,
     };
     write_identity_declared_services_state(layout, &identity, &resolved.manifest.services)?;
+    write_declared_services_state(layout, &resolved.manifest.name, &resolved.manifest.services)?;
     write_identity_gui_native_state(layout, &identity, &native_gui_records)?;
     write_identity_integration_state(layout, &identity, &exposed_integrations)?;
     let receipt_path = write_identity_install_receipt(layout, &identity, &receipt)?;

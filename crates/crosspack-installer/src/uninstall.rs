@@ -17,7 +17,8 @@ use crate::receipts::clear_declared_services_state;
 use crate::{
     clear_installed_package_state_document, read_all_installed_package_states,
     read_identity_install_receipt, InstallMode, InstallReason, InstallReceipt,
-    InstalledPackageIdentity, PrefixLayout, UninstallResult, UninstallStatus,
+    InstalledPackageIdentity, InstalledPackageState, PrefixLayout, UninstallResult,
+    UninstallStatus,
 };
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
@@ -28,9 +29,8 @@ pub fn uninstall_package_identity(
     layout: &PrefixLayout,
     identity: &InstalledPackageIdentity,
 ) -> Result<UninstallResult> {
-    let state = read_all_installed_package_states(layout)?
-        .into_iter()
-        .find(|state| &state.identity == identity);
+    let states = read_all_installed_package_states(layout)?;
+    let state = states.iter().find(|state| &state.identity == identity);
     let receipt = if let Some(state) = state.as_ref() {
         state.receipt.clone()
     } else if let Some(identity_receipt) = read_identity_install_receipt(layout, identity)? {
@@ -45,6 +45,104 @@ pub fn uninstall_package_identity(
         });
     };
 
+    let receipt_map: HashMap<String, InstallReceipt> = states
+        .iter()
+        .map(|state| state.receipt.clone())
+        .chain(std::iter::once(receipt.clone()))
+        .map(|receipt| (receipt.name.clone(), receipt))
+        .collect();
+    let dependencies = dependency_map(&receipt_map);
+    let remaining_roots = collect_remaining_roots(&receipt_map, &receipt.name, &HashSet::new());
+    let reachable = reachable_packages(&remaining_roots, &dependencies);
+
+    if reachable.contains(&receipt.name) {
+        let mut blocked_by_roots = remaining_roots
+            .iter()
+            .filter(|root| package_reachable(root, &receipt.name, &dependencies))
+            .cloned()
+            .collect::<Vec<_>>();
+        blocked_by_roots.sort();
+        blocked_by_roots.dedup();
+        return Ok(UninstallResult {
+            name: receipt.name,
+            version: Some(receipt.version),
+            status: UninstallStatus::BlockedByDependents,
+            pruned_dependencies: Vec::new(),
+            blocked_by_roots,
+        });
+    }
+
+    let target_closure = reachable_packages(std::slice::from_ref(&receipt.name), &dependencies);
+    let mut pruned_dependencies = target_closure
+        .iter()
+        .filter(|entry| *entry != &receipt.name)
+        .filter(|entry| !reachable.contains(entry.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    pruned_dependencies.sort();
+
+    let mut removal_names = Vec::with_capacity(pruned_dependencies.len() + 1);
+    removal_names.push(receipt.name.clone());
+    removal_names.extend(pruned_dependencies.iter().cloned());
+    let removal_names_set: HashSet<&str> = removal_names.iter().map(String::as_str).collect();
+
+    let mut target_status = UninstallStatus::RepairedStaleState;
+    let mut removed_cache_paths = Vec::new();
+    for removal_name in &removal_names {
+        let Some(removal_receipt) = receipt_map.get(removal_name) else {
+            continue;
+        };
+
+        if removal_name == &receipt.name {
+            target_status = remove_identity_artifacts(layout, identity, removal_receipt, state)?;
+        } else if let Some(removal_state) = states
+            .iter()
+            .find(|state| state.identity.package == *removal_name)
+        {
+            let _ = remove_identity_artifacts(
+                layout,
+                &removal_state.identity,
+                &removal_state.receipt,
+                Some(removal_state),
+            )?;
+        } else {
+            let _ = remove_receipt_artifacts(layout, removal_receipt)?;
+        }
+        if let Some(cache_path) = &removal_receipt.cache_path {
+            removed_cache_paths.push(cache_path.clone());
+        }
+    }
+
+    let referenced_cache_paths: HashSet<String> = receipt_map
+        .iter()
+        .filter(|(receipt_name, _)| !removal_names_set.contains(receipt_name.as_str()))
+        .filter_map(|(_, receipt)| receipt.cache_path.clone())
+        .collect();
+    for cache_path in removed_cache_paths {
+        if referenced_cache_paths.contains(&cache_path) {
+            continue;
+        }
+        if let Some(cache_path) = safe_cache_prune_path(layout, &cache_path) {
+            remove_file_if_exists(&cache_path)
+                .with_context(|| format!("failed to prune cache file: {}", cache_path.display()))?;
+        }
+    }
+
+    Ok(UninstallResult {
+        name: receipt.name,
+        version: Some(receipt.version),
+        status: target_status,
+        pruned_dependencies,
+        blocked_by_roots: Vec::new(),
+    })
+}
+
+fn remove_identity_artifacts(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    receipt: &InstallReceipt,
+    state: Option<&InstalledPackageState>,
+) -> Result<UninstallStatus> {
     let package_dir = layout.identity_package_dir(identity, &receipt.version);
     let package_existed = package_dir.exists();
     if package_existed {
@@ -88,16 +186,10 @@ pub fn uninstall_package_identity(
     remove_file_if_exists(&layout.identity_declared_services_state_path(identity))?;
     remove_file_if_exists(&layout.identity_integration_state_path(identity))?;
 
-    Ok(UninstallResult {
-        name: receipt.name,
-        version: Some(receipt.version),
-        status: if package_existed {
-            UninstallStatus::Uninstalled
-        } else {
-            UninstallStatus::RepairedStaleState
-        },
-        pruned_dependencies: Vec::new(),
-        blocked_by_roots: Vec::new(),
+    Ok(if package_existed {
+        UninstallStatus::Uninstalled
+    } else {
+        UninstallStatus::RepairedStaleState
     })
 }
 

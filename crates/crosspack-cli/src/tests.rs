@@ -7878,6 +7878,10 @@ sha256 = "abc"
             name: "demo-bin".to_string(),
             path: "demo-bin".to_string(),
         }];
+        resolved.manifest.services = vec![ServiceDeclaration {
+            name: "demo-bin".to_string(),
+            native_id: None,
+        }];
         let cache_path = resolved_artifact_cache_path(
             &layout,
             &resolved.manifest.name,
@@ -7943,6 +7947,12 @@ sha256 = "abc"
             .expect("demo-bin must be installed");
         assert_eq!(state.receipt.name, "demo-bin");
         assert_eq!(state.receipt.exposed_bins, vec!["demo-bin"]);
+        assert_eq!(
+            read_declared_services_state(&layout, "demo-bin")
+                .expect("must read package-keyed declared services")
+                .len(),
+            1
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }

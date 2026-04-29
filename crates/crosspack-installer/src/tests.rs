@@ -608,6 +608,68 @@ fn identity_receipt_round_trip_preserves_identity_fields() {
 }
 
 #[test]
+fn read_all_installed_package_states_keeps_same_name_identity_receipts_distinct() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        let receipt = InstallReceipt {
+            name: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some(target.to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let identity = InstalledPackageIdentity {
+            profile: "default".to_string(),
+            target: receipt.target.clone(),
+            source_namespace: "default".to_string(),
+            source_provenance: Some("unknown".to_string()),
+            package: receipt.name.clone(),
+        };
+        write_identity_install_receipt(&layout, &identity, &receipt)
+            .expect("must write identity receipt");
+        write_installed_package_state(
+            &layout,
+            &InstalledPackageState {
+                identity,
+                version: receipt.version.clone(),
+                receipt,
+                gui_assets: Vec::new(),
+                native_gui_records: Vec::new(),
+                services: Vec::new(),
+                integrations: Vec::new(),
+            },
+        )
+        .expect("must write identity state");
+    }
+
+    let states = read_all_installed_package_states(&layout).expect("must read all states");
+    let keys = states
+        .iter()
+        .map(|state| state.identity.state_key())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        vec![
+            "default--aarch64-apple-darwin--default--demo".to_string(),
+            "default--x86_64-unknown-linux-gnu--default--demo".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
 fn parse_identity_receipt_hydrates_legacy_and_accepts_identity_source_as_provenance() {
     let legacy = parse_identity_receipt("name=fd\nversion=10.2.0\ninstalled_at_unix=123\n")
         .expect("must parse legacy identity receipt");
@@ -4154,6 +4216,54 @@ fn uninstall_blocks_when_required_by_remaining_root() {
     assert_eq!(result.status, UninstallStatus::BlockedByDependents);
     assert_eq!(result.blocked_by_roots, vec!["app"]);
     assert!(layout.receipt_path("shared").exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn uninstall_identity_blocks_when_required_by_remaining_root() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    write_receipt(
+        &layout,
+        "app",
+        "1.0.0",
+        &["shared@1.0.0"],
+        InstallReason::Root,
+        None,
+    );
+
+    let shared_receipt = InstallReceipt {
+        name: "shared".to_string(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Dependency,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    let shared_identity = InstalledPackageIdentity::from_legacy_receipt(&shared_receipt);
+    write_identity_install_receipt(&layout, &shared_identity, &shared_receipt)
+        .expect("must write identity receipt");
+    fs::create_dir_all(layout.identity_package_dir(&shared_identity, "1.0.0"))
+        .expect("must create identity package dir");
+
+    let result = uninstall_package_identity(&layout, &shared_identity)
+        .expect("must evaluate dependency safety");
+    assert_eq!(result.status, UninstallStatus::BlockedByDependents);
+    assert_eq!(result.blocked_by_roots, vec!["app"]);
+    assert!(layout.identity_receipt_path(&shared_identity).exists());
+    assert!(layout
+        .identity_package_dir(&shared_identity, "1.0.0")
+        .exists());
 
     let _ = fs::remove_dir_all(layout.prefix());
 }

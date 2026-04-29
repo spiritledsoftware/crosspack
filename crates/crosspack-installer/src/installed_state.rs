@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use crate::receipts::parse_receipt;
 use crate::{
     read_declared_services_state, read_gui_exposure_state, read_gui_native_state,
-    read_install_receipts, read_integration_state, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity, InstalledPackageSelector,
-    IntegrationProjection, PrefixLayout,
+    read_identity_install_receipts, read_integration_state, GuiExposureAsset,
+    GuiNativeRegistrationRecord, InstallMode, InstallReason, InstallReceipt,
+    InstalledPackageIdentity, InstalledPackageSelector, IntegrationProjection, PrefixLayout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,6 +372,36 @@ fn read_installed_package_state_document_path(
     InstalledPackageState::try_from(document)
 }
 
+fn read_installed_package_state_for_identity_receipt(
+    layout: &PrefixLayout,
+    identity: InstalledPackageIdentity,
+    receipt: InstallReceipt,
+) -> Result<InstalledPackageState> {
+    let identity_paths = [
+        layout.installed_identity_state_document_path(&identity),
+        layout.installed_legacy_identity_state_document_path(&identity),
+    ];
+    if let Some(path) = identity_paths.into_iter().find(|path| path.exists()) {
+        return read_installed_package_state_document_path(&path);
+    }
+
+    let legacy_identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+    let legacy_path = layout.installed_state_document_path(&receipt.name);
+    if identity == legacy_identity && legacy_path.exists() {
+        return read_installed_package_state_document_path(&legacy_path);
+    }
+
+    Ok(InstalledPackageState {
+        identity,
+        version: receipt.version.clone(),
+        receipt,
+        gui_assets: Vec::new(),
+        native_gui_records: Vec::new(),
+        services: Vec::new(),
+        integrations: Vec::new(),
+    })
+}
+
 pub fn read_installed_package_state(
     layout: &PrefixLayout,
     package_name: &str,
@@ -437,18 +467,21 @@ fn read_installed_package_state_document_by_package_name(
 pub fn read_all_installed_package_states(
     layout: &PrefixLayout,
 ) -> Result<Vec<InstalledPackageState>> {
-    let receipts = read_install_receipts(layout)?;
+    let receipts = read_identity_install_receipts(layout)?;
     let mut states = Vec::new();
     let mut state_keys = std::collections::BTreeSet::new();
     let mut document_state_keys = std::collections::BTreeMap::new();
-    for receipt in receipts {
-        if let Some(state) = read_installed_package_state(layout, &receipt.name)? {
-            let state_key = state.identity.state_key();
-            if !state_keys.insert(state_key.clone()) {
-                return Err(anyhow::anyhow!("duplicate installed identity: {state_key}"));
-            }
-            states.push(state);
+    for entry in receipts {
+        let state = read_installed_package_state_for_identity_receipt(
+            layout,
+            entry.identity,
+            entry.receipt,
+        )?;
+        let state_key = state.identity.state_key();
+        if !state_keys.insert(state_key.clone()) {
+            return Err(anyhow::anyhow!("duplicate installed identity: {state_key}"));
         }
+        states.push(state);
     }
     let installed_dir = layout.installed_state_dir();
     let entries = match fs::read_dir(&installed_dir) {
