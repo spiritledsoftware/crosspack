@@ -138,8 +138,22 @@ pub fn read_identity_install_receipts(
             .with_context(|| format!("failed to read install receipt: {}", path.display()))?;
         let receipt = parse_identity_receipt(&raw)
             .with_context(|| format!("failed to parse install receipt: {}", path.display()))?;
-        receipts.push(receipt);
+        receipts.push((path, receipt));
     }
+
+    let identity_keys = receipts
+        .iter()
+        .filter(|(path, entry)| *path == layout.identity_receipt_path(&entry.identity))
+        .map(|(_, entry)| entry.identity.state_key())
+        .collect::<std::collections::BTreeSet<_>>();
+    receipts.retain(|(path, entry)| {
+        *path == layout.identity_receipt_path(&entry.identity)
+            || !identity_keys.contains(&entry.identity.state_key())
+    });
+    let mut receipts = receipts
+        .into_iter()
+        .map(|(_, receipt)| receipt)
+        .collect::<Vec<_>>();
 
     receipts.sort_by(|a, b| {
         a.receipt

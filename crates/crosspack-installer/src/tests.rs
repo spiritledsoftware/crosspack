@@ -4269,6 +4269,167 @@ fn uninstall_identity_blocks_when_required_by_remaining_root() {
 }
 
 #[test]
+fn uninstall_identity_keeps_dependency_reachable_from_same_name_root_identity() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let app_linux = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "default".to_string(),
+        source_provenance: Some("unknown".to_string()),
+        package: "app".to_string(),
+    };
+    let app_macos = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("aarch64-apple-darwin".to_string()),
+        source_namespace: "default".to_string(),
+        source_provenance: Some("unknown".to_string()),
+        package: "app".to_string(),
+    };
+    let shared = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "default".to_string(),
+        source_provenance: Some("unknown".to_string()),
+        package: "shared".to_string(),
+    };
+
+    for identity in [&app_linux, &app_macos] {
+        let receipt = InstallReceipt {
+            name: identity.package.clone(),
+            version: "1.0.0".to_string(),
+            dependencies: vec!["shared@1.0.0".to_string()],
+            target: identity.target.clone(),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        write_identity_install_receipt(&layout, identity, &receipt)
+            .expect("must write app identity receipt");
+        fs::create_dir_all(layout.identity_package_dir(identity, "1.0.0"))
+            .expect("must create app package dir");
+        write_installed_package_state(
+            &layout,
+            &InstalledPackageState {
+                identity: identity.clone(),
+                version: receipt.version.clone(),
+                receipt,
+                gui_assets: Vec::new(),
+                native_gui_records: Vec::new(),
+                services: Vec::new(),
+                integrations: Vec::new(),
+            },
+        )
+        .expect("must write app state");
+    }
+
+    let shared_receipt = InstallReceipt {
+        name: shared.package.clone(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: shared.target.clone(),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Managed,
+        install_reason: InstallReason::Dependency,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    write_identity_install_receipt(&layout, &shared, &shared_receipt)
+        .expect("must write shared receipt");
+    fs::create_dir_all(layout.identity_package_dir(&shared, "1.0.0"))
+        .expect("must create shared package dir");
+    write_installed_package_state(
+        &layout,
+        &InstalledPackageState {
+            identity: shared.clone(),
+            version: shared_receipt.version.clone(),
+            receipt: shared_receipt,
+            gui_assets: Vec::new(),
+            native_gui_records: Vec::new(),
+            services: Vec::new(),
+            integrations: Vec::new(),
+        },
+    )
+    .expect("must write shared state");
+
+    let result = uninstall_package_identity(&layout, &app_linux)
+        .expect("must uninstall selected app identity");
+    assert_eq!(result.status, UninstallStatus::Uninstalled);
+    assert!(result.pruned_dependencies.is_empty());
+    assert!(!layout.identity_receipt_path(&app_linux).exists());
+    assert!(layout.identity_receipt_path(&app_macos).exists());
+    assert!(layout.identity_receipt_path(&shared).exists());
+    assert!(layout.identity_package_dir(&shared, "1.0.0").exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn uninstall_identity_native_runs_identity_native_uninstall_actions() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "default".to_string(),
+        source_provenance: Some("unknown".to_string()),
+        package: "native-demo".to_string(),
+    };
+    let receipt = InstallReceipt {
+        name: identity.package.clone(),
+        version: "1.0.0".to_string(),
+        dependencies: Vec::new(),
+        target: identity.target.clone(),
+        artifact_url: None,
+        artifact_sha256: None,
+        cache_path: None,
+        exposed_bins: Vec::new(),
+        exposed_completions: Vec::new(),
+        snapshot_id: None,
+        install_mode: InstallMode::Native,
+        install_reason: InstallReason::Root,
+        install_status: "installed".to_string(),
+        installed_at_unix: 1,
+    };
+    let package_dir = layout.identity_package_dir(&identity, "1.0.0");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+    let native_file = layout.prefix().join("native-file");
+    fs::write(&native_file, b"native").expect("must write native file");
+    write_identity_install_receipt(&layout, &identity, &receipt)
+        .expect("must write identity receipt");
+    write_identity_gui_native_state(
+        &layout,
+        &identity,
+        &[GuiNativeRegistrationRecord {
+            key: "native-file".to_string(),
+            kind: "desktop-entry".to_string(),
+            path: native_file.display().to_string(),
+        }],
+    )
+    .expect("must write identity native sidecar");
+
+    let result = uninstall_package_identity(&layout, &identity).expect("must uninstall identity");
+    assert_eq!(result.status, UninstallStatus::Uninstalled);
+    assert!(!native_file.exists());
+    assert!(!layout.identity_gui_native_state_path(&identity).exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
 fn uninstall_with_dependency_overrides_allows_planned_root_transition() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");

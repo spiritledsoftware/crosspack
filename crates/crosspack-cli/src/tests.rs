@@ -7931,6 +7931,7 @@ sha256 = "abc"
             source_provenance: Some("unknown".to_string()),
             package: "demo-bin".to_string(),
         };
+        assert!(layout.receipt_path("demo-bin").exists());
         assert!(layout.identity_receipt_path(&identity).exists());
         assert!(layout.identity_package_dir(&identity, "1.0.0").exists());
         assert!(layout

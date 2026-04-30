@@ -19,8 +19,6 @@ use crosspack_core::{
 use crosspack_installer::read_declared_services_state;
 #[cfg(test)]
 use crosspack_installer::read_installed_package_state;
-#[cfg(test)]
-use crosspack_installer::write_install_receipt;
 use crosspack_installer::{
     append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
     default_user_prefix, expose_binary, expose_completion, expose_gui_app, expose_integration,
@@ -40,12 +38,12 @@ use crosspack_installer::{
     write_gui_native_state, write_identity_declared_services_state,
     write_identity_gui_exposure_state, write_identity_gui_native_state,
     write_identity_install_receipt, write_identity_integration_state, write_identity_pin,
-    write_installed_package_state, write_integration_state, write_pin, ArtifactInstallOptions,
-    GuiExposureAsset, GuiNativeRegistrationRecord, InstallInteractionPolicy, InstallMode,
-    InstallReason, InstallReceipt, InstalledPackageIdentity, InstalledPackageSelector,
-    InstalledPackageState, IntegrationProjection, NativeServiceAction, NativeServiceOutcome,
-    PrefixLayout, TransactionCoordinator, TransactionJournalEntry, TransactionMetadata,
-    TransactionStatus, UninstallResult, UninstallStatus,
+    write_install_receipt, write_installed_package_state, write_integration_state, write_pin,
+    ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
+    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity,
+    InstalledPackageSelector, InstalledPackageState, IntegrationProjection, NativeServiceAction,
+    NativeServiceOutcome, PrefixLayout, TransactionCoordinator, TransactionJournalEntry,
+    TransactionMetadata, TransactionStatus, UninstallResult, UninstallStatus,
 };
 #[cfg(test)]
 use crosspack_installer::{set_active_transaction, write_transaction_metadata};

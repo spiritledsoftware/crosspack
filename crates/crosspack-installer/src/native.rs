@@ -220,6 +220,23 @@ pub fn read_native_sidecar_state(
         .with_context(|| format!("failed to parse native sidecar state: {}", path.display()))
 }
 
+pub(crate) fn read_identity_native_sidecar_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<NativeSidecarState> {
+    let path = layout.identity_gui_native_state_path(identity);
+    if !path.exists() {
+        return Ok(NativeSidecarState {
+            uninstall_actions: Vec::new(),
+        });
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read native sidecar state: {}", path.display()))?;
+    parse_native_sidecar_state(&raw)
+        .with_context(|| format!("failed to parse native sidecar state: {}", path.display()))
+}
+
 pub fn read_all_native_sidecar_states(
     layout: &PrefixLayout,
 ) -> Result<BTreeMap<String, NativeSidecarState>> {
@@ -409,6 +426,22 @@ pub fn run_package_native_uninstall_actions(
     package_name: &str,
 ) -> Result<()> {
     run_native_uninstall_actions(layout, package_name)
+}
+
+pub(crate) fn run_identity_native_uninstall_actions(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<()> {
+    let sidecar_state = read_identity_native_sidecar_state(layout, identity)?;
+    for action in &sidecar_state.uninstall_actions {
+        execute_native_uninstall_action(action).with_context(|| {
+            format!(
+                "native uninstall action failed (key='{}', kind='{}', path='{}')",
+                action.key, action.kind, action.path
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn run_native_uninstall_actions(layout: &PrefixLayout, package_name: &str) -> Result<()> {

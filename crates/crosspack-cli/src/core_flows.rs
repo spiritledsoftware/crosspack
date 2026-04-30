@@ -2063,6 +2063,7 @@ fn install_resolved(
     write_declared_services_state(layout, &resolved.manifest.name, &resolved.manifest.services)?;
     write_identity_gui_native_state(layout, &identity, &native_gui_records)?;
     write_identity_integration_state(layout, &identity, &exposed_integrations)?;
+    write_install_receipt(layout, &receipt)?;
     let receipt_path = write_identity_install_receipt(layout, &identity, &receipt)?;
     write_installed_package_state(
         layout,

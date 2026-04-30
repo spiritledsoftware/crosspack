@@ -11,7 +11,7 @@ use crate::exposure::{
 use crate::fs_utils::remove_file_if_exists;
 use crate::native::{
     clear_native_sidecar_state, remove_package_native_gui_registrations_best_effort,
-    run_package_native_uninstall_actions,
+    run_identity_native_uninstall_actions, run_package_native_uninstall_actions,
 };
 use crate::receipts::clear_declared_services_state;
 use crate::{
@@ -45,21 +45,23 @@ pub fn uninstall_package_identity(
         });
     };
 
-    let receipt_map: HashMap<String, InstallReceipt> = states
+    let nodes = identity_uninstall_nodes(&states, identity, &receipt);
+    let node_map = nodes
         .iter()
-        .map(|state| state.receipt.clone())
-        .chain(std::iter::once(receipt.clone()))
-        .map(|receipt| (receipt.name.clone(), receipt))
-        .collect();
-    let dependencies = dependency_map(&receipt_map);
-    let remaining_roots = collect_remaining_roots(&receipt_map, &receipt.name, &HashSet::new());
+        .cloned()
+        .map(|node| (node.key.clone(), node))
+        .collect::<HashMap<_, _>>();
+    let target_key = identity.state_key();
+    let dependencies = identity_dependency_map(&nodes);
+    let remaining_roots = collect_remaining_identity_roots(&nodes, &target_key);
     let reachable = reachable_packages(&remaining_roots, &dependencies);
 
-    if reachable.contains(&receipt.name) {
+    if reachable.contains(&target_key) {
         let mut blocked_by_roots = remaining_roots
             .iter()
-            .filter(|root| package_reachable(root, &receipt.name, &dependencies))
-            .cloned()
+            .filter(|root| package_reachable(root, &target_key, &dependencies))
+            .filter_map(|root| node_map.get(root))
+            .map(|node| node.package.clone())
             .collect::<Vec<_>>();
         blocked_by_roots.sort();
         blocked_by_roots.dedup();
@@ -72,51 +74,58 @@ pub fn uninstall_package_identity(
         });
     }
 
-    let target_closure = reachable_packages(std::slice::from_ref(&receipt.name), &dependencies);
-    let mut pruned_dependencies = target_closure
+    let target_closure = reachable_packages(std::slice::from_ref(&target_key), &dependencies);
+    let mut pruned_dependency_keys = target_closure
         .iter()
-        .filter(|entry| *entry != &receipt.name)
+        .filter(|entry| *entry != &target_key)
         .filter(|entry| !reachable.contains(entry.as_str()))
         .cloned()
         .collect::<Vec<_>>();
+    pruned_dependency_keys.sort();
+    let mut pruned_dependencies = pruned_dependency_keys
+        .iter()
+        .filter_map(|key| node_map.get(key))
+        .map(|node| node.package.clone())
+        .collect::<Vec<_>>();
     pruned_dependencies.sort();
+    pruned_dependencies.dedup();
 
-    let mut removal_names = Vec::with_capacity(pruned_dependencies.len() + 1);
-    removal_names.push(receipt.name.clone());
-    removal_names.extend(pruned_dependencies.iter().cloned());
-    let removal_names_set: HashSet<&str> = removal_names.iter().map(String::as_str).collect();
+    let mut removal_keys = Vec::with_capacity(pruned_dependency_keys.len() + 1);
+    removal_keys.push(target_key.clone());
+    removal_keys.extend(pruned_dependency_keys.iter().cloned());
+    let removal_key_set: HashSet<&str> = removal_keys.iter().map(String::as_str).collect();
 
     let mut target_status = UninstallStatus::RepairedStaleState;
     let mut removed_cache_paths = Vec::new();
-    for removal_name in &removal_names {
-        let Some(removal_receipt) = receipt_map.get(removal_name) else {
+    for removal_key in &removal_keys {
+        let Some(removal_node) = node_map.get(removal_key) else {
             continue;
         };
 
-        if removal_name == &receipt.name {
-            target_status = remove_identity_artifacts(layout, identity, removal_receipt, state)?;
-        } else if let Some(removal_state) = states
-            .iter()
-            .find(|state| state.identity.package == *removal_name)
-        {
+        if removal_key == &target_key {
+            target_status =
+                remove_identity_artifacts(layout, identity, &removal_node.receipt, state)?;
+        } else if let Some(removal_identity) = &removal_node.identity {
             let _ = remove_identity_artifacts(
                 layout,
-                &removal_state.identity,
-                &removal_state.receipt,
-                Some(removal_state),
+                removal_identity,
+                &removal_node.receipt,
+                states
+                    .iter()
+                    .find(|state| &state.identity == removal_identity),
             )?;
         } else {
-            let _ = remove_receipt_artifacts(layout, removal_receipt)?;
+            let _ = remove_receipt_artifacts(layout, &removal_node.receipt)?;
         }
-        if let Some(cache_path) = &removal_receipt.cache_path {
+        if let Some(cache_path) = &removal_node.receipt.cache_path {
             removed_cache_paths.push(cache_path.clone());
         }
     }
 
-    let referenced_cache_paths: HashSet<String> = receipt_map
+    let referenced_cache_paths: HashSet<String> = node_map
         .iter()
-        .filter(|(receipt_name, _)| !removal_names_set.contains(receipt_name.as_str()))
-        .filter_map(|(_, receipt)| receipt.cache_path.clone())
+        .filter(|(key, _)| !removal_key_set.contains(key.as_str()))
+        .filter_map(|(_, node)| node.receipt.cache_path.clone())
         .collect();
     for cache_path in removed_cache_paths {
         if referenced_cache_paths.contains(&cache_path) {
@@ -143,6 +152,10 @@ fn remove_identity_artifacts(
     receipt: &InstallReceipt,
     state: Option<&InstalledPackageState>,
 ) -> Result<UninstallStatus> {
+    if receipt.install_mode == InstallMode::Native {
+        run_identity_native_uninstall_actions(layout, identity)?;
+    }
+
     let package_dir = layout.identity_package_dir(identity, &receipt.version);
     let package_existed = package_dir.exists();
     if package_existed {
@@ -191,6 +204,78 @@ fn remove_identity_artifacts(
     } else {
         UninstallStatus::RepairedStaleState
     })
+}
+
+#[derive(Clone)]
+struct IdentityUninstallNode {
+    key: String,
+    package: String,
+    identity: Option<InstalledPackageIdentity>,
+    receipt: InstallReceipt,
+}
+
+fn identity_uninstall_nodes(
+    states: &[InstalledPackageState],
+    target_identity: &InstalledPackageIdentity,
+    target_receipt: &InstallReceipt,
+) -> Vec<IdentityUninstallNode> {
+    let mut nodes = states
+        .iter()
+        .map(|state| IdentityUninstallNode {
+            key: state.identity.state_key(),
+            package: state.receipt.name.clone(),
+            identity: Some(state.identity.clone()),
+            receipt: state.receipt.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !nodes
+        .iter()
+        .any(|node| node.key == target_identity.state_key())
+    {
+        nodes.push(IdentityUninstallNode {
+            key: target_identity.state_key(),
+            package: target_receipt.name.clone(),
+            identity: Some(target_identity.clone()),
+            receipt: target_receipt.clone(),
+        });
+    }
+    nodes
+}
+
+fn collect_remaining_identity_roots(
+    nodes: &[IdentityUninstallNode],
+    target_key: &str,
+) -> Vec<String> {
+    let mut remaining_roots = nodes
+        .iter()
+        .filter(|node| node.key != target_key)
+        .filter(|node| node.receipt.install_reason == InstallReason::Root)
+        .map(|node| node.key.clone())
+        .collect::<Vec<_>>();
+    remaining_roots.sort();
+    remaining_roots.dedup();
+    remaining_roots
+}
+
+fn identity_dependency_map(nodes: &[IdentityUninstallNode]) -> HashMap<String, BTreeSet<String>> {
+    nodes
+        .iter()
+        .map(|node| {
+            let deps = node
+                .receipt
+                .dependencies
+                .iter()
+                .filter_map(|entry| parse_dependency_name(entry))
+                .flat_map(|dep| {
+                    nodes
+                        .iter()
+                        .filter(move |candidate| candidate.package == dep)
+                        .map(|candidate| candidate.key.clone())
+                })
+                .collect::<BTreeSet<_>>();
+            (node.key.clone(), deps)
+        })
+        .collect()
 }
 
 pub fn uninstall_package_with_dependency_overrides(
