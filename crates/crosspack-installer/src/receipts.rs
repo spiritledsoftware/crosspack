@@ -4,10 +4,53 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::{InstallMode, InstallReason, InstallReceipt, PrefixLayout};
+use crate::{InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity, PrefixLayout};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityInstallReceipt {
+    pub identity: InstalledPackageIdentity,
+    pub receipt: InstallReceipt,
+}
 
 pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) -> Result<PathBuf> {
+    let payload = format_install_receipt_payload(None, receipt);
+    let path = layout.receipt_path(&receipt.name);
+    fs::write(&path, payload.as_bytes())
+        .with_context(|| format!("failed to write install receipt: {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn write_identity_install_receipt(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    receipt: &InstallReceipt,
+) -> Result<PathBuf> {
+    let payload = format_install_receipt_payload(Some(identity), receipt);
+    let path = layout.identity_receipt_path(identity);
+    fs::write(&path, payload.as_bytes())
+        .with_context(|| format!("failed to write install receipt: {}", path.display()))?;
+    Ok(path)
+}
+
+fn format_install_receipt_payload(
+    identity: Option<&InstalledPackageIdentity>,
+    receipt: &InstallReceipt,
+) -> String {
     let mut payload = String::new();
+    if let Some(identity) = identity {
+        payload.push_str(&format!("identity_profile={}\n", identity.profile));
+        if let Some(target) = &identity.target {
+            payload.push_str(&format!("identity_target={target}\n"));
+        }
+        payload.push_str(&format!(
+            "identity_source_namespace={}\n",
+            identity.source_namespace
+        ));
+        if let Some(source_provenance) = &identity.source_provenance {
+            payload.push_str(&format!("identity_source_provenance={source_provenance}\n"));
+        }
+        payload.push_str(&format!("identity_package={}\n", identity.package));
+    }
     payload.push_str(&format!("name={}\n", receipt.name));
     payload.push_str(&format!("version={}\n", receipt.version));
     for dependency in &receipt.dependencies {
@@ -44,14 +87,34 @@ pub fn write_install_receipt(layout: &PrefixLayout, receipt: &InstallReceipt) ->
         "installed_at_unix={}\n",
         receipt.installed_at_unix
     ));
+    payload
+}
 
-    let path = layout.receipt_path(&receipt.name);
-    fs::write(&path, payload.as_bytes())
-        .with_context(|| format!("failed to write install receipt: {}", path.display()))?;
-    Ok(path)
+pub fn read_identity_install_receipt(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<Option<IdentityInstallReceipt>> {
+    let path = layout.identity_receipt_path(identity);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read install receipt: {}", path.display()))?;
+    parse_identity_receipt(&raw)
+        .with_context(|| format!("failed to parse install receipt: {}", path.display()))
+        .map(Some)
 }
 
 pub fn read_install_receipts(layout: &PrefixLayout) -> Result<Vec<InstallReceipt>> {
+    Ok(read_identity_install_receipts(layout)?
+        .into_iter()
+        .map(|entry| entry.receipt)
+        .collect())
+}
+
+pub fn read_identity_install_receipts(
+    layout: &PrefixLayout,
+) -> Result<Vec<IdentityInstallReceipt>> {
     let dir = layout.installed_state_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -73,12 +136,31 @@ pub fn read_install_receipts(layout: &PrefixLayout) -> Result<Vec<InstallReceipt
 
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read install receipt: {}", path.display()))?;
-        let receipt = parse_receipt(&raw)
+        let receipt = parse_identity_receipt(&raw)
             .with_context(|| format!("failed to parse install receipt: {}", path.display()))?;
-        receipts.push(receipt);
+        receipts.push((path, receipt));
     }
 
-    receipts.sort_by(|a, b| a.name.cmp(&b.name));
+    let identity_keys = receipts
+        .iter()
+        .filter(|(path, entry)| *path == layout.identity_receipt_path(&entry.identity))
+        .map(|(_, entry)| entry.identity.state_key())
+        .collect::<std::collections::BTreeSet<_>>();
+    receipts.retain(|(path, entry)| {
+        *path == layout.identity_receipt_path(&entry.identity)
+            || !identity_keys.contains(&entry.identity.state_key())
+    });
+    let mut receipts = receipts
+        .into_iter()
+        .map(|(_, receipt)| receipt)
+        .collect::<Vec<_>>();
+
+    receipts.sort_by(|a, b| {
+        a.receipt
+            .name
+            .cmp(&b.receipt.name)
+            .then_with(|| a.identity.cmp(&b.identity))
+    });
     Ok(receipts)
 }
 
@@ -141,6 +223,43 @@ pub(crate) fn parse_receipt(raw: &str) -> Result<InstallReceipt> {
     })
 }
 
+pub fn parse_identity_receipt(raw: &str) -> Result<IdentityInstallReceipt> {
+    let receipt = parse_receipt(raw)?;
+    let legacy_identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+    let mut profile = None;
+    let mut target = None;
+    let mut source_namespace = None;
+    let mut source_provenance = None;
+    let mut package = None;
+
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "identity_profile" => profile = Some(value.to_string()),
+            "identity_target" => target = Some(value.to_string()),
+            "identity_source_namespace" => source_namespace = Some(value.to_string()),
+            "identity_source_provenance" | "identity_source" => {
+                source_provenance = Some(value.to_string())
+            }
+            "identity_package" => package = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    Ok(IdentityInstallReceipt {
+        identity: InstalledPackageIdentity {
+            profile: profile.unwrap_or(legacy_identity.profile),
+            target: target.or(legacy_identity.target),
+            source_namespace: source_namespace.unwrap_or(legacy_identity.source_namespace),
+            source_provenance: source_provenance.or(legacy_identity.source_provenance),
+            package: package.unwrap_or(legacy_identity.package),
+        },
+        receipt,
+    })
+}
+
 const DECLARED_SERVICES_STATE_VERSION: u32 = 1;
 
 pub fn write_declared_services_state(
@@ -149,9 +268,25 @@ pub fn write_declared_services_state(
     services: &[ServiceDeclaration],
 ) -> Result<PathBuf> {
     let path = layout.declared_services_state_path(package_name);
+    write_declared_services_state_path(&path, services)
+}
+
+pub fn write_identity_declared_services_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    services: &[ServiceDeclaration],
+) -> Result<PathBuf> {
+    let path = layout.identity_declared_services_state_path(identity);
+    write_declared_services_state_path(&path, services)
+}
+
+fn write_declared_services_state_path(
+    path: &std::path::Path,
+    services: &[ServiceDeclaration],
+) -> Result<PathBuf> {
     if services.is_empty() {
-        let _ = fs::remove_file(&path);
-        return Ok(path);
+        let _ = fs::remove_file(path);
+        return Ok(path.to_path_buf());
     }
 
     let mut payload = String::new();
@@ -175,13 +310,13 @@ pub fn write_declared_services_state(
         ));
     }
 
-    fs::write(&path, payload.as_bytes()).with_context(|| {
+    fs::write(path, payload.as_bytes()).with_context(|| {
         format!(
             "failed to write declared services state: {}",
             path.display()
         )
     })?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 pub fn read_declared_services_state(

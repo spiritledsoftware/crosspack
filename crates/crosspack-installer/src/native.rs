@@ -14,8 +14,8 @@ use crate::exposure::{
 };
 use crate::fs_utils::remove_file_if_exists;
 use crate::{
-    GuiExposureAsset, GuiNativeRegistrationRecord, NativeServiceAction, NativeServiceOutcome,
-    NativeSidecarState, NativeUninstallAction, PrefixLayout,
+    GuiExposureAsset, GuiNativeRegistrationRecord, InstalledPackageIdentity, NativeServiceAction,
+    NativeServiceOutcome, NativeSidecarState, NativeUninstallAction, PrefixLayout,
 };
 
 pub(crate) const MACOS_LSREGISTER_PATH: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
@@ -169,9 +169,13 @@ pub fn write_native_sidecar_state(
     state: &NativeSidecarState,
 ) -> Result<PathBuf> {
     let path = layout.gui_native_state_path(package_name);
+    write_native_sidecar_state_path(&path, state)
+}
+
+fn write_native_sidecar_state_path(path: &Path, state: &NativeSidecarState) -> Result<PathBuf> {
     if state.uninstall_actions.is_empty() {
-        let _ = remove_file_if_exists(&path);
-        return Ok(path);
+        let _ = remove_file_if_exists(path);
+        return Ok(path.to_path_buf());
     }
 
     let mut payload = String::new();
@@ -194,9 +198,9 @@ pub fn write_native_sidecar_state(
         ));
     }
 
-    fs::write(&path, payload.as_bytes())
+    fs::write(path, payload.as_bytes())
         .with_context(|| format!("failed to write native sidecar state: {}", path.display()))?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 pub fn read_native_sidecar_state(
@@ -204,6 +208,23 @@ pub fn read_native_sidecar_state(
     package_name: &str,
 ) -> Result<NativeSidecarState> {
     let path = layout.gui_native_state_path(package_name);
+    if !path.exists() {
+        return Ok(NativeSidecarState {
+            uninstall_actions: Vec::new(),
+        });
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read native sidecar state: {}", path.display()))?;
+    parse_native_sidecar_state(&raw)
+        .with_context(|| format!("failed to parse native sidecar state: {}", path.display()))
+}
+
+pub(crate) fn read_identity_native_sidecar_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<NativeSidecarState> {
+    let path = layout.identity_gui_native_state_path(identity);
     if !path.exists() {
         return Ok(NativeSidecarState {
             uninstall_actions: Vec::new(),
@@ -273,6 +294,22 @@ pub fn write_gui_native_state(
             .collect(),
     };
     write_native_sidecar_state(layout, package_name, &state)
+}
+
+pub fn write_identity_gui_native_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    records: &[GuiNativeRegistrationRecord],
+) -> Result<PathBuf> {
+    let state = NativeSidecarState {
+        uninstall_actions: records
+            .iter()
+            .cloned()
+            .map(NativeUninstallAction::from)
+            .collect(),
+    };
+    let path = layout.identity_gui_native_state_path(identity);
+    write_native_sidecar_state_path(&path, &state)
 }
 
 pub fn read_gui_native_state(
@@ -389,6 +426,22 @@ pub fn run_package_native_uninstall_actions(
     package_name: &str,
 ) -> Result<()> {
     run_native_uninstall_actions(layout, package_name)
+}
+
+pub(crate) fn run_identity_native_uninstall_actions(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<()> {
+    let sidecar_state = read_identity_native_sidecar_state(layout, identity)?;
+    for action in &sidecar_state.uninstall_actions {
+        execute_native_uninstall_action(action).with_context(|| {
+            format!(
+                "native uninstall action failed (key='{}', kind='{}', path='{}')",
+                action.key, action.kind, action.path
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn run_native_uninstall_actions(layout: &PrefixLayout, package_name: &str) -> Result<()> {

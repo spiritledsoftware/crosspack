@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::fs_utils::remove_file_if_exists;
-use crate::{GuiExposureAsset, IntegrationProjection, PrefixLayout};
+use crate::{GuiExposureAsset, InstalledPackageIdentity, IntegrationProjection, PrefixLayout};
 
 const INTEGRATION_STATE_VERSION: u32 = 1;
 
@@ -16,9 +16,25 @@ pub fn write_integration_state(
     projections: &[IntegrationProjection],
 ) -> Result<PathBuf> {
     let path = layout.integration_state_path(package_name);
+    write_integration_state_path(&path, projections)
+}
+
+pub fn write_identity_integration_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    projections: &[IntegrationProjection],
+) -> Result<PathBuf> {
+    let path = layout.identity_integration_state_path(identity);
+    write_integration_state_path(&path, projections)
+}
+
+fn write_integration_state_path(
+    path: &Path,
+    projections: &[IntegrationProjection],
+) -> Result<PathBuf> {
     if projections.is_empty() {
-        let _ = remove_file_if_exists(&path);
-        return Ok(path);
+        let _ = remove_file_if_exists(path);
+        return Ok(path.to_path_buf());
     }
 
     let mut payload = String::new();
@@ -39,9 +55,9 @@ pub fn write_integration_state(
         ));
     }
 
-    fs::write(&path, payload.as_bytes())
+    fs::write(path, payload.as_bytes())
         .with_context(|| format!("failed to write integration state: {}", path.display()))?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 pub fn read_integration_state(
@@ -147,9 +163,22 @@ pub fn write_gui_exposure_state(
     assets: &[GuiExposureAsset],
 ) -> Result<PathBuf> {
     let path = layout.gui_state_path(package_name);
+    write_gui_exposure_state_path(&path, assets)
+}
+
+pub fn write_identity_gui_exposure_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    assets: &[GuiExposureAsset],
+) -> Result<PathBuf> {
+    let path = layout.identity_gui_state_path(identity);
+    write_gui_exposure_state_path(&path, assets)
+}
+
+fn write_gui_exposure_state_path(path: &Path, assets: &[GuiExposureAsset]) -> Result<PathBuf> {
     if assets.is_empty() {
-        let _ = remove_file_if_exists(&path);
-        return Ok(path);
+        let _ = remove_file_if_exists(path);
+        return Ok(path.to_path_buf());
     }
 
     let mut payload = String::new();
@@ -166,9 +195,9 @@ pub fn write_gui_exposure_state(
         payload.push_str(&format!("asset={}\t{}\n", asset.key, asset.rel_path));
     }
 
-    fs::write(&path, payload.as_bytes())
+    fs::write(path, payload.as_bytes())
         .with_context(|| format!("failed to write gui exposure state: {}", path.display()))?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 pub fn read_gui_exposure_state(

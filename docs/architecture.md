@@ -79,7 +79,7 @@ Default user prefixes:
   - `--allow-escalation` conflicts with `--no-escalation`.
 - Output determinism contract remains fixed for machine-oriented lines (`transaction_preview`, `transaction_summary`, `risk_flags`, ordered `change_*`, and `update summary: updated=<n> up-to-date=<n> failed=<n>`).
 - Interactive rendering is additive only and must continue to route through centralized renderer/formatter/progress helpers so plain-mode contracts remain unchanged.
-- `pin` stores per-package version constraints in `<prefix>/state/pins/<name>.pin`.
+- `pin` stores broad per-package version constraints in `<prefix>/state/pins/<name>.pin`; selector flags can scope a pin to an installed identity under `<prefix>/state/pins/<identity-key>.pin`.
 - `outdated` compares installed receipt versions with latest available metadata versions and reports upgrade candidates.
 - `depends <name>`, `uses <name>`, and `why <name>` provide deterministic dependency introspection from installed receipts.
 - `bundle export` writes deterministic root+pin environment bundles; `bundle apply` replays bundle roots through standard resolve/install flows.
@@ -108,10 +108,12 @@ Default user prefixes:
 - Rollback replay for native package journal steps runs native uninstall actions before managed snapshot restore.
 - Transaction metadata is parsed and written through typed status values and coordinated through installer-owned transaction APIs for begin/status/active-marker cleanup.
 - Successful multi-package install/upgrade receipts in one transaction share a single `snapshot_id` to preserve metadata provenance.
+- Installed package state and new install storage are identity-aware. New installs write receipts, package payloads, sidecars, pins, and installed-state documents under identity-keyed paths that include profile, target, source namespace, and package fields. Source provenance is recorded separately for diagnostics.
+- New identity payload roots use `<prefix>/pkgs/identities/v1/<profile>/<target>/<namespace>/<package>/<version>/`; legacy `<prefix>/pkgs/<name>/<version>/` payloads remain readable and removable for compatibility.
 - Installed state is hydrated through a versioned state API that reads new identity-keyed state documents when present and falls back to legacy receipt/sidecar files (`.receipt`, `.gui`, `.gui-native`, `.services`, `.integrations`).
-- New installed-state documents are keyed by imported installed identity (`default--<target-or-host>--<package>.state.json`) while legacy package-name receipt paths remain readable and writable for compatibility.
-- Bare package lifecycle commands keep package-name defaults, but fail with deterministic guidance when multiple installed identities share the same package name and the command has no target/profile selector yet.
-- `list` reads hydrated installed package state from `<prefix>/state/installed/` and prints the same `name version` rows.
+- Bare package lifecycle commands keep package-name defaults when exactly one installed identity matches, but fail with deterministic selector guidance when multiple installed identities share the same package name.
+- `uninstall <name>` accepts `--target`, `--profile`, and `--source` selectors, plus compact `name@target#profile` syntax, to target one installed identity.
+- `list` reads hydrated installed package state from `<prefix>/state/installed/` and prints the same `name version` rows by default; `list --identity` exposes target/profile/source fields for automation.
 - `completions <bash|zsh|fish|powershell>` prints shell completion scripts for the canonical `crosspack` binary name and includes a loader block for package-declared completions.
 - `init-shell [--shell <bash|zsh|fish|powershell>]` prints shell setup snippets for PATH + completion loading; without `--shell`, shell is auto-detected (with deterministic fallback).
 - Install scripts attempt best-effort shell setup by generating completion files under `<prefix>/share/completions/` and upserting one managed profile block; failures warn and do not abort install.

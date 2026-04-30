@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use crate::receipts::parse_receipt;
 use crate::{
     read_declared_services_state, read_gui_exposure_state, read_gui_native_state,
-    read_install_receipts, read_integration_state, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity, IntegrationProjection,
-    PrefixLayout,
+    read_identity_install_receipts, read_integration_state, GuiExposureAsset,
+    GuiNativeRegistrationRecord, InstallMode, InstallReason, InstallReceipt,
+    InstalledPackageIdentity, InstalledPackageSelector, IntegrationProjection, PrefixLayout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,24 @@ pub struct InstalledPackageState {
     pub services: Vec<ServiceDeclaration>,
     pub integrations: Vec<IntegrationProjection>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPackageSelectionAmbiguity {
+    pub selector: InstalledPackageSelector,
+    pub matches: Vec<InstalledPackageState>,
+}
+
+impl std::fmt::Display for InstalledPackageSelectionAmbiguity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "installed package name '{}' is ambiguous",
+            self.selector.package
+        )
+    }
+}
+
+impl std::error::Error for InstalledPackageSelectionAmbiguity {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +77,19 @@ struct InstallReceiptDocument {
 struct InstalledPackageIdentityDocument {
     profile: String,
     target: Option<String>,
+    #[serde(default = "default_installed_source_namespace")]
+    source_namespace: String,
+    #[serde(default = "default_installed_source_provenance")]
+    source_provenance: Option<String>,
     package: String,
+}
+
+fn default_installed_source_namespace() -> String {
+    "default".to_string()
+}
+
+fn default_installed_source_provenance() -> Option<String> {
+    Some("unknown".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +155,8 @@ impl From<&InstalledPackageIdentity> for InstalledPackageIdentityDocument {
         Self {
             profile: identity.profile.clone(),
             target: identity.target.clone(),
+            source_namespace: identity.source_namespace.clone(),
+            source_provenance: identity.source_provenance.clone(),
             package: identity.package.clone(),
         }
     }
@@ -135,6 +167,10 @@ impl From<InstalledPackageIdentityDocument> for InstalledPackageIdentity {
         Self {
             profile: document.profile,
             target: document.target,
+            source_namespace: document.source_namespace,
+            source_provenance: document
+                .source_provenance
+                .or_else(default_installed_source_provenance),
             package: document.package,
         }
     }
@@ -284,7 +320,7 @@ fn read_installed_package_state_document(
     package_name: &str,
 ) -> Result<Option<InstalledPackageState>> {
     let receipt_path = layout.receipt_path(package_name);
-    let identity_path = if receipt_path.exists() {
+    let identity_paths = if receipt_path.exists() {
         let raw = fs::read_to_string(&receipt_path).with_context(|| {
             format!("failed to read install receipt: {}", receipt_path.display())
         })?;
@@ -294,16 +330,22 @@ fn read_installed_package_state_document(
                 receipt_path.display()
             )
         })?;
-        Some(layout.installed_identity_state_document_path(
-            &InstalledPackageIdentity::from_legacy_receipt(&receipt),
-        ))
+        let identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+        vec![
+            layout.installed_identity_state_document_path(&identity),
+            layout.installed_legacy_identity_state_document_path(&identity),
+        ]
     } else {
-        None
+        Vec::new()
     };
     let legacy_path = layout.installed_state_document_path(package_name);
-    let path = identity_path
-        .filter(|path| path.exists())
-        .unwrap_or(legacy_path);
+    let path = identity_paths
+        .into_iter()
+        .chain(std::iter::once(legacy_path))
+        .find(|path| path.exists());
+    let Some(path) = path else {
+        return Ok(None);
+    };
     if !path.exists() {
         return Ok(None);
     }
@@ -330,6 +372,36 @@ fn read_installed_package_state_document_path(
     InstalledPackageState::try_from(document)
 }
 
+fn read_installed_package_state_for_identity_receipt(
+    layout: &PrefixLayout,
+    identity: InstalledPackageIdentity,
+    receipt: InstallReceipt,
+) -> Result<InstalledPackageState> {
+    let identity_paths = [
+        layout.installed_identity_state_document_path(&identity),
+        layout.installed_legacy_identity_state_document_path(&identity),
+    ];
+    if let Some(path) = identity_paths.into_iter().find(|path| path.exists()) {
+        return read_installed_package_state_document_path(&path);
+    }
+
+    let legacy_identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+    let legacy_path = layout.installed_state_document_path(&receipt.name);
+    if identity == legacy_identity && legacy_path.exists() {
+        return read_installed_package_state_document_path(&legacy_path);
+    }
+
+    Ok(InstalledPackageState {
+        identity,
+        version: receipt.version.clone(),
+        receipt,
+        gui_assets: Vec::new(),
+        native_gui_records: Vec::new(),
+        services: Vec::new(),
+        integrations: Vec::new(),
+    })
+}
+
 pub fn read_installed_package_state(
     layout: &PrefixLayout,
     package_name: &str,
@@ -340,7 +412,7 @@ pub fn read_installed_package_state(
 
     let receipt_path = layout.receipt_path(package_name);
     if !receipt_path.exists() {
-        return Ok(None);
+        return read_installed_package_state_document_by_package_name(layout, package_name);
     }
 
     let raw = fs::read_to_string(&receipt_path)
@@ -364,17 +436,52 @@ pub fn read_installed_package_state(
     }))
 }
 
+fn read_installed_package_state_document_by_package_name(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Option<InstalledPackageState>> {
+    let installed_dir = layout.installed_state_dir();
+    let entries = match fs::read_dir(&installed_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", installed_dir.display()));
+        }
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", installed_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let state = read_installed_package_state_document_path(&path)?;
+        if state.identity.package == package_name {
+            matches.push(state);
+        }
+    }
+    matches.sort_by(|left, right| left.identity.cmp(&right.identity));
+    Ok(matches.into_iter().next())
+}
+
 pub fn read_all_installed_package_states(
     layout: &PrefixLayout,
 ) -> Result<Vec<InstalledPackageState>> {
-    let receipts = read_install_receipts(layout)?;
+    let receipts = read_identity_install_receipts(layout)?;
     let mut states = Vec::new();
     let mut state_keys = std::collections::BTreeSet::new();
-    for receipt in receipts {
-        if let Some(state) = read_installed_package_state(layout, &receipt.name)? {
-            state_keys.insert(state.identity.state_key());
-            states.push(state);
+    let mut document_state_keys = std::collections::BTreeMap::new();
+    for entry in receipts {
+        let state = read_installed_package_state_for_identity_receipt(
+            layout,
+            entry.identity,
+            entry.receipt,
+        )?;
+        let state_key = state.identity.state_key();
+        if !state_keys.insert(state_key.clone()) {
+            return Err(anyhow::anyhow!("duplicate installed identity: {state_key}"));
         }
+        states.push(state);
     }
     let installed_dir = layout.installed_state_dir();
     let entries = match fs::read_dir(&installed_dir) {
@@ -399,9 +506,18 @@ pub fn read_all_installed_package_states(
             continue;
         }
         let state = read_installed_package_state_document_path(&path)?;
-        if state_keys.insert(state.identity.state_key()) {
-            states.push(state);
+        let state_key = state.identity.state_key();
+        let legacy_path = layout.installed_state_document_path(&state.identity.package);
+        if let Some(previous_path) = document_state_keys.insert(state_key.clone(), path.clone()) {
+            if path == legacy_path || previous_path == legacy_path {
+                continue;
+            }
+            return Err(anyhow::anyhow!("duplicate installed identity: {state_key}"));
         }
+        if !state_keys.insert(state_key) {
+            continue;
+        }
+        states.push(state);
     }
     states.sort_by(|left, right| {
         left.receipt
@@ -420,4 +536,25 @@ pub fn find_installed_states_by_package_name(
         .into_iter()
         .filter(|state| state.identity.package == package_name)
         .collect())
+}
+
+pub fn resolve_installed_package_selector(
+    layout: &PrefixLayout,
+    selector: &InstalledPackageSelector,
+) -> Result<std::result::Result<Option<InstalledPackageState>, InstalledPackageSelectionAmbiguity>>
+{
+    let mut matches = read_all_installed_package_states(layout)?
+        .into_iter()
+        .filter(|state| selector.matches(&state.identity))
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.identity.cmp(&right.identity));
+
+    Ok(match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(InstalledPackageSelectionAmbiguity {
+            selector: selector.clone(),
+            matches,
+        }),
+    })
 }

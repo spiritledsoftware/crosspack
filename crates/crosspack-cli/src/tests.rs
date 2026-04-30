@@ -4278,7 +4278,9 @@ ripgrep-legacy = "*"
         .expect("command must parse");
 
         match cli.command {
-            Commands::Uninstall { name, escalation } => {
+            Commands::Uninstall {
+                name, escalation, ..
+            } => {
                 assert_eq!(name, "ripgrep");
                 assert!(escalation.non_interactive);
                 assert!(escalation.allow_escalation);
@@ -7876,6 +7878,10 @@ sha256 = "abc"
             name: "demo-bin".to_string(),
             path: "demo-bin".to_string(),
         }];
+        resolved.manifest.services = vec![ServiceDeclaration {
+            name: "demo-bin".to_string(),
+            native_id: None,
+        }];
         let cache_path = resolved_artifact_cache_path(
             &layout,
             &resolved.manifest.name,
@@ -7918,11 +7924,22 @@ sha256 = "abc"
         )
         .expect("install should succeed");
 
+        let identity = InstalledPackageIdentity {
+            profile: "default".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            source_namespace: "default".to_string(),
+            source_provenance: Some("unknown".to_string()),
+            package: "demo-bin".to_string(),
+        };
         assert!(layout.receipt_path("demo-bin").exists());
+        assert!(layout.identity_receipt_path(&identity).exists());
+        assert!(layout.identity_package_dir(&identity, "1.0.0").exists());
         assert!(layout
             .installed_identity_state_document_path(&InstalledPackageIdentity {
                 profile: "default".to_string(),
                 target: Some("x86_64-unknown-linux-gnu".to_string()),
+                source_namespace: "default".to_string(),
+                source_provenance: Some("unknown".to_string()),
                 package: "demo-bin".to_string(),
             })
             .exists());
@@ -7931,6 +7948,12 @@ sha256 = "abc"
             .expect("demo-bin must be installed");
         assert_eq!(state.receipt.name, "demo-bin");
         assert_eq!(state.receipt.exposed_bins, vec!["demo-bin"]);
+        assert_eq!(
+            read_declared_services_state(&layout, "demo-bin")
+                .expect("must read package-keyed declared services")
+                .len(),
+            1
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -7970,15 +7993,15 @@ sha256 = "abc"
             .expect_err("ambiguous package should fail before uninstall");
         let message = err.to_string();
         assert!(
-            message.contains(
-                "installed package name 'demo' is ambiguous; this command cannot disambiguate target/profile yet"
-            ),
+            message.contains("installed package name 'demo' is ambiguous; specify one of:"),
             "unexpected error: {message}"
         );
         assert!(
-            message.contains("default--aarch64-apple-darwin--demo")
-                && message.contains("default--x86_64-unknown-linux-gnu--demo"),
-            "error should list matching identities: {message}"
+            message.contains("demo --target aarch64-apple-darwin --profile default --source default")
+                && message.contains(
+                    "demo --target x86_64-unknown-linux-gnu --profile default --source default"
+                ),
+            "error should list matching selectors: {message}"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());

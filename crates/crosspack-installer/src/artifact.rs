@@ -17,6 +17,17 @@ pub fn install_from_artifact(
     archive_type: ArchiveType,
     options: ArtifactInstallOptions<'_>,
 ) -> Result<PathBuf> {
+    let dst = layout.package_dir(name, version);
+    install_from_artifact_to_dir(layout, &dst, archive_path, archive_type, options)
+}
+
+pub fn install_from_artifact_to_dir(
+    layout: &PrefixLayout,
+    dst: &Path,
+    archive_path: &Path,
+    archive_type: ArchiveType,
+    options: ArtifactInstallOptions<'_>,
+) -> Result<PathBuf> {
     let install_tmp = make_tmp_dir(layout, "install")?;
     let raw_dir = install_tmp.join("raw");
     let staged_dir = install_tmp.join("staged");
@@ -48,22 +59,40 @@ pub fn install_from_artifact(
 
     copy_with_strip(&raw_dir, &staged_dir, options.strip_components as usize)?;
 
-    let dst = layout.package_dir(name, version);
     if dst.exists() {
-        fs::remove_dir_all(&dst)
+        fs::remove_dir_all(dst)
             .with_context(|| format!("failed to remove existing package dir: {}", dst.display()))?;
     }
 
-    move_dir_or_copy(&staged_dir, &dst)?;
+    move_dir_or_copy(&staged_dir, dst)?;
 
     let _ = fs::remove_dir_all(&install_tmp);
-    Ok(dst)
+    Ok(dst.to_path_buf())
 }
 
 pub fn install_from_source_archive(
     layout: &PrefixLayout,
     name: &str,
     version: &str,
+    source_archive_path: &Path,
+    source_archive_type: ArchiveType,
+    build_commands: &[String],
+    install_commands: &[String],
+) -> Result<PathBuf> {
+    let dst = layout.package_dir(name, version);
+    install_from_source_archive_to_dir(
+        layout,
+        &dst,
+        source_archive_path,
+        source_archive_type,
+        build_commands,
+        install_commands,
+    )
+}
+
+pub fn install_from_source_archive_to_dir(
+    layout: &PrefixLayout,
+    dst: &Path,
     source_archive_path: &Path,
     source_archive_type: ArchiveType,
     build_commands: &[String],
@@ -112,15 +141,14 @@ pub fn install_from_source_archive(
     run_source_build_command("build", build_commands, &source_root, &staged_dir)?;
     run_source_build_command("install", install_commands, &source_root, &staged_dir)?;
 
-    let dst = layout.package_dir(name, version);
     if dst.exists() {
-        fs::remove_dir_all(&dst)
+        fs::remove_dir_all(dst)
             .with_context(|| format!("failed to remove existing package dir: {}", dst.display()))?;
     }
-    move_dir_or_copy(&staged_dir, &dst)?;
+    move_dir_or_copy(&staged_dir, dst)?;
 
     let _ = fs::remove_dir_all(&install_tmp);
-    Ok(dst)
+    Ok(dst.to_path_buf())
 }
 
 fn infer_source_root(source_raw_dir: &Path) -> Result<PathBuf> {

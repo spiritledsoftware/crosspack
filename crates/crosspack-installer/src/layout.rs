@@ -88,12 +88,39 @@ impl PrefixLayout {
         self.pins_dir().join(format!("{name}.pin"))
     }
 
+    pub fn identity_pin_path(&self, identity: &InstalledPackageIdentity) -> PathBuf {
+        self.pins_dir()
+            .join(format!("{}.pin", identity.state_key()))
+    }
+
     pub fn package_dir(&self, name: &str, version: &str) -> PathBuf {
         self.pkgs_dir().join(name).join(version)
     }
 
+    pub fn identity_pkgs_dir(&self) -> PathBuf {
+        self.pkgs_dir().join("identities").join("v1")
+    }
+
+    pub fn identity_package_dir(
+        &self,
+        identity: &InstalledPackageIdentity,
+        version: &str,
+    ) -> PathBuf {
+        self.identity_pkgs_dir()
+            .join(&identity.profile)
+            .join(identity.target_label())
+            .join(identity.source_namespace_label())
+            .join(&identity.package)
+            .join(version)
+    }
+
     pub fn receipt_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.receipt"))
+    }
+
+    pub fn identity_receipt_path(&self, identity: &InstalledPackageIdentity) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.receipt", identity.state_key()))
     }
 
     pub fn installed_state_document_path(&self, package_name: &str) -> PathBuf {
@@ -109,8 +136,21 @@ impl PrefixLayout {
             .join(format!("{}.state.json", identity.state_key()))
     }
 
+    pub fn installed_legacy_identity_state_document_path(
+        &self,
+        identity: &InstalledPackageIdentity,
+    ) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.state.json", identity.legacy_state_key()))
+    }
+
     pub fn gui_state_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.gui"))
+    }
+
+    pub fn identity_gui_state_path(&self, identity: &InstalledPackageIdentity) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.gui", identity.state_key()))
     }
 
     pub fn gui_native_state_path(&self, name: &str) -> PathBuf {
@@ -118,13 +158,31 @@ impl PrefixLayout {
             .join(format!("{name}.gui-native"))
     }
 
+    pub fn identity_gui_native_state_path(&self, identity: &InstalledPackageIdentity) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.gui-native", identity.state_key()))
+    }
+
     pub fn declared_services_state_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir().join(format!("{name}.services"))
+    }
+
+    pub fn identity_declared_services_state_path(
+        &self,
+        identity: &InstalledPackageIdentity,
+    ) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.services", identity.state_key()))
     }
 
     pub fn integration_state_path(&self, name: &str) -> PathBuf {
         self.installed_state_dir()
             .join(format!("{name}.integrations"))
+    }
+
+    pub fn identity_integration_state_path(&self, identity: &InstalledPackageIdentity) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.integrations", identity.state_key()))
     }
 
     pub fn transactions_dir(&self) -> PathBuf {
@@ -168,6 +226,7 @@ impl PrefixLayout {
     pub fn ensure_base_dirs(&self) -> Result<()> {
         for dir in [
             self.pkgs_dir(),
+            self.identity_pkgs_dir(),
             self.bin_dir(),
             self.state_dir(),
             self.cache_dir(),

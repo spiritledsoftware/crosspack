@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::PrefixLayout;
+use crate::{InstalledPackageIdentity, PrefixLayout};
 
 pub fn write_pin(layout: &PrefixLayout, name: &str, requirement: &str) -> Result<PathBuf> {
     let pin_path = layout.pin_path(name);
@@ -23,6 +23,39 @@ pub fn read_pin(layout: &PrefixLayout, name: &str) -> Result<Option<String>> {
         return Ok(None);
     }
 
+    let value = fs::read_to_string(&pin_path)
+        .with_context(|| format!("failed to read pin: {}", pin_path.display()))?;
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed))
+}
+
+pub fn write_identity_pin(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    requirement: &str,
+) -> Result<PathBuf> {
+    let pin_path = layout.identity_pin_path(identity);
+    if let Some(parent) = pin_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create pin dir: {}", parent.display()))?;
+    }
+
+    fs::write(&pin_path, requirement.as_bytes())
+        .with_context(|| format!("failed to write pin: {}", pin_path.display()))?;
+    Ok(pin_path)
+}
+
+pub fn read_identity_pin(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<Option<String>> {
+    let pin_path = layout.identity_pin_path(identity);
+    if !pin_path.exists() {
+        return Ok(None);
+    }
     let value = fs::read_to_string(&pin_path)
         .with_context(|| format!("failed to read pin: {}", pin_path.display()))?;
     let trimmed = value.trim().to_string();
