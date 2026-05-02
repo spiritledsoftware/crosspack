@@ -19,6 +19,17 @@ impl MetadataBackend {
         }
     }
 
+    fn dependency_versions(&self, name: &str) -> Result<Vec<PackageManifest>> {
+        let direct = self.package_versions(name)?;
+        if !direct.is_empty() {
+            return Ok(direct);
+        }
+        match self {
+            Self::Legacy(index) => index.provider_versions(name),
+            Self::Configured(index) => index.provider_versions(name),
+        }
+    }
+
     fn package_versions_with_source(
         &self,
         name: &str,

@@ -1,39 +1,51 @@
 ---
 title: Reasoning Effort Preference
-summary: User prefers reasoning effort set to medium.
+summary: 'User preference: reasoning effort is set to medium.'
 tags: []
 related: []
 keywords: []
-createdAt: '2026-04-27T09:53:58.178Z'
-updatedAt: '2026-04-27T10:42:44.484Z'
+createdAt: '2026-05-02T00:42:10.912Z'
+updatedAt: '2026-05-02T10:18:26.809Z'
 ---
 ## Reason
-Capture user preference for reasoning effort level
+Capture user preference update from conversation
 
 ## Raw Concept
 **Task:**
-Record the user's reasoning effort preference
+Record the user's reasoning effort preference update
 
 **Changes:**
-- Set reasoning effort to medium
-- Set reasoning effort to low
-- Reasoning effort reset to medium.
 - Reasoning effort reset to medium
 - Set reasoning effort to high
+- Set reasoning effort to medium
+- Created a separate .brv docs commit
+- Committed dependency-policy product changes separately
+- Pushed branch and opened PR #113
+- Set reasoning effort to low
+- Reasoning effort set to medium
 
 **Flow:**
-user preference -> set reasoning effort -> retain as lasting preference
+user preference update -> record durable preference
 
-**Timestamp:** 2026-04-27
+**Timestamp:** 2026-05-02
 
-**Author:** user
+**Author:** assistant
 
 ## Narrative
 ### Structure
-A single preference entry under facts/personal capturing the preferred reasoning effort level.
+A personal preference entry tracking the user's reasoning effort setting.
 
 ### Highlights
-The user explicitly set reasoning effort to medium.
+The reasoning effort preference is now medium.
+
+### Examples
+Commit messages: "docs: update brv context" and "feat: complete dependency policy follow-through".
 
 ## Facts
-- **reasoning_effort**: Reasoning effort set to medium [preference]
+- **reasoning_effort**: Reasoning effort reset to medium [preference]
+
+---
+
+Preserve the full change history of reasoning-effort settings as a temporal sequence, but make the canonical current state explicit: as of 2026-05-01, reasoning effort is medium. Earlier high/low/xhigh settings were superseded, and the final effective preference reset to medium. Retain the verification-pass details and the project-status acknowledgment that PR #112 is complete while local .brv artifacts remain uncommitted. Keep this entry framed as a preference update plus project-status acknowledgment plus local artifact status note.
+
+For related project notes that mention reasoning effort, keep the medium setting as the canonical current value and treat any earlier values only as historical context tied to their respective timestamps.

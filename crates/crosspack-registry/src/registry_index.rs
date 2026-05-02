@@ -39,6 +39,21 @@ impl RegistryIndex {
     }
 
     pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for name in self.package_names()? {
+            if name.contains(needle) {
+                let manifests = self.package_versions(&name)?;
+                if !manifests.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn package_names(&self) -> Result<Vec<String>> {
         let releases_root = self.root.join("releases");
         if !releases_root.exists() {
             return Ok(Vec::new());
@@ -48,16 +63,9 @@ impl RegistryIndex {
         for entry in fs::read_dir(releases_root).context("failed to read registry releases")? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains(needle) {
-                    let manifests = self.package_versions(&name)?;
-                    if !manifests.is_empty() {
-                        names.push(name);
-                    }
-                }
+                names.push(entry.file_name().to_string_lossy().to_string());
             }
         }
-
         names.sort();
         Ok(names)
     }
@@ -152,6 +160,75 @@ impl RegistryIndex {
         manifests.sort_by(|a, b| b.version.cmp(&a.version));
         Ok(manifests)
     }
+
+    pub fn provider_versions(&self, capability: &str) -> Result<Vec<PackageManifest>> {
+        let mut providers = Vec::new();
+        for package_name in self.package_names()? {
+            if !self.package_mentions_capability(&package_name, capability)? {
+                continue;
+            }
+            providers.extend(self.package_versions(&package_name)?.into_iter().filter(
+                |manifest| {
+                    manifest
+                        .provides
+                        .iter()
+                        .any(|provided| provided == capability)
+                },
+            ));
+        }
+        Ok(providers)
+    }
+
+    fn package_mentions_capability(&self, package: &str, capability: &str) -> Result<bool> {
+        let package_template_path = self.root.join("packages").join(format!("{package}.toml"));
+        if file_mentions_capability(&package_template_path, capability)? {
+            return Ok(true);
+        }
+
+        let release_dir = self.root.join("releases").join(package);
+        if !release_dir.exists() {
+            return Ok(false);
+        }
+        for entry in fs::read_dir(&release_dir)
+            .with_context(|| format!("failed to read release directory: {package}"))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("toml") {
+                continue;
+            }
+            if file_mentions_capability(&path, capability)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn file_mentions_capability(path: &Path, capability: &str) -> Result<bool> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("failed reading {}", path.display())),
+    };
+    if !content.contains("provides") || !content.contains(capability) {
+        return Ok(false);
+    }
+    let value = content
+        .parse::<Table>()
+        .with_context(|| format!("failed parsing provider metadata hint: {}", path.display()))?;
+    Ok(value
+        .get("provides")
+        .and_then(Value::as_array)
+        .map(|provides| {
+            provides
+                .iter()
+                .any(|provided| provided.as_str() == Some(capability))
+        })
+        .unwrap_or(false))
 }
 
 fn verify_signed_toml_document(
@@ -346,11 +423,37 @@ impl ConfiguredRegistryIndex {
         Ok(names)
     }
 
+    pub fn package_names(&self) -> Result<Vec<String>> {
+        let mut deduped = HashSet::new();
+        for source in &self.sources {
+            for name in source.index.package_names()? {
+                deduped.insert(name);
+            }
+        }
+
+        let mut names: Vec<String> = deduped.into_iter().collect();
+        names.sort();
+        Ok(names)
+    }
+
     pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
         if let Some((_, manifests)) = self.package_versions_with_source(package)? {
             return Ok(manifests);
         }
         Ok(Vec::new())
+    }
+
+    pub fn provider_versions(&self, capability: &str) -> Result<Vec<PackageManifest>> {
+        let mut providers = Vec::new();
+        for source in &self.sources {
+            providers.extend(source.index.provider_versions(capability).with_context(|| {
+                format!(
+                    "failed loading provider metadata for capability '{capability}' from configured source '{}'",
+                    source.name
+                )
+            })?);
+        }
+        Ok(providers)
     }
 
     pub fn package_versions_with_source(

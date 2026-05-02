@@ -2,7 +2,7 @@
 title: Release Please sections visible
 summary: Release Please changelog sections remain visible; suppression is handled by workflow path filters instead of hidden config flags.
 tags: []
-related: []
+related: [facts/project/github_actions_workflow_filtering.md, facts/project/workflow_context_commit_fact.md, facts/project/github_actions_workflow_filtering.overview.md, facts/project/release_please_sections_visible.overview.md, facts/project/workflow_context_commit_fact.abstract.md]
 keywords: []
 createdAt: '2026-04-27T09:55:11.765Z'
 updatedAt: '2026-04-27T09:55:11.765Z'

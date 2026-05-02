@@ -2,7 +2,7 @@
 title: GitHub Actions Workflow Filtering
 summary: Workflow filters now use allow-list paths for product-impacting files, registry submodule bumps are treated as non-release changes, Release Please hides non-release changelog sections, and validation passed.
 tags: []
-related: []
+related: [facts/project/release_please_sections_visible.md, facts/project/workflow_context_commit_fact.md, facts/project/github_actions_workflow_filtering.overview.md, facts/project/release_please_sections_visible.overview.md, facts/project/workflow_context_commit_fact.abstract.md]
 keywords: []
 createdAt: '2026-04-27T09:41:25.858Z'
 updatedAt: '2026-04-27T09:41:25.858Z'

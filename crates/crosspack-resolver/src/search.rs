@@ -9,7 +9,7 @@ use crate::constraints::selected_satisfies_constraints;
 pub(crate) fn search<F>(
     constraints: &mut BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
-    installed: &BTreeMap<String, PackageManifest>,
+    installed: &[PackageManifest],
     selected: &mut BTreeMap<String, PackageManifest>,
     versions_cache: &mut HashMap<String, Vec<PackageManifest>>,
     load_versions: &mut F,
@@ -22,8 +22,14 @@ where
         .find(|name| !selected.contains_key(*name))
         .cloned()
     {
-        let candidates =
-            matching_candidates(&next, constraints, pins, versions_cache, load_versions)?;
+        let candidates = matching_candidates(
+            &next,
+            constraints,
+            pins,
+            installed,
+            versions_cache,
+            load_versions,
+        )?;
 
         for candidate in candidates {
             selected.insert(next.clone(), candidate.clone());
@@ -73,6 +79,7 @@ fn matching_candidates<F>(
     name: &str,
     constraints: &BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
+    installed: &[PackageManifest],
     versions_cache: &mut HashMap<String, Vec<PackageManifest>>,
     load_versions: &mut F,
 ) -> Result<Vec<PackageManifest>>
@@ -125,6 +132,14 @@ where
     };
 
     selected.sort_by(|a, b| b.version.cmp(&a.version).then_with(|| a.name.cmp(&b.name)));
+    if !has_direct_match {
+        selected.sort_by(|a, b| {
+            provider_stability_rank(name, a, installed)
+                .cmp(&provider_stability_rank(name, b, installed))
+                .then_with(|| b.version.cmp(&a.version))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
 
     if selected.is_empty() {
         let req_desc = if package_reqs.is_empty() {
@@ -147,4 +162,23 @@ where
     }
 
     Ok(selected)
+}
+
+fn provider_stability_rank(
+    capability: &str,
+    candidate: &PackageManifest,
+    installed: &[PackageManifest],
+) -> u8 {
+    if installed.iter().any(|installed_manifest| {
+        installed_manifest.name == candidate.name
+            && installed_manifest.version == candidate.version
+            && installed_manifest
+                .provides
+                .iter()
+                .any(|provided| provided == capability)
+    }) {
+        0
+    } else {
+        1
+    }
 }

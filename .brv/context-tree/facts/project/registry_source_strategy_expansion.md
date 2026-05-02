@@ -2,7 +2,7 @@
 title: Registry Source Strategy Expansion
 summary: Registry now supports automatable upstream source strategies for Go, Rustup static archives, Zig download index, and python-build-standalone; manual source detour removed.
 tags: []
-related: []
+related: [facts/project/registry_source_strategy_expansion.overview.md, facts/project/registry_source_and_package_roles.overview.md, facts/project/registry_automation_package_only_configs.overview.md, facts/project/registry_automation_package_only_configs.abstract.md]
 keywords: []
 createdAt: '2026-04-27T10:40:04.375Z'
 updatedAt: '2026-04-27T10:40:04.375Z'

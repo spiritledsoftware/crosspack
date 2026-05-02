@@ -129,7 +129,7 @@ Operator commands:
 
 ## Dependency Policy Behavior
 
-Current behavior includes provider capability selection (`provides`), conflict gating (`conflicts`) during resolution/preflight, and replacement semantics (`replaces`) with ownership-aware binary handoff. `docs/dependency-policy-spec.md` remains the broader design reference for future policy expansion.
+Current behavior includes provider capability selection (`provides`), conflict gating (`conflicts`) during resolution/preflight, and replacement semantics (`replaces`) with ownership-aware binary handoff. Dependency tokens resolve to direct package manifests first; when no direct package exists, configured registry metadata is searched for packages declaring the requested capability. During upgrade planning, an already-installed provider at the same package version is preferred for a capability when it still satisfies constraints, pins, and conflicts; direct package-name dependencies still take precedence over provider candidates. `docs/dependency-policy-spec.md` remains the broader design reference for future policy expansion.
 
 ## Receipt Fields
 
