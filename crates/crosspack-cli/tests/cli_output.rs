@@ -9,10 +9,6 @@ fn assert_no_terminal_control_sequences(output_name: &str, output: &str) {
         !output.contains('\x1b'),
         "{output_name} contained ANSI escape/control sequence: {output:?}"
     );
-    assert!(
-        !output.contains("\x1b[2K"),
-        "{output_name} contained clear-line escape: {output:?}"
-    );
 }
 
 #[test]
@@ -25,7 +21,9 @@ fn doctor_stdout_has_no_terminal_control_sequences_when_captured() {
 
     assert!(output.status.success(), "doctor should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert_no_terminal_control_sequences("stdout", &stdout);
+    assert_no_terminal_control_sequences("stderr", &stderr);
 }
 
 #[cfg(unix)]

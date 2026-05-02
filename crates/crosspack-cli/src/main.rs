@@ -91,6 +91,7 @@ enum OutputStyle {
 #[allow(dead_code)]
 enum ProgressMode {
     Auto,
+    // Reserved for the planned public `--progress=always|never|auto` flag.
     Always,
     Never,
 }
