@@ -277,9 +277,13 @@ fn apply_provider_override(
         ));
     }
 
+    let mut provider_name_seen = false;
     let filtered = candidates
         .into_iter()
         .filter(|manifest| {
+            if manifest.name == *provider_name {
+                provider_name_seen = true;
+            }
             manifest.name == *provider_name
                 && (manifest.name == requested_name
                     || manifest
@@ -290,9 +294,19 @@ fn apply_provider_override(
         .collect::<Vec<_>>();
 
     if filtered.is_empty() {
+        if provider_name_seen {
+            return Err(anyhow!(
+                "provider override '{}={}' is invalid: package '{}' does not provide capability '{}'",
+                requested_name,
+                provider_name,
+                provider_name,
+                requested_name
+            ));
+        }
         return Err(anyhow!(
-            "provider override '{}={}' did not match any candidate packages",
+            "provider override '{}={}' references unknown provider package '{}'",
             requested_name,
+            provider_name,
             provider_name
         ));
     }
@@ -793,8 +807,9 @@ fn resolve_install_graph_with_tokens(
         })
         .collect();
 
-    let graph = resolve_dependency_graph(&root_reqs, &pins, |package_name| {
-        let versions = index.package_versions(package_name)?;
+    let installed = installed_manifests_for_receipts(index, &read_install_receipts(layout)?)?;
+    let graph = resolve_dependency_graph_with_installed(&root_reqs, &pins, &installed, |package_name| {
+        let versions = index.dependency_versions(package_name)?;
         apply_provider_override(package_name, versions, provider_overrides)
     })?;
 
@@ -835,6 +850,23 @@ fn resolve_install_graph_with_tokens(
         .collect::<Result<Vec<_>>>()?;
 
     Ok((resolved, resolved_dependency_tokens))
+}
+
+fn installed_manifests_for_receipts(
+    index: &MetadataBackend,
+    receipts: &[InstallReceipt],
+) -> Result<BTreeMap<String, PackageManifest>> {
+    let mut installed = BTreeMap::new();
+    for receipt in receipts {
+        if let Some(manifest) = index
+            .package_versions(&receipt.name)?
+            .into_iter()
+            .find(|manifest| manifest.version.to_string() == receipt.version)
+        {
+            installed.insert(receipt.name.clone(), manifest);
+        }
+    }
+    Ok(installed)
 }
 
 fn ensure_explain_requires_dry_run(operation: &str, dry_run: bool, explain: bool) -> Result<()> {

@@ -5851,6 +5851,32 @@ sha256 = "gcc"
     }
 
     #[test]
+    fn apply_provider_override_rejects_non_provider_package() {
+        let tool = PackageManifest::from_toml_str(
+            r#"
+name = "tool"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/tool-1.0.0.tar.zst"
+sha256 = "tool"
+"#,
+        )
+        .expect("tool manifest must parse");
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("compiler".to_string(), "tool".to_string());
+
+        let err = apply_provider_override("compiler", vec![tool], &overrides)
+            .expect_err("non-provider package must be rejected distinctly");
+        assert!(
+            err.to_string()
+                .contains("package 'tool' does not provide capability 'compiler'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn apply_provider_override_rejects_overriding_direct_package_tokens() {
         let foo = PackageManifest::from_toml_str(
             r#"
@@ -5936,6 +5962,347 @@ sha256 = "bar"
 
         validate_provider_overrides_used(&overrides, &combined_tokens)
             .expect("overrides consumed across plans should pass");
+    }
+
+    #[test]
+    fn configured_registry_resolves_capability_provider_packages() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple();
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "app",
+            &format!(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "gcc",
+            &format!(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "llvm",
+            &format!(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#
+            ),
+        );
+
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let roots = vec![RootInstallRequest {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+        let resolved = resolve_install_graph(
+            &layout,
+            &backend,
+            &roots,
+            Some(target),
+            &BTreeMap::new(),
+            false,
+        )
+        .expect("configured registry should resolve provider package");
+
+        let names = resolved
+            .iter()
+            .map(|package| package.manifest.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"app"));
+        assert!(names.contains(&"llvm"));
+
+        let plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(target.to_string()),
+            &resolved,
+            &[],
+            &roots,
+        );
+        let explainability = dependency_policy_explainability_from_install_plan(&plan);
+        assert_eq!(
+            render_dependency_policy_explainability_lines(&explainability),
+            vec!["explain_provider capability=compiler selected=llvm@2.0.0".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn configured_registry_upgrade_prefers_installed_provider_package() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple();
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "app",
+            &format!(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = ">=1.0.0, <3.0.0"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "gcc",
+            &format!(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "llvm",
+            &format!(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#
+            ),
+        );
+        write_install_receipt(
+            &layout,
+            &install_receipt("gcc", "1.5.0", InstallReason::Dependency, &[]),
+        )
+        .expect("must seed installed provider receipt");
+
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let roots = vec![RootInstallRequest {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+        let resolved = resolve_install_graph(
+            &layout,
+            &backend,
+            &roots,
+            Some(target),
+            &BTreeMap::new(),
+            false,
+        )
+        .expect("configured registry should keep valid installed provider");
+
+        assert!(resolved.iter().any(|package| package.manifest.name == "gcc"));
+        assert!(!resolved.iter().any(|package| package.manifest.name == "llvm"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn configured_registry_policy_fixture_rejects_conflicting_graph() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple();
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "app",
+            &format!(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+foo = "*"
+bar = "*"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "foo",
+            &format!(
+                r#"
+name = "foo"
+version = "1.0.0"
+[conflicts]
+bar = "*"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/foo-1.0.0.tar.zst"
+sha256 = "foo"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "bar",
+            &format!(
+                r#"
+name = "bar"
+version = "1.0.0"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/bar-1.0.0.tar.zst"
+sha256 = "bar"
+"#
+            ),
+        );
+
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let roots = vec![RootInstallRequest {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+        let err = resolve_install_graph(
+            &layout,
+            &backend,
+            &roots,
+            Some(target),
+            &BTreeMap::new(),
+            false,
+        )
+        .expect_err("conflicting configured registry graph must fail");
+        assert!(
+            err.to_string()
+                .contains("no compatible dependency graph found"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn configured_registry_policy_fixture_renders_replacement_dry_run_evidence() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple();
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "clang",
+            &format!(
+                r#"
+name = "clang"
+version = "18.0.0"
+[replaces]
+old-cc = "<2.0.0"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/clang-18.0.0.tar.zst"
+sha256 = "clang"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "old-cc",
+            &format!(
+                r#"
+name = "old-cc"
+version = "1.5.0"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/old-cc-1.5.0.tar.zst"
+sha256 = "old-cc"
+"#
+            ),
+        );
+        let old_receipt = install_receipt("old-cc", "1.5.0", InstallReason::Root, &[]);
+        write_install_receipt(&layout, &old_receipt).expect("must seed replaced receipt");
+
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let roots = vec![RootInstallRequest {
+            name: "clang".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+        let resolved = resolve_install_graph(
+            &layout,
+            &backend,
+            &roots,
+            Some(target),
+            &BTreeMap::new(),
+            false,
+        )
+        .expect("replacement fixture should resolve");
+        let plan = build_install_plan_from_resolved(
+            PlanOperation::Install,
+            Some(target.to_string()),
+            &resolved,
+            &[old_receipt],
+            &roots,
+        );
+
+        assert_eq!(plan.replacements.len(), 1);
+        assert_eq!(plan.replacements[0].removed_name, "old-cc");
+        let explainability = dependency_policy_explainability_from_install_plan(&plan);
+        let lines = render_install_plan_preview_lines(
+            &plan,
+            TransactionPreviewMode::DryRun,
+            Some(&explainability),
+        );
+        assert!(
+            lines.iter().any(|line| line
+                == "change_replace from=old-cc@1.5.0 to=clang@18.0.0"),
+            "replacement dry-run line missing: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line
+                == "explain_replacement selected=clang@18.0.0 removes=old-cc@1.5.0 declared=<2.0.0"),
+            "replacement explain line missing: {lines:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
     #[test]
@@ -9414,6 +9781,47 @@ sha256 = "abc"
         let manifest_path = package_dir.join(format!("{}.toml", spec.version));
         std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
 
+        let signature = signing_key.sign(manifest.as_bytes());
+        std::fs::write(
+            manifest_path.with_extension("toml.sig"),
+            hex::encode(signature.to_bytes()),
+        )
+        .expect("must write signature");
+    }
+
+    fn write_signed_policy_manifest(
+        layout: &PrefixLayout,
+        source_name: &str,
+        package_name: &str,
+        manifest: &str,
+    ) {
+        let parsed = PackageManifest::from_toml_str(manifest).expect("policy manifest must parse");
+        assert_eq!(
+            parsed.name, package_name,
+            "test package name must match manifest name"
+        );
+        let cache_root = registry_state_root(layout).join("cache").join(source_name);
+        let package_template_path = cache_root.join("packages").join(format!("{package_name}.toml"));
+        let package_dir = cache_root.join("releases").join(package_name);
+        std::fs::create_dir_all(&package_dir).expect("must create package directory");
+        std::fs::create_dir_all(cache_root.join("packages"))
+            .expect("must create package template directory");
+
+        let signing_key = test_signing_key();
+        std::fs::write(cache_root.join("registry.pub"), public_key_hex(&signing_key))
+            .expect("must write registry key");
+        let package_template = format!("name = \"{package_name}\"\n");
+        std::fs::write(&package_template_path, package_template.as_bytes())
+            .expect("must write package template");
+        let package_signature = signing_key.sign(package_template.as_bytes());
+        std::fs::write(
+            package_template_path.with_extension("toml.sig"),
+            hex::encode(package_signature.to_bytes()),
+        )
+        .expect("must write package template signature");
+
+        let manifest_path = package_dir.join(format!("{}.toml", parsed.version));
+        std::fs::write(&manifest_path, manifest.as_bytes()).expect("must write manifest");
         let signature = signing_key.sign(manifest.as_bytes());
         std::fs::write(
             manifest_path.with_extension("toml.sig"),

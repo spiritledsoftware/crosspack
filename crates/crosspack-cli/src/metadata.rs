@@ -19,6 +19,26 @@ impl MetadataBackend {
         }
     }
 
+    fn dependency_versions(&self, name: &str) -> Result<Vec<PackageManifest>> {
+        let direct = self.package_versions(name)?;
+        if !direct.is_empty() {
+            return Ok(direct);
+        }
+
+        let mut providers = Vec::new();
+        for package_name in self.search_names("")? {
+            if package_name == name {
+                continue;
+            }
+            providers.extend(
+                self.package_versions(&package_name)?
+                    .into_iter()
+                    .filter(|manifest| manifest.provides.iter().any(|provided| provided == name)),
+            );
+        }
+        Ok(providers)
+    }
+
     fn package_versions_with_source(
         &self,
         name: &str,

@@ -558,6 +558,330 @@ sha256 = "gcc"
 }
 
 #[test]
+fn prefers_installed_provider_for_capability_when_valid() {
+    let mut available = BTreeMap::new();
+    available.insert(
+        "app".to_string(),
+        vec![manifest(
+            r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = ">=1.0.0, <3.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+        )],
+    );
+    available.insert(
+        "compiler".to_string(),
+        vec![
+            manifest(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#,
+            ),
+            manifest(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+            ),
+        ],
+    );
+
+    let roots = vec![RootRequirement {
+        name: "app".to_string(),
+        requirement: VersionReq::STAR,
+    }];
+    let installed = BTreeMap::from([(
+        "gcc".to_string(),
+        manifest(
+            r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+        ),
+    )]);
+
+    let graph =
+        resolve_dependency_graph_with_installed(&roots, &BTreeMap::new(), &installed, |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+    let provider = graph
+        .manifests
+        .get("compiler")
+        .expect("provider for compiler must be selected");
+    assert_eq!(provider.name, "gcc");
+    assert_eq!(provider.version.to_string(), "1.5.0");
+}
+
+#[test]
+fn switches_provider_when_installed_provider_no_longer_satisfies_constraints() {
+    let mut available = BTreeMap::new();
+    available.insert(
+        "app".to_string(),
+        vec![manifest(
+            r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = ">=2.0.0, <3.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+        )],
+    );
+    available.insert(
+        "compiler".to_string(),
+        vec![
+            manifest(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#,
+            ),
+            manifest(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+            ),
+        ],
+    );
+
+    let roots = vec![RootRequirement {
+        name: "app".to_string(),
+        requirement: VersionReq::STAR,
+    }];
+    let installed = BTreeMap::from([(
+        "gcc".to_string(),
+        manifest(
+            r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+        ),
+    )]);
+
+    let graph =
+        resolve_dependency_graph_with_installed(&roots, &BTreeMap::new(), &installed, |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+    assert_eq!(
+        graph
+            .manifests
+            .get("compiler")
+            .expect("provider for compiler must be selected")
+            .name,
+        "llvm"
+    );
+}
+
+#[test]
+fn direct_package_dependency_still_wins_over_installed_provider() {
+    let mut available = BTreeMap::new();
+    available.insert(
+        "app".to_string(),
+        vec![manifest(
+            r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+        )],
+    );
+    available.insert(
+        "compiler".to_string(),
+        vec![
+            manifest(
+                r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+            ),
+            manifest(
+                r#"
+name = "compiler"
+version = "1.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/compiler-1.0.0.tar.zst"
+sha256 = "compiler"
+"#,
+            ),
+        ],
+    );
+
+    let roots = vec![RootRequirement {
+        name: "app".to_string(),
+        requirement: VersionReq::STAR,
+    }];
+    let installed = BTreeMap::from([(
+        "gcc".to_string(),
+        manifest(
+            r#"
+name = "gcc"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-2.0.0.tar.zst"
+sha256 = "gcc"
+"#,
+        ),
+    )]);
+
+    let graph =
+        resolve_dependency_graph_with_installed(&roots, &BTreeMap::new(), &installed, |name| {
+            Ok(available.get(name).cloned().unwrap_or_default())
+        })
+        .expect("must resolve graph");
+
+    assert_eq!(
+        graph
+            .manifests
+            .get("compiler")
+            .expect("compiler dependency must be selected")
+            .name,
+        "compiler"
+    );
+}
+
+#[test]
+fn does_not_prefer_installed_provider_when_pin_excludes_it() {
+    let mut available = BTreeMap::new();
+    available.insert(
+        "app".to_string(),
+        vec![manifest(
+            r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+        )],
+    );
+    available.insert(
+        "compiler".to_string(),
+        vec![
+            manifest(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#,
+            ),
+            manifest(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+            ),
+        ],
+    );
+
+    let roots = vec![RootRequirement {
+        name: "app".to_string(),
+        requirement: VersionReq::STAR,
+    }];
+    let installed = BTreeMap::from([(
+        "gcc".to_string(),
+        manifest(
+            r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+        ),
+    )]);
+    let pins = BTreeMap::from([(
+        "compiler".to_string(),
+        VersionReq::parse(">=2.0.0").expect("pin"),
+    )]);
+
+    let graph = resolve_dependency_graph_with_installed(&roots, &pins, &installed, |name| {
+        Ok(available.get(name).cloned().unwrap_or_default())
+    })
+    .expect("must resolve graph");
+
+    assert_eq!(
+        graph
+            .manifests
+            .get("compiler")
+            .expect("provider for compiler must be selected")
+            .name,
+        "llvm"
+    );
+}
+
+#[test]
 fn fails_when_selected_packages_conflict() {
     let mut available = BTreeMap::new();
     available.insert(
