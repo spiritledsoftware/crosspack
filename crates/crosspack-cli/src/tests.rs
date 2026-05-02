@@ -7498,286 +7498,102 @@ sha256 = "abc"
     }
 
     #[test]
-    fn resolve_install_progress_mode_disables_progress_for_plain_output() {
+    fn output_style_uses_stdout_for_result_formatting() {
+        assert_eq!(resolve_output_style(true, false), OutputStyle::Plain);
+        assert_eq!(resolve_output_style(true, true), OutputStyle::Rich);
+    }
+
+    #[test]
+    fn progress_policy_uses_stderr_for_ephemeral_output() {
+        assert!(!resolve_progress_enabled(OutputStyle::Plain, true));
+        assert!(resolve_progress_enabled(OutputStyle::Rich, true));
+        assert!(!resolve_progress_enabled(OutputStyle::Rich, false));
+    }
+
+    #[test]
+    fn progress_mode_auto_follows_stderr_tty() {
+        assert!(resolve_progress_mode(ProgressMode::Auto, OutputStyle::Rich, true));
+        assert!(!resolve_progress_mode(
+            ProgressMode::Auto,
+            OutputStyle::Rich,
+            false
+        ));
+        assert!(!resolve_progress_mode(
+            ProgressMode::Auto,
+            OutputStyle::Plain,
+            true
+        ));
+    }
+
+    #[test]
+    fn progress_mode_always_forces_progress_for_rich_output() {
+        assert!(resolve_progress_mode(
+            ProgressMode::Always,
+            OutputStyle::Rich,
+            false
+        ));
+        assert!(!resolve_progress_mode(
+            ProgressMode::Always,
+            OutputStyle::Plain,
+            false
+        ));
+    }
+
+    #[test]
+    fn progress_mode_never_disables_progress() {
+        assert!(!resolve_progress_mode(
+            ProgressMode::Never,
+            OutputStyle::Rich,
+            true
+        ));
+    }
+
+    #[test]
+    fn render_install_phase_message_includes_package_phase_and_step() {
         assert_eq!(
-            resolve_install_progress_mode(OutputStyle::Plain, Some("en_US.UTF-8")),
-            InstallProgressMode::Disabled
+            render_install_phase_message("ripgrep", "download", 2, 7, Some((50, Some(200)))),
+            "ripgrep download 2/7 50B/200B (25%)"
         );
     }
 
     #[test]
-    fn resolve_install_progress_mode_prefers_unicode_for_utf8_locale() {
+    fn render_install_phase_message_handles_unknown_download_total() {
         assert_eq!(
-            resolve_install_progress_mode(OutputStyle::Rich, Some("en_US.UTF-8")),
-            InstallProgressMode::Unicode
+            render_install_phase_message("ripgrep", "download", 2, 7, Some((50, None))),
+            "ripgrep download 2/7 50B"
         );
     }
 
     #[test]
-    fn resolve_install_progress_mode_falls_back_to_ascii_for_non_utf8_locale() {
+    fn render_install_phase_message_omits_transfer_for_non_download_steps() {
         assert_eq!(
-            resolve_install_progress_mode(OutputStyle::Rich, Some("C")),
-            InstallProgressMode::Ascii
+            render_install_phase_message("ripgrep", "verify", 3, 7, None),
+            "ripgrep verify 3/7"
         );
     }
 
     #[test]
-    fn format_install_progress_line_uses_ascii_spinner_and_progress_bar() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            1,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 6,
-                download_progress: None,
-            },
-        );
-
-        assert!(line.starts_with("\\ install gh"), "unexpected line: {line}");
-        assert!(line.contains("download"), "unexpected line: {line}");
-        assert!(line.contains("2/6"), "unexpected line: {line}");
-        assert!(line.contains("["), "unexpected line: {line}");
-        assert!(line.contains("]"), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn format_install_progress_line_uses_unicode_spinner_when_enabled() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Unicode,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "prepare",
-                step: 1,
-                total_steps: 6,
-                download_progress: None,
-            },
-        );
-
-        assert!(
-            line.starts_with("\u{280b} install gh"),
-            "unexpected line: {line}"
-        );
-        assert!(line.contains("prepare"), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn format_install_progress_line_includes_percent_when_total_is_known() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 7,
-                download_progress: Some((50, Some(200))),
-            },
-        );
-
-        assert!(line.contains("50B/200B (25%)"), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn format_install_progress_line_uses_download_fraction_for_known_total_bar_fill() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 7,
-                download_progress: Some((50, Some(200))),
-            },
-        );
-
-        assert!(
-            line.contains("[=====---------------]"),
-            "unexpected line: {line}"
-        );
-        assert!(line.contains("2/7 download"), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn format_install_progress_line_uses_indeterminate_download_bar_when_total_unknown() {
-        let extract_bar = |line: &str| {
-            let start = line
-                .find('[')
-                .expect("line must contain opening bar bracket");
-            let end = line
-                .find(']')
-                .expect("line must contain closing bar bracket");
-            line[start + 1..end].to_string()
-        };
-        let line_frame_0 = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 7,
-                download_progress: Some((50, None)),
-            },
-        );
-        let line_frame_1 = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            12,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 7,
-                download_progress: Some((50, None)),
-            },
-        );
-
-        assert_ne!(
-            extract_bar(&line_frame_0),
-            extract_bar(&line_frame_1),
-            "bars should animate by frame beyond spinner positions"
-        );
-        assert!(
-            line_frame_0.contains("50B"),
-            "unexpected line: {line_frame_0}"
-        );
-        assert!(
-            line_frame_1.contains("50B"),
-            "unexpected line: {line_frame_1}"
+    fn render_install_phase_message_avoids_zero_total_steps() {
+        assert_eq!(
+            render_install_phase_message("ripgrep", "preflight", 0, 0, None),
+            "ripgrep preflight 0/1"
         );
     }
 
     #[test]
-    fn install_progress_renderer_keeps_monotonic_frame_index() {
-        let mut renderer =
-            InstallProgressRenderer::new(InstallProgressMode::Ascii, "install", "gh", 7);
-        let updates = install_progress_frames(InstallProgressMode::Ascii).len() + 8;
+    fn terminal_renderer_does_not_create_progress_for_plain_style() {
+        let renderer = TerminalRenderer::from_style(OutputStyle::Plain);
+        let progress = renderer.start_progress("install", 7);
 
-        for _ in 0..updates {
-            renderer.update("verify", 3, None);
-        }
-
-        assert_eq!(renderer.frame_index, updates);
+        assert!(!progress.has_progress_bar_for_tests());
     }
 
     #[test]
-    fn format_install_progress_line_uses_step_progress_for_non_download_phases() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "verify",
-                step: 2,
-                total_steps: 6,
-                download_progress: Some((50, Some(200))),
-            },
-        );
+    fn terminal_renderer_creates_progress_for_rich_style() {
+        let renderer = TerminalRenderer::from_style(OutputStyle::Rich);
+        let progress = renderer.start_progress("install", 7);
 
-        assert!(
-            line.contains("[=======-------------]"),
-            "unexpected line: {line}"
-        );
-        assert!(line.contains("50B/200B (25%)"), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn format_install_progress_line_shows_bytes_only_when_total_unknown() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 7,
-                download_progress: Some((50, None)),
-            },
-        );
-
-        assert!(line.contains("50B"), "unexpected line: {line}");
-        assert!(!line.contains('%'), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn format_install_progress_line_shows_zero_bytes_at_download_start() {
-        let line = format_install_progress_line(
-            InstallProgressMode::Ascii,
-            0,
-            "install",
-            "gh",
-            InstallProgressLineState {
-                phase: "download",
-                step: 2,
-                total_steps: 7,
-                download_progress: Some((0, None)),
-            },
-        );
-
-        assert!(line.contains("0B"), "unexpected line: {line}");
-        assert!(line.contains("2/7 download"), "unexpected line: {line}");
-    }
-
-    #[test]
-    fn install_progress_renderer_finish_sequence_keeps_completed_line_visible() {
-        let sequence = install_progress_renderer_finish_sequence(true);
-        assert_eq!(sequence, "\n");
-    }
-
-    #[test]
-    fn install_progress_renderer_finish_sequence_clears_incomplete_line() {
-        let sequence = install_progress_renderer_finish_sequence(false);
-        assert_eq!(sequence, "\r\x1b[2K");
-    }
-
-    #[test]
-    fn install_progress_throttle_decision_throttles_download_same_step_within_interval() {
-        let should_render = should_render_install_progress_update(
-            Some("download"),
-            Some(2),
-            "download",
-            2,
-            Some(std::time::Duration::from_millis(40)),
-        );
-
-        assert!(!should_render, "download redraw should be throttled");
-    }
-
-    #[test]
-    fn install_progress_throttle_decision_allows_download_when_step_changes() {
-        let should_render = should_render_install_progress_update(
-            Some("download"),
-            Some(1),
-            "download",
-            2,
-            Some(std::time::Duration::from_millis(1)),
-        );
-
-        assert!(should_render, "step change should bypass throttling");
-    }
-
-    #[test]
-    fn install_progress_throttle_decision_keeps_non_download_immediate() {
-        let should_render = should_render_install_progress_update(
-            Some("verify"),
-            Some(3),
-            "verify",
-            3,
-            Some(std::time::Duration::from_millis(1)),
-        );
-
-        assert!(should_render, "non-download redraw should remain immediate");
+        assert!(progress.has_progress_bar_for_tests());
     }
 
     #[test]
@@ -8051,6 +7867,24 @@ sha256 = "abc"
         assert_eq!(
             render_compact_table(OutputStyle::Rich, &rows),
             vec!["name     version", "ripgrep  14.1.0"]
+        );
+    }
+
+    #[test]
+    fn render_compact_table_rich_uses_display_width_for_unicode() {
+        let rows = vec![
+            vec!["name".to_string(), "version".to_string()],
+            vec!["工具".to_string(), "1.0.0".to_string()],
+            vec!["ripgrep".to_string(), "14.1.0".to_string()],
+        ];
+
+        assert_eq!(
+            render_compact_table(OutputStyle::Rich, &rows),
+            vec![
+                "name     version".to_string(),
+                "工具     1.0.0".to_string(),
+                "ripgrep  14.1.0".to_string(),
+            ]
         );
     }
 
@@ -8432,7 +8266,7 @@ sha256 = "abc"
                 snapshot_id: None,
                 force_redownload: false,
                 interaction_policy: InstallInteractionPolicy::default(),
-                install_progress_mode: InstallProgressMode::Disabled,
+                progress_enabled: false,
             },
             None,
         )
@@ -8554,7 +8388,7 @@ sha256 = "abc"
                 snapshot_id: None,
                 force_redownload: false,
                 interaction_policy: InstallInteractionPolicy::default(),
-                install_progress_mode: InstallProgressMode::Disabled,
+                progress_enabled: false,
             },
             None,
         )
@@ -8600,7 +8434,7 @@ sha256 = "abc"
                 snapshot_id: None,
                 force_redownload: false,
                 interaction_policy: InstallInteractionPolicy::default(),
-                install_progress_mode: InstallProgressMode::Disabled,
+                progress_enabled: false,
             },
             None,
         )

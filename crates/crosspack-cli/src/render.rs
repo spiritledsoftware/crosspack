@@ -1,5 +1,5 @@
 use anstyle::{AnsiColor, Effects, Style};
-use indicatif::{HumanCount, ProgressBar, ProgressStyle};
+use indicatif::{HumanCount, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum UiMode {
@@ -65,8 +65,8 @@ impl TerminalRenderer {
                         .progress_chars("=>-"),
                 );
             }
+            progress_bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(12));
             progress_bar.set_message(label.to_string());
-            progress_bar.enable_steady_tick(Duration::from_millis(80));
             Some(progress_bar)
         } else {
             None
@@ -90,6 +90,11 @@ impl TerminalRenderer {
 }
 
 impl TerminalProgress {
+    #[cfg(test)]
+    fn has_progress_bar_for_tests(&self) -> bool {
+        self.progress_bar.is_some()
+    }
+
     fn print_status(&self, status: &str, message: &str) {
         self.print_line(&render_status_line(self.style, status, message));
     }
@@ -112,6 +117,31 @@ impl TerminalProgress {
         let safe_total = self.total.max(1);
         progress_bar.set_length(safe_total);
         progress_bar.set_position(self.current.min(safe_total));
+    }
+
+    fn set_install_phase(
+        &mut self,
+        package: &str,
+        phase: &str,
+        step: usize,
+        total_steps: usize,
+        download_progress: Option<(u64, Option<u64>)>,
+    ) {
+        self.total = total_steps as u64;
+        self.set(step as u64);
+        let message = render_install_phase_message(
+            package,
+            phase,
+            step,
+            total_steps,
+            download_progress,
+        );
+
+        let Some(progress_bar) = &self.progress_bar else {
+            return;
+        };
+
+        progress_bar.set_message(message);
     }
 
     fn finish_success(mut self) {
@@ -153,6 +183,30 @@ fn progress_tick_chars(label: &str) -> &'static str {
         "self-update" => ".:;* ",
         _ => "|/-\\ ",
     }
+}
+
+fn render_install_phase_message(
+    package: &str,
+    phase: &str,
+    step: usize,
+    total_steps: usize,
+    download_progress: Option<(u64, Option<u64>)>,
+) -> String {
+    let display_total = total_steps.max(1);
+    let bounded_step = step.min(display_total);
+    let mut message = format!("{package} {phase} {bounded_step}/{display_total}");
+    if let Some((downloaded, total)) = download_progress {
+        match total {
+            Some(total_bytes) if total_bytes > 0 => {
+                let percent = ((downloaded as f64) / (total_bytes as f64) * 100.0)
+                    .clamp(0.0, 100.0);
+                message.push_str(&format!(" {downloaded}B/{total_bytes}B ({percent:.0}%)"));
+            }
+            Some(total_bytes) => message.push_str(&format!(" {downloaded}B/{total_bytes}B")),
+            None => message.push_str(&format!(" {downloaded}B")),
+        }
+    }
+    message
 }
 
 fn section_style() -> Style {
@@ -202,7 +256,7 @@ fn render_compact_table(style: OutputStyle, rows: &[Vec<String>]) -> Vec<String>
     let mut widths = vec![0_usize; column_count];
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.len());
+            widths[index] = widths[index].max(console::measure_text_width(cell));
         }
     }
 
@@ -217,7 +271,8 @@ fn render_compact_table(style: OutputStyle, rows: &[Vec<String>]) -> Vec<String>
                 if index + 1 == widths.len() {
                     line.push_str(cell);
                 } else {
-                    line.push_str(&format!("{cell:<width$}"));
+                    line.push_str(cell);
+                    line.push_str(&" ".repeat(width.saturating_sub(console::measure_text_width(cell))));
                 }
             }
             line

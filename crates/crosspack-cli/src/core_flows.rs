@@ -1793,7 +1793,7 @@ struct InstallResolvedOptions<'a> {
     snapshot_id: Option<&'a str>,
     force_redownload: bool,
     interaction_policy: InstallInteractionPolicy,
-    install_progress_mode: InstallProgressMode,
+    progress_enabled: bool,
 }
 
 struct SourceBuildJournal<'a> {
@@ -1810,6 +1810,19 @@ struct InstallResolvedPlanContext<'a> {
 struct InstallPlanApplication {
     replacement_receipts: Vec<InstallReceipt>,
     install_reason: InstallReason,
+}
+
+fn set_install_progress_phase(
+    progress: &mut Option<TerminalProgress>,
+    package: &str,
+    phase: &str,
+    step: usize,
+    total_steps: usize,
+    download_progress: Option<(u64, Option<u64>)>,
+) {
+    if let Some(active_progress) = progress.as_mut() {
+        active_progress.set_install_phase(package, phase, step, total_steps, download_progress);
+    }
 }
 
 fn install_plan_application_for_package(
@@ -1863,13 +1876,19 @@ fn install_resolved(
     mut source_build_journal: Option<&mut SourceBuildJournal<'_>>,
 ) -> Result<InstallOutcome> {
     const INSTALL_PROGRESS_STEPS: usize = 7;
-    let mut progress = InstallProgressRenderer::new(
-        options.install_progress_mode,
-        "install",
+    let output_style = current_output_style();
+    let renderer = TerminalRenderer::from_style(output_style);
+    let mut progress = options
+        .progress_enabled
+        .then(|| renderer.start_progress("install", INSTALL_PROGRESS_STEPS as u64));
+    set_install_progress_phase(
+        &mut progress,
         &resolved.manifest.name,
+        "preflight",
+        1,
         INSTALL_PROGRESS_STEPS,
+        None,
     );
-    progress.update("preflight", 1, None);
 
     let receipts = read_install_receipts(layout)?;
     validate_install_preflight_for_resolved(layout, resolved, &receipts)?;
@@ -1897,13 +1916,27 @@ fn install_resolved(
         resolved.archive_type,
         download_url,
     )?;
-    progress.update("download", 2, Some((0, None)));
+    set_install_progress_phase(
+        &mut progress,
+        &resolved.manifest.name,
+        "download",
+        2,
+        INSTALL_PROGRESS_STEPS,
+        Some((0, None)),
+    );
     let download_status = download_artifact_with_progress(
         download_url,
         &cache_path,
         options.force_redownload,
         |downloaded_bytes, total_bytes| {
-            progress.update("download", 2, Some((downloaded_bytes, total_bytes)));
+            set_install_progress_phase(
+                &mut progress,
+                &resolved.manifest.name,
+                "download",
+                2,
+                INSTALL_PROGRESS_STEPS,
+                Some((downloaded_bytes, total_bytes)),
+            );
         },
     )?;
 
@@ -1919,7 +1952,14 @@ fn install_resolved(
         )?;
     }
 
-    progress.update("verify", 3, None);
+    set_install_progress_phase(
+        &mut progress,
+        &resolved.manifest.name,
+        "verify",
+        3,
+        INSTALL_PROGRESS_STEPS,
+        None,
+    );
     let (expected_sha256, checksum_kind) =
         if let Some(source_build) = resolved.source_build.as_ref() {
             (source_build.archive_sha256.as_str(), "source archive")
@@ -1946,7 +1986,14 @@ fn install_resolved(
     let identity_package_dir =
         layout.identity_package_dir(&identity, &resolved.manifest.version.to_string());
 
-    progress.update("install", 4, None);
+    set_install_progress_phase(
+        &mut progress,
+        &resolved.manifest.name,
+        "install",
+        4,
+        INSTALL_PROGRESS_STEPS,
+        None,
+    );
     let (install_root, selected_install_mode) = if let Some(source_build) =
         resolved.source_build.as_ref()
     {
@@ -2001,7 +2048,14 @@ fn install_resolved(
 
     let receipts = read_install_receipts(layout)?;
 
-    progress.update("expose", 5, None);
+    set_install_progress_phase(
+        &mut progress,
+        &resolved.manifest.name,
+        "expose",
+        5,
+        INSTALL_PROGRESS_STEPS,
+        None,
+    );
     for binary in &resolved.artifact.binaries {
         expose_binary(layout, &install_root, &binary.name, &binary.path)?;
     }
@@ -2068,7 +2122,14 @@ fn install_resolved(
         &declared_gui_apps,
     )?;
 
-    progress.update("receipt", 6, None);
+    set_install_progress_phase(
+        &mut progress,
+        &resolved.manifest.name,
+        "receipt",
+        6,
+        INSTALL_PROGRESS_STEPS,
+        None,
+    );
     let receipt = InstallReceipt {
         name: resolved.manifest.name.clone(),
         version: resolved.manifest.version.to_string(),
@@ -2109,8 +2170,15 @@ fn install_resolved(
             integrations: exposed_integrations.clone(),
         },
     )?;
-    progress.update("complete", 7, None);
-    progress.finish();
+    set_install_progress_phase(
+        &mut progress,
+        &resolved.manifest.name,
+        "complete",
+        7,
+        INSTALL_PROGRESS_STEPS,
+        None,
+    );
+    finish_progress(progress);
 
     Ok(InstallOutcome {
         name: resolved.manifest.name.clone(),

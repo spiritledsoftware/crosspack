@@ -132,7 +132,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             let escalation_policy = resolve_escalation_policy(escalation);
             let interaction_policy = install_interaction_policy(escalation_policy);
             let output_style = current_output_style();
-            let install_progress_mode = current_install_progress_mode(output_style);
+            let progress_enabled = current_progress_enabled(output_style);
 
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
@@ -263,7 +263,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload,
                             interaction_policy,
-                            install_progress_mode,
+                            progress_enabled,
                         },
                         Some(&mut source_build_journal),
                     )?;
