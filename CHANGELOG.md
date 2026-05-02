@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.13.0](https://github.com/spiritledsoftware/crosspack/compare/v0.12.0...v0.13.0) (2026-05-02)
+
+
+### Features
+
+* add lifecycle architecture boundaries ([#110](https://github.com/spiritledsoftware/crosspack/issues/110)) ([b7eb5bb](https://github.com/spiritledsoftware/crosspack/commit/b7eb5bb5fb1a518056d8d19931a3c807dc02bf81))
+* complete dependency policy follow-through ([#113](https://github.com/spiritledsoftware/crosspack/issues/113)) ([ba4ac4f](https://github.com/spiritledsoftware/crosspack/commit/ba4ac4f2283321a0b85e16599baf26a687da7d1b))
+
+
+### Bug Fixes
+
+* accept CalVer registry versions ([#114](https://github.com/spiritledsoftware/crosspack/issues/114)) ([4b7b3c5](https://github.com/spiritledsoftware/crosspack/commit/4b7b3c55460bbdae66441254d75f83bfddc0aa2c))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to 01316630ef9be3715f4d18de7f6a1161801e13ed ([671ee3c](https://github.com/spiritledsoftware/crosspack/commit/671ee3c1ee1eeb68fc626cf3f3747859c25ed019))
+* **registry:** bump submodule to 105e0a57bd9dc92489acf0d8be9af79ce5247268 ([452aef9](https://github.com/spiritledsoftware/crosspack/commit/452aef9311d9b2b4a83ab61fb3410a2c19dd4b13))
+* **registry:** bump submodule to 159912f97d07301129f0ef58a47322efd86343d9 ([b87409b](https://github.com/spiritledsoftware/crosspack/commit/b87409be75830f053d253f33ac91c5e3e9e7f50b))
+* **registry:** bump submodule to 1da9948a3e7020a9825c47d8a73b2fa988bebd8b ([6b6aa8c](https://github.com/spiritledsoftware/crosspack/commit/6b6aa8cc4b9f5ab761285eec14a358f75c23c462))
+* **registry:** bump submodule to 20498a41b3cee18b512ffe270df108064533cc3c ([2f46230](https://github.com/spiritledsoftware/crosspack/commit/2f462307c455afb5da6d77c5b1173562ea68bd37))
+* **registry:** bump submodule to 294a709839a3301305b55a8e5338b8a9268b335f ([e2db608](https://github.com/spiritledsoftware/crosspack/commit/e2db608a3e559271e124b2607c81846096afa691))
+* **registry:** bump submodule to 33a58505b8a026b14e5e2de8d9a777f5132c9a50 ([0316332](https://github.com/spiritledsoftware/crosspack/commit/031633297ce4cf37a4913c634fbc31d5e335f819))
+* **registry:** bump submodule to 33b9e8448e796346d73c35b87f91dc3ee0b59d33 ([646700d](https://github.com/spiritledsoftware/crosspack/commit/646700d37b2daee35ceed4bd66daa4c763ca389b))
+* **registry:** bump submodule to 441b3a6624e34d4f92199c52cef552904aaa1246 ([9f5ceee](https://github.com/spiritledsoftware/crosspack/commit/9f5ceeed185da07314b0bfea540c0e0677953fd5))
+* **registry:** bump submodule to 4d3130b7ecfada77d786a787b4070eca709e3117 ([0956729](https://github.com/spiritledsoftware/crosspack/commit/0956729b36a4240ead357ba9fb75364affe03104))
+* **registry:** bump submodule to 6b7e42320b65331d1164797d0239b18262386832 ([a748224](https://github.com/spiritledsoftware/crosspack/commit/a748224e8520558ece00e9045d27b1fe049e5083))
+* **registry:** bump submodule to 7166cc700c30f03f5f62e099154aa5ca2dc7fa78 ([e01d078](https://github.com/spiritledsoftware/crosspack/commit/e01d078fa9bf7563d34ac7d1715a86ac8b96b586))
+* **registry:** bump submodule to 9947f3e380633a9f30e89531d7d14ea1dce968c1 ([b01df89](https://github.com/spiritledsoftware/crosspack/commit/b01df89cc38630601346ddbe0ce0afc7bc4ac605))
+* **registry:** bump submodule to 9f1b30b3829304f74cf83d9cfd1069fa20dc20c7 ([e4946b6](https://github.com/spiritledsoftware/crosspack/commit/e4946b6a9e5ccab2a886bb94381de80cf6ca1fa1))
+* **registry:** bump submodule to a0420d76700ced89c4a1d7818cce10fbca91dac1 ([5d39625](https://github.com/spiritledsoftware/crosspack/commit/5d39625d9b4629629fafe854a476f1d10c09fd91))
+* **registry:** bump submodule to c6959cebf73876b22378fcc2d6e7801f04480c0a ([a3d93b5](https://github.com/spiritledsoftware/crosspack/commit/a3d93b56716cd9eb6d694166a24363a0a4bbac49))
+* **registry:** bump submodule to d3ade8d11a6dbe12aac589045c279f612d371b40 ([f92d4a2](https://github.com/spiritledsoftware/crosspack/commit/f92d4a2cf3fd9abf470c50f56925559093824c72))
+* **registry:** bump submodule to dd7bec4baa2cf13fa6956cd71e53da4af2c53d19 ([1fbadf6](https://github.com/spiritledsoftware/crosspack/commit/1fbadf6f80e9c15e975438cf3918d2d82f8bc02b))
+* **registry:** bump submodule to e402ee43611acdbe91db52fbfab6dffc669f2d58 ([129bbec](https://github.com/spiritledsoftware/crosspack/commit/129bbec9c2a21a747cc165352e8dfed6bc0dbf18))
+* **registry:** bump submodule to e7197786529b2afd6453acd725ca6a4723eccb0b ([7b9bc0a](https://github.com/spiritledsoftware/crosspack/commit/7b9bc0a7d0d62ca1727e02518e9f83f01a06cc40))
+* **registry:** bump submodule to eeaec6815fa79222e1cd4aa0ae24500399dc02cd ([c512d62](https://github.com/spiritledsoftware/crosspack/commit/c512d6291766bc58609902fd72221e1f72d486ff))
+* **registry:** bump submodule to f2c1346748253569809fcfefe73660a2e7c524bb ([b89f358](https://github.com/spiritledsoftware/crosspack/commit/b89f358ac474e2b0c707a50be0d146a3d73c9f73))
+
 ## [0.12.0](https://github.com/spiritledsoftware/crosspack/compare/v0.11.0...v0.12.0) (2026-04-27)
 
 
