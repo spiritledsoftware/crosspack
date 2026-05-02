@@ -3,13 +3,14 @@ use std::path::{Component, Path};
 
 use anyhow::{anyhow, Context};
 use semver::{Version, VersionReq};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::artifact::Artifact;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageManifest {
     pub name: String,
+    #[serde(deserialize_with = "deserialize_manifest_version")]
     pub version: Version,
     pub description: Option<String>,
     pub license: Option<String>,
@@ -30,6 +31,72 @@ pub struct PackageManifest {
     pub services: Vec<ServiceDeclaration>,
     #[serde(default)]
     pub integrations: Vec<PackageIntegration>,
+}
+
+fn deserialize_manifest_version<'de, D>(deserializer: D) -> Result<Version, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Version::parse(&value)
+        .or_else(|_| parse_version_with_lenient_core_identifiers(&value))
+        .map_err(de::Error::custom)
+}
+
+fn parse_version_with_lenient_core_identifiers(value: &str) -> Result<Version, semver::Error> {
+    let (without_build, build) = value
+        .split_once('+')
+        .map_or((value, None), |(core, build)| (core, Some(build)));
+    let (core, pre) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(core, pre)| (core, Some(pre)));
+    let mut identifiers = core.split('.');
+    let Some(major) = identifiers.next() else {
+        return Version::parse(value);
+    };
+    let Some(minor) = identifiers.next() else {
+        return Version::parse(value);
+    };
+    let Some(patch) = identifiers.next() else {
+        return Version::parse(value);
+    };
+    if identifiers.next().is_some() {
+        return Version::parse(value);
+    }
+
+    let Some(major) = normalize_numeric_identifier(major) else {
+        return Version::parse(value);
+    };
+    let Some(minor) = normalize_numeric_identifier(minor) else {
+        return Version::parse(value);
+    };
+    let Some(patch) = normalize_numeric_identifier(patch) else {
+        return Version::parse(value);
+    };
+
+    let mut normalized = format!("{major}.{minor}.{patch}");
+    if let Some(pre) = pre {
+        normalized.push('-');
+        normalized.push_str(pre);
+    }
+    if let Some(build) = build {
+        normalized.push('+');
+        normalized.push_str(build);
+    }
+    Version::parse(&normalized)
+}
+
+fn normalize_numeric_identifier(value: &str) -> Option<String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let trimmed = value.trim_start_matches('0');
+    if trimmed.is_empty() {
+        Some("0".to_string())
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

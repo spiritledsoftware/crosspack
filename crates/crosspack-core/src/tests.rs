@@ -101,6 +101,17 @@ sha256 = "abc123"
 }
 
 #[test]
+fn parse_manifest_normalizes_leading_zero_version_components() {
+    let content = r#"
+name = "helix"
+version = "25.07.1"
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    assert_eq!(parsed.version.to_string(), "25.7.1");
+}
+
+#[test]
 fn parse_manifest_with_declared_services() {
     let content = r#"
 name = "demo"
