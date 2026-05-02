@@ -808,7 +808,7 @@ fn resolve_install_graph_with_tokens(
         .collect();
 
     let installed = installed_manifests_for_receipts(index, &read_install_receipts(layout)?)?;
-    let graph = resolve_dependency_graph_with_installed(&root_reqs, &pins, &installed, |package_name| {
+    let graph = resolve_dependency_graph_with_installed_manifests(&root_reqs, &pins, &installed, |package_name| {
         let versions = index.dependency_versions(package_name)?;
         apply_provider_override(package_name, versions, provider_overrides)
     })?;
@@ -855,15 +855,15 @@ fn resolve_install_graph_with_tokens(
 fn installed_manifests_for_receipts(
     index: &MetadataBackend,
     receipts: &[InstallReceipt],
-) -> Result<BTreeMap<String, PackageManifest>> {
-    let mut installed = BTreeMap::new();
+) -> Result<Vec<PackageManifest>> {
+    let mut installed = Vec::new();
     for receipt in receipts {
         if let Some(manifest) = index
             .package_versions(&receipt.name)?
             .into_iter()
             .find(|manifest| manifest.version.to_string() == receipt.version)
         {
-            installed.insert(receipt.name.clone(), manifest);
+            installed.push(manifest);
         }
     }
     Ok(installed)

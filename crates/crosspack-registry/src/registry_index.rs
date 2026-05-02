@@ -39,6 +39,21 @@ impl RegistryIndex {
     }
 
     pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for name in self.package_names()? {
+            if name.contains(needle) {
+                let manifests = self.package_versions(&name)?;
+                if !manifests.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn package_names(&self) -> Result<Vec<String>> {
         let releases_root = self.root.join("releases");
         if !releases_root.exists() {
             return Ok(Vec::new());
@@ -48,16 +63,9 @@ impl RegistryIndex {
         for entry in fs::read_dir(releases_root).context("failed to read registry releases")? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains(needle) {
-                    let manifests = self.package_versions(&name)?;
-                    if !manifests.is_empty() {
-                        names.push(name);
-                    }
-                }
+                names.push(entry.file_name().to_string_lossy().to_string());
             }
         }
-
         names.sort();
         Ok(names)
     }
@@ -337,6 +345,19 @@ impl ConfiguredRegistryIndex {
         let mut deduped = HashSet::new();
         for source in &self.sources {
             for name in source.index.search_names(needle)? {
+                deduped.insert(name);
+            }
+        }
+
+        let mut names: Vec<String> = deduped.into_iter().collect();
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn package_names(&self) -> Result<Vec<String>> {
+        let mut deduped = HashSet::new();
+        for source in &self.sources {
+            for name in source.index.package_names()? {
                 deduped.insert(name);
             }
         }

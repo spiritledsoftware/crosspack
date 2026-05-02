@@ -26,17 +26,27 @@ impl MetadataBackend {
         }
 
         let mut providers = Vec::new();
-        for package_name in self.search_names("")? {
+        for package_name in self.package_names()? {
             if package_name == name {
                 continue;
             }
+            let Ok(versions) = self.package_versions(&package_name) else {
+                continue;
+            };
             providers.extend(
-                self.package_versions(&package_name)?
+                versions
                     .into_iter()
                     .filter(|manifest| manifest.provides.iter().any(|provided| provided == name)),
             );
         }
         Ok(providers)
+    }
+
+    fn package_names(&self) -> Result<Vec<String>> {
+        match self {
+            Self::Legacy(index) => index.package_names(),
+            Self::Configured(index) => index.package_names(),
+        }
     }
 
     fn package_versions_with_source(

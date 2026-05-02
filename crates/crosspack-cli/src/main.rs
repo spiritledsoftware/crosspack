@@ -53,8 +53,8 @@ use crosspack_registry::{
     SourceUpdateResult, SourceUpdateStatus,
 };
 use crosspack_resolver::{
-    plan_from_resolved_graph_with_installed, resolve_dependency_graph_with_installed, InstallPlan,
-    InstalledPackageSummary, PlanOperation, PlannedPackage as InstallPlanPackage,
+    plan_from_resolved_graph_with_installed, resolve_dependency_graph_with_installed_manifests,
+    InstallPlan, InstalledPackageSummary, PlanOperation, PlannedPackage as InstallPlanPackage,
     PlannedRemoval as InstallPlanRemoval, PlannedReplacement as InstallPlanReplacement,
     PlannedTransition as InstallPlanTransition, ResolvedGraph, RootRequirement,
 };

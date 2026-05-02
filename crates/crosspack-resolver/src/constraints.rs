@@ -7,7 +7,7 @@ pub(crate) fn selected_satisfies_constraints(
     selected: &BTreeMap<String, PackageManifest>,
     constraints: &BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
-    installed: &BTreeMap<String, PackageManifest>,
+    installed: &[PackageManifest],
 ) -> bool {
     for (name, manifest) in selected {
         if let Some(reqs) = constraints.get(name) {
@@ -32,8 +32,8 @@ pub(crate) fn selected_satisfies_constraints(
     }
 
     for selected_manifest in selected.values() {
-        for (installed_name, installed_manifest) in installed {
-            if selected.contains_key(installed_name) {
+        for installed_manifest in installed {
+            if selected.contains_key(&installed_manifest.name) {
                 continue;
             }
             if manifests_conflict(selected_manifest, installed_manifest) {

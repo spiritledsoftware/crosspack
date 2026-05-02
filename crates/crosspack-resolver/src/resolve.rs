@@ -26,13 +26,26 @@ pub fn resolve_dependency_graph<F>(
 where
     F: FnMut(&str) -> Result<Vec<PackageManifest>>,
 {
-    resolve_dependency_graph_with_installed(roots, pins, &BTreeMap::new(), load_versions)
+    resolve_dependency_graph_with_installed_manifests(roots, pins, &[], load_versions)
 }
 
 pub fn resolve_dependency_graph_with_installed<F>(
     roots: &[RootRequirement],
     pins: &BTreeMap<String, VersionReq>,
     installed: &BTreeMap<String, PackageManifest>,
+    load_versions: F,
+) -> Result<ResolvedGraph>
+where
+    F: FnMut(&str) -> Result<Vec<PackageManifest>>,
+{
+    let installed = installed.values().cloned().collect::<Vec<_>>();
+    resolve_dependency_graph_with_installed_manifests(roots, pins, &installed, load_versions)
+}
+
+pub fn resolve_dependency_graph_with_installed_manifests<F>(
+    roots: &[RootRequirement],
+    pins: &BTreeMap<String, VersionReq>,
+    installed: &[PackageManifest],
     mut load_versions: F,
 ) -> Result<ResolvedGraph>
 where

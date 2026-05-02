@@ -637,6 +637,97 @@ sha256 = "gcc"
 }
 
 #[test]
+fn provider_stability_considers_all_installed_same_name_versions() {
+    let mut available = BTreeMap::new();
+    available.insert(
+        "app".to_string(),
+        vec![manifest(
+            r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = ">=1.0.0, <3.0.0"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#,
+        )],
+    );
+    available.insert(
+        "compiler".to_string(),
+        vec![
+            manifest(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#,
+            ),
+            manifest(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc"
+"#,
+            ),
+        ],
+    );
+
+    let roots = vec![RootRequirement {
+        name: "app".to_string(),
+        requirement: VersionReq::STAR,
+    }];
+    let installed = vec![
+        manifest(
+            r#"
+name = "gcc"
+version = "0.9.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-0.9.0.tar.zst"
+sha256 = "gcc09"
+"#,
+        ),
+        manifest(
+            r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc15"
+"#,
+        ),
+    ];
+
+    let graph = resolve_dependency_graph_with_installed_manifests(
+        &roots,
+        &BTreeMap::new(),
+        &installed,
+        |name| Ok(available.get(name).cloned().unwrap_or_default()),
+    )
+    .expect("must resolve graph");
+
+    let provider = graph
+        .manifests
+        .get("compiler")
+        .expect("provider for compiler must be selected");
+    assert_eq!(provider.name, "gcc");
+    assert_eq!(provider.version.to_string(), "1.5.0");
+}
+
+#[test]
 fn switches_provider_when_installed_provider_no_longer_satisfies_constraints() {
     let mut available = BTreeMap::new();
     available.insert(

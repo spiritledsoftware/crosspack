@@ -9,7 +9,7 @@ use crate::constraints::selected_satisfies_constraints;
 pub(crate) fn search<F>(
     constraints: &mut BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
-    installed: &BTreeMap<String, PackageManifest>,
+    installed: &[PackageManifest],
     selected: &mut BTreeMap<String, PackageManifest>,
     versions_cache: &mut HashMap<String, Vec<PackageManifest>>,
     load_versions: &mut F,
@@ -79,7 +79,7 @@ fn matching_candidates<F>(
     name: &str,
     constraints: &BTreeMap<String, Vec<VersionReq>>,
     pins: &BTreeMap<String, VersionReq>,
-    installed: &BTreeMap<String, PackageManifest>,
+    installed: &[PackageManifest],
     versions_cache: &mut HashMap<String, Vec<PackageManifest>>,
     load_versions: &mut F,
 ) -> Result<Vec<PackageManifest>>
@@ -167,17 +167,16 @@ where
 fn provider_stability_rank(
     capability: &str,
     candidate: &PackageManifest,
-    installed: &BTreeMap<String, PackageManifest>,
+    installed: &[PackageManifest],
 ) -> u8 {
-    let Some(installed_manifest) = installed.get(&candidate.name) else {
-        return 1;
-    };
-    if installed_manifest.version == candidate.version
-        && installed_manifest
-            .provides
-            .iter()
-            .any(|provided| provided == capability)
-    {
+    if installed.iter().any(|installed_manifest| {
+        installed_manifest.name == candidate.name
+            && installed_manifest.version == candidate.version
+            && installed_manifest
+                .provides
+                .iter()
+                .any(|provided| provided == capability)
+    }) {
         0
     } else {
         1

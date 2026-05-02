@@ -6019,6 +6019,21 @@ sha256 = "llvm"
 "#
             ),
         );
+        write_invalid_policy_manifest(
+            &layout,
+            "official",
+            "broken-unrelated",
+            &format!(
+                r#"
+name = "broken-unrelated"
+version = "9.9.9"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/broken-unrelated-9.9.9.tar.zst"
+sha256 = "broken"
+"#
+            ),
+        );
 
         let backend = select_metadata_backend(None, &layout).expect("backend must load");
         let roots = vec![RootInstallRequest {
@@ -6054,6 +6069,59 @@ sha256 = "llvm"
             render_dependency_policy_explainability_lines(&explainability),
             vec!["explain_provider capability=compiler selected=llvm@2.0.0".to_string()]
         );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn installed_manifest_lookup_preserves_same_name_versions() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple();
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "gcc",
+            &format!(
+                r#"
+name = "gcc"
+version = "0.9.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/gcc-0.9.0.tar.zst"
+sha256 = "gcc09"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "gcc",
+            &format!(
+                r#"
+name = "gcc"
+version = "1.5.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/gcc-1.5.0.tar.zst"
+sha256 = "gcc15"
+"#
+            ),
+        );
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let receipts = vec![
+            install_receipt("gcc", "0.9.0", InstallReason::Dependency, &[]),
+            install_receipt("gcc", "1.5.0", InstallReason::Dependency, &[]),
+        ];
+
+        let installed = installed_manifests_for_receipts(&backend, &receipts)
+            .expect("installed manifest lookup must preserve duplicates");
+        assert_eq!(installed.len(), 2);
+        assert!(installed.iter().any(|manifest| manifest.version.to_string() == "0.9.0"));
+        assert!(installed.iter().any(|manifest| manifest.version.to_string() == "1.5.0"));
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -9828,6 +9896,23 @@ sha256 = "abc"
             hex::encode(signature.to_bytes()),
         )
         .expect("must write signature");
+    }
+
+    fn write_invalid_policy_manifest(
+        layout: &PrefixLayout,
+        source_name: &str,
+        package_name: &str,
+        manifest: &str,
+    ) {
+        write_signed_policy_manifest(layout, source_name, package_name, manifest);
+        let parsed = PackageManifest::from_toml_str(manifest).expect("policy manifest must parse");
+        let sig_path = registry_state_root(layout)
+            .join("cache")
+            .join(source_name)
+            .join("releases")
+            .join(package_name)
+            .join(format!("{}.toml.sig", parsed.version));
+        std::fs::write(sig_path, "00").expect("must corrupt manifest signature");
     }
 
     fn write_signed_source_build_metadata_manifest(
