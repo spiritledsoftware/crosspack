@@ -851,6 +851,59 @@ fn update_filesystem_source_fails_when_orphaned_package_template_exists() {
 }
 
 #[test]
+fn update_filesystem_source_accepts_zero_padded_version_components() {
+    let root = test_registry_root();
+    let source_root = test_registry_root();
+    let package_dir = source_root.join("releases").join("helix");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+
+    let signing_key = signing_key();
+    fs::write(
+        source_root.join("registry.pub"),
+        public_key_hex(&signing_key),
+    )
+    .expect("must write registry public key");
+    write_signed_package_template(
+        &source_root,
+        &signing_key,
+        "helix",
+        &package_template_toml("helix"),
+    );
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "25.07.1",
+        "version = \"25.07.1\"\n",
+    );
+
+    let store = RegistrySourceStore::new(&root);
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store.update_sources(&[]).expect("update must succeed");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Updated);
+    let index = RegistryIndex::open(root.join("cache").join("local"));
+    let manifests = index
+        .package_versions("helix")
+        .expect("must load normalized version");
+    assert_eq!(manifests[0].version.to_string(), "25.7.1");
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn update_filesystem_source_fails_when_orphaned_package_template_signature_is_missing() {
     let root = test_registry_root();
     let source_root = filesystem_source_fixture();
