@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.1](https://github.com/spiritledsoftware/crosspack/compare/v0.13.0...v0.13.1) (2026-05-02)
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to 072addbe0e1ed3476848850a17640d7dc5b90033 ([8df289a](https://github.com/spiritledsoftware/crosspack/commit/8df289ad051626ae851b778121467931017cf788))
+* **registry:** bump submodule to b7a22de65761d0d26adf146319f3adf51123e527 ([3c6a5a1](https://github.com/spiritledsoftware/crosspack/commit/3c6a5a10f8f5c0189b61d0a3be904abc9254fabc))
+* **registry:** bump submodule to d9ac6c1a17fcaa10d925874f4d84f15c603a2302 ([ee9e4db](https://github.com/spiritledsoftware/crosspack/commit/ee9e4dbbef850a508d6b22d4eafde83269d6e382))
+
 ## [0.13.0](https://github.com/spiritledsoftware/crosspack/compare/v0.12.0...v0.13.0) (2026-05-02)
 
 
