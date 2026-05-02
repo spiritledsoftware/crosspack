@@ -6127,6 +6127,85 @@ sha256 = "gcc15"
     }
 
     #[test]
+    fn configured_registry_provider_candidate_signature_failure_fails_closed() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        configure_ready_source(&layout, "official");
+        let target = host_target_triple();
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "app",
+            &format!(
+                r#"
+name = "app"
+version = "1.0.0"
+[dependencies]
+compiler = "*"
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/app-1.0.0.tar.zst"
+sha256 = "app"
+"#
+            ),
+        );
+        write_signed_policy_manifest(
+            &layout,
+            "official",
+            "llvm",
+            &format!(
+                r#"
+name = "llvm"
+version = "2.0.0"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/llvm-2.0.0.tar.zst"
+sha256 = "llvm"
+"#
+            ),
+        );
+        write_invalid_policy_manifest(
+            &layout,
+            "official",
+            "tampered-cc",
+            &format!(
+                r#"
+name = "tampered-cc"
+version = "9.9.9"
+provides = ["compiler"]
+[[artifacts]]
+target = "{target}"
+url = "https://example.test/tampered-cc-9.9.9.tar.zst"
+sha256 = "tampered"
+"#
+            ),
+        );
+
+        let backend = select_metadata_backend(None, &layout).expect("backend must load");
+        let roots = vec![RootInstallRequest {
+            name: "app".to_string(),
+            requirement: VersionReq::STAR,
+        }];
+        let err = resolve_install_graph(
+            &layout,
+            &backend,
+            &roots,
+            Some(target),
+            &BTreeMap::new(),
+            false,
+        )
+        .expect_err("invalid provider candidate metadata must fail closed");
+        assert!(
+            err.to_string().contains("failed loading provider metadata")
+                || err.to_string().contains("signature verification failed"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn configured_registry_upgrade_prefers_installed_provider_package() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");

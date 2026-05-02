@@ -24,28 +24,9 @@ impl MetadataBackend {
         if !direct.is_empty() {
             return Ok(direct);
         }
-
-        let mut providers = Vec::new();
-        for package_name in self.package_names()? {
-            if package_name == name {
-                continue;
-            }
-            let Ok(versions) = self.package_versions(&package_name) else {
-                continue;
-            };
-            providers.extend(
-                versions
-                    .into_iter()
-                    .filter(|manifest| manifest.provides.iter().any(|provided| provided == name)),
-            );
-        }
-        Ok(providers)
-    }
-
-    fn package_names(&self) -> Result<Vec<String>> {
         match self {
-            Self::Legacy(index) => index.package_names(),
-            Self::Configured(index) => index.package_names(),
+            Self::Legacy(index) => index.provider_versions(name),
+            Self::Configured(index) => index.provider_versions(name),
         }
     }
 
