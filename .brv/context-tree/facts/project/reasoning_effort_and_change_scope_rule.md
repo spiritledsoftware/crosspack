@@ -2,7 +2,7 @@
 title: Reasoning Effort and Change-Scope Rule
 summary: Reasoning effort was reset to medium, and registry submodule bumps are under consideration for skipping both Release Please and PR test checks.
 tags: []
-related: []
+related: [facts/personal/reasoning_effort_preference.md, facts/project/roadmap_long_horizon_items.md, facts/project/snapshot_flow_verification.md, facts/project/task_2a_installer_receipt_outcome.md, facts/project/pr_112_review_fix_outcome.md]
 keywords: []
 createdAt: '2026-04-27T09:35:33.959Z'
 updatedAt: '2026-04-27T09:35:33.959Z'

@@ -2,7 +2,7 @@
 title: Workflow Context Commit Fact
 summary: Workflow-only PRs now run a lightweight workflow lint check via actionlint, while docs paths were removed from expensive Rust CI and release filters.
 tags: []
-related: []
+related: [facts/project/github_actions_workflow_filtering.md, facts/project/release_please_sections_visible.md, facts/project/github_actions_workflow_filtering.overview.md, facts/project/release_please_sections_visible.overview.md, facts/project/workflow_context_commit_fact.abstract.md]
 keywords: []
 createdAt: '2026-04-27T09:52:07.448Z'
 updatedAt: '2026-04-27T09:52:07.448Z'

@@ -2,7 +2,7 @@
 title: Automation Preference
 summary: User prefers automation over manual steps for all work.
 tags: []
-related: []
+related: [facts/personal/automation_preference.abstract.md, facts/personal/automation_preference.overview.md, facts/personal/commit_and_pr_action_preference.abstract.md, facts/personal/commit_and_pr_action_preference.overview.md, facts/personal/reasoning_effort_preference.md]
 keywords: []
 createdAt: '2026-04-27T10:27:34.779Z'
 updatedAt: '2026-04-27T10:27:34.779Z'
