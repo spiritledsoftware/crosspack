@@ -1,18 +1,18 @@
 ---
 title: Reasoning Effort Preference
-summary: 'User preference: reasoning effort is set to medium.'
+summary: User prefers reasoning effort set to medium.
 tags: []
 related: []
 keywords: []
 createdAt: '2026-05-02T00:42:10.912Z'
-updatedAt: '2026-05-02T10:18:26.809Z'
+updatedAt: '2026-05-02T17:41:27.428Z'
 ---
 ## Reason
-Capture user preference update from conversation
+Capture user preference for assistant reasoning effort
 
 ## Raw Concept
 **Task:**
-Record the user's reasoning effort preference update
+Record user preference for reasoning effort
 
 **Changes:**
 - Reasoning effort reset to medium
@@ -25,24 +25,24 @@ Record the user's reasoning effort preference update
 - Reasoning effort set to medium
 
 **Flow:**
-user preference update -> record durable preference
+user preference -> setting recorded
 
 **Timestamp:** 2026-05-02
 
-**Author:** assistant
+**Author:** user
 
 ## Narrative
 ### Structure
-A personal preference entry tracking the user's reasoning effort setting.
+A single user preference entry in the personal facts domain.
 
 ### Highlights
-The reasoning effort preference is now medium.
+The assistant should use medium reasoning effort for this user.
 
 ### Examples
 Commit messages: "docs: update brv context" and "feat: complete dependency policy follow-through".
 
 ## Facts
-- **reasoning_effort**: Reasoning effort reset to medium [preference]
+- **reasoning_effort**: Reasoning effort is set to medium [preference]
 
 ---
 

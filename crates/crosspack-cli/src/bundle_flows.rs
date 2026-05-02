@@ -183,7 +183,7 @@ fn run_bundle_apply_command(
     }
 
     let output_style = current_output_style();
-    let install_progress_mode = current_install_progress_mode(output_style);
+    let progress_enabled = current_progress_enabled(output_style);
     let snapshot_id = match registry_root {
         Some(_) => None,
         None => Some(resolve_transaction_snapshot_id(layout, "bundle-apply")?),
@@ -262,7 +262,7 @@ fn run_bundle_apply_command(
                         snapshot_id: snapshot_id.as_deref(),
                         force_redownload: options.force_redownload,
                         interaction_policy,
-                        install_progress_mode,
+                        progress_enabled,
                     },
                     Some(&mut source_build_journal),
                 )?;

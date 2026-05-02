@@ -953,7 +953,7 @@ fn run_upgrade_command(
                             snapshot_id: snapshot_id.as_deref(),
                             force_redownload: false,
                             interaction_policy: options.interaction_policy,
-                            install_progress_mode: current_install_progress_mode(output_style),
+                            progress_enabled: current_progress_enabled(output_style),
                         },
                         Some(&mut source_build_journal),
                     )?;
@@ -1133,7 +1133,7 @@ fn run_upgrade_command(
                                 snapshot_id: snapshot_id.as_deref(),
                                 force_redownload: false,
                                 interaction_policy: options.interaction_policy,
-                                install_progress_mode: current_install_progress_mode(output_style),
+                                progress_enabled: current_progress_enabled(output_style),
                             },
                             Some(&mut source_build_journal),
                         )?;
