@@ -1,0 +1,10 @@
+---
+source: crates/crosspack-cli/tests/cli_output.rs
+assertion_line: 48
+expression: stdout
+---
+prefix: [HOME]/.crosspack
+bin: [HOME]/.crosspack/bin
+cache: [HOME]/.crosspack/cache
+transaction: clean
+installed_state: clean

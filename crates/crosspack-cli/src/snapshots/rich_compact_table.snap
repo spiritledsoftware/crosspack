@@ -1,0 +1,8 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9593
+expression: output
+---
+name     version  status
+ripgrep  14.1.0   installed
+工具     1.0.0    available

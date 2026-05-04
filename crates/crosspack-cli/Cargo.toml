@@ -34,6 +34,8 @@ toml.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
+insta.workspace = true
+pretty_assertions.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 rexpect.workspace = true

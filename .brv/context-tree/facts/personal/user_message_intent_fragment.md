@@ -1,25 +1,26 @@
 ---
 title: User Message Intent Fragment
-summary: The user asked why the assistant uses “explore” instead of “general” for a task classification or mode choice.
+summary: User explicitly asked not to implement yet in this thread.
 tags: []
 related: []
 keywords: []
 createdAt: '2026-05-02T17:19:50.369Z'
-updatedAt: '2026-05-02T18:15:37.353Z'
+updatedAt: '2026-05-03T09:49:57.683Z'
 ---
 ## Reason
-Capture a durable preference/question about terminology choice in assistant behavior
+Capture a durable instruction from the conversation
 
 ## Raw Concept
 **Task:**
-Capture the user's terminology question about mode selection
+Capture an instruction to defer implementation
 
 **Changes:**
 - Captured the user phrase as a lasting note
 - Recorded a preference/question comparing the labels "explore" and "general"
+- User requested no implementation yet
 
 **Flow:**
-user question -> assistant mode choice -> terminology clarification
+message received -> implementation deferred
 
 **Timestamp:** 2026-05-02T18:15:33.428Z
 
@@ -27,10 +28,10 @@ user question -> assistant mode choice -> terminology clarification
 
 ## Narrative
 ### Structure
-A short user query asking about the rationale for using one label over another.
+A brief directive was given in a Discord thread to pause implementation work.
 
 ### Highlights
-The only lasting-value content is the comparison between "explore" and "general"; no answer content is present in the transcript.
+This is a keep-as-context instruction rather than a technical decision.
 
 ## Facts
-- **mode_label_preference**: The user asked why the assistant is using "explore" instead of "general". [personal]
+- **user_message_intent_fragment**: The user said 'Don't implement yet'. [other]

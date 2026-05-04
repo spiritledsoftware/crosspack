@@ -1,58 +1,64 @@
 ---
 title: Terminal Interface Polish
-summary: Crosspack should remain a CLI with improved progress handling via indicatif, stderr-only ephemeral progress, TerminalRenderer-based human output, width-aware tables, output controls, and PTY regression tests; avoid ratatui/crossterm/dialoguer for now.
+summary: For Crosspack terminal polish, pretty_assertions is a useful dev dependency for diffing output tests, while switching to ratatui is considered overkill for the current CLI-focused scope.
 tags: []
-related: []
+related:
+  - architecture/terminal_interface_polish/terminal_interface_polish.abstract.md
+  - architecture/terminal_interface_polish/terminal_interface_polish.overview.md
 keywords: []
 createdAt: '2026-05-02T17:14:10.493Z'
-updatedAt: '2026-05-02T17:14:10.493Z'
+updatedAt: '2026-05-03T09:56:00.515Z'
+consolidated_at: '2026-05-03T12:13:30.914Z'
+consolidated_from:
+  - {date: '2026-05-03T12:13:30.914Z', path: architecture/terminal_interface_polish/terminal_interface_polish.abstract.md, reason: 'These three files describe the same terminal interface polish guidance at different levels of detail. The .md file is already the richest source, while the abstract and overview are redundant summaries that overlap heavily with it.'}
+  - {date: '2026-05-03T12:13:30.914Z', path: architecture/terminal_interface_polish/terminal_interface_polish.overview.md, reason: 'These three files describe the same terminal interface polish guidance at different levels of detail. The .md file is already the richest source, while the abstract and overview are redundant summaries that overlap heavily with it.'}
 ---
 ## Reason
-Document the CLI polish recommendations for Crosspack terminal output and PTY behavior
+Capture guidance on pretty_assertions and ratatui scope for CLI terminal polish work
 
 ## Raw Concept
 **Task:**
-Document terminal interface polish guidance for Crosspack
+Document terminal UI and test tooling guidance for Crosspack
 
 **Changes:**
 - Recommend staying a CLI rather than becoming a full TUI
 - Move ephemeral progress off stdout and onto stderr
 - Refactor install progress to use indicatif instead of a hand-rolled renderer
 - Add PTY regression coverage for terminal behavior
+- Recommended pretty_assertions as a supporting dev tool for output-heavy tests
+- Advised against switching to ratatui for the current CLI-focused work
+- Kept the terminal polish strategy centered on CLI output rather than a full TUI
 
 **Flow:**
-progress events -> stderr progress bar -> suspend status lines -> stable stdout automation output
+output change -> test failure -> clearer diff via pretty_assertions; terminal polish need -> evaluate scope -> keep CLI stack instead of adopting ratatui
 
-**Timestamp:** 2026-05-02T17:14:02.193Z
+**Timestamp:** 2026-05-03T09:55:52.785Z
 
 **Author:** assistant analysis
 
 ## Narrative
 ### Structure
-The guidance centers on a CLI rendering split: ephemeral progress should be isolated from durable output, and human-facing rich output should pass through one renderer so formatting is consistent.
+The guidance splits test support into snapshot testing with insta and diff-friendly assertions with pretty_assertions, while treating ratatui as a separate, larger architectural choice.
 
 ### Dependencies
-Indicatif is already present; console, anstream/anstyle, unicode-width, snapbox/trycmd, and PTY harness tools were recommended as supporting libraries. Ratatui, crossterm, and prompt libraries were explicitly deferred.
+This recommendation depends on preserving Crosspack as a CLI and on keeping the test surface small for PTY and terminal-output behavior.
 
 ### Highlights
-The most concrete first refactor is to remove the custom install progress writer and route install through the same TerminalProgress/indicatif path used elsewhere.
+pretty_assertions improves reviewability of terminal output regressions; ratatui is unnecessary unless the project moves toward a full-screen interactive package browser or similar TUI.
 
 ### Rules
 Keep stdout for stable automation lines. Put all ephemeral progress on stderr. Route all rich human output through TerminalRenderer.
 
 ### Examples
-Suggested controls include --color auto|always|never and --progress auto|always|never, plus NO_COLOR and CLICOLOR_FORCE for predictable PTY and snapshot behavior.
+Use pretty_assertions::assert_eq selectively in output-heavy tests, but continue using insta for visual regression coverage.
 
 ## Facts
-- **terminal_form_factor**: Keep Crosspack as a CLI with richer progress, not a full TUI. [project]
-- **install_progress_renderer**: Replace the custom InstallProgressRenderer in src/main.rs with indicatif. [project]
-- **progress_streams**: Write ephemeral progress on stderr and keep stdout for stable automation lines. [project]
-- **human_output_renderer**: Use TerminalRenderer for rich human output instead of many direct println paths. [project]
-- **table_width_measurement**: render_compact_table() currently uses cell.len(), which is byte length rather than display width. [project]
-- **output_controls**: Add output controls for color and progress: --color auto|always|never, --progress auto|always|never, NO_COLOR, and CLICOLOR_FORCE. [project]
-- **pty_regression_tests**: Add PTY regression tests for raw escape leaks, progress clearing, and redirected stdout readability. [project]
-- **recommended_libraries**: Prefer indicatif, console, anstream/anstyle, unicode-width or console::measure_text_width, snapbox or trycmd, and PTY harness tools such as rexpect, expectrl, or portable-pty. [project]
-- **avoid_library**: Avoid ratatui for the current output polish problem. [project]
-- **avoid_library**: Avoid crossterm unless keyboard interaction, alternate screen, raw mode, or cursor movement is needed. [project]
-- **avoid_library**: Avoid dialoguer and inquire unless prompts are added. [project]
-- **cargo_run_noise**: cargo run emits multi-line progress and overwrite sequences before Crosspack starts, so compiled binary or cargo run --quiet is better for judging CLI output quality. [project]
+- **pretty_assertions_role**: pretty_assertions is recommended as a supporting dev tool, not a replacement for insta. [project]
+- **pretty_assertions_benefit**: pretty_assertions helps inspect assertion failures for string, vector, and formatter output tests. [project]
+- **pretty_assertions_integration**: pretty_assertions should be added selectively in crosspack-cli dev-dependencies alongside insta. [project]
+- **ratatui_scope**: Switching to ratatui is considered overkill for the current terminal-output goals. [project]
+- **recommended_terminal_stack**: The recommended stack for this pass is indicatif, console, anstyle, insta, and pretty_assertions. [project]
+
+## Cross references
+- architecture/terminal_interface_polish/terminal_interface_polish.abstract.md
+- architecture/terminal_interface_polish/terminal_interface_polish.overview.md
