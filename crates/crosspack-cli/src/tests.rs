@@ -10009,7 +10009,8 @@ install_commands = ["sh", "-c", "true"]
             let target = host_target_triple().to_string();
 
             for package_name in ["demo", "tool"] {
-                let receipt = install_receipt(package_name, "1.0.0", InstallReason::Root, &[]);
+                let mut receipt = install_receipt(package_name, "1.0.0", InstallReason::Root, &[]);
+                receipt.target = Some(target.clone());
                 std::fs::create_dir_all(layout.package_dir(package_name, "1.0.0"))
                     .expect("must create old package dir");
                 write_install_receipt(layout, &receipt).expect("must write old receipt");
@@ -10651,7 +10652,6 @@ sha256 = "abc"
         run(&layout)
     }
 
-    #[cfg(unix)]
     fn single_transaction_txid(layout: &PrefixLayout) -> String {
         let mut txids = std::fs::read_dir(layout.transactions_dir())
             .expect("must read transactions dir")
