@@ -11,6 +11,13 @@ fn assert_no_terminal_control_sequences(output_name: &str, output: &str) {
     );
 }
 
+fn normalize_doctor_snapshot_output(output: &str, home: &std::path::Path) -> String {
+    output
+        .replace(&home.display().to_string(), "[HOME]")
+        .replace('\\', "/")
+        .replace("[HOME]/Crosspack", "[HOME]/.crosspack")
+}
+
 #[test]
 fn doctor_stdout_has_no_terminal_control_sequences_when_captured() {
     let output = Command::cargo_bin("crosspack")
@@ -52,11 +59,8 @@ fn doctor_stdout_snapshot_when_captured() {
         String::from_utf8_lossy(&output.stderr)
     );
     insta::with_settings!({ prepend_module_to_snapshot => false }, {
-        let stdout = String::from_utf8_lossy(&output.stdout).replace(&home.display().to_string(), "[HOME]");
-        insta::assert_snapshot!(
-            "captured_doctor_stdout",
-            stdout
-        );
+        let stdout = normalize_doctor_snapshot_output(&String::from_utf8_lossy(&output.stdout), &home);
+        insta::assert_snapshot!("captured_doctor_stdout", stdout);
     });
 }
 
