@@ -77,6 +77,7 @@ Read-only commands (`search`, `info`, `list`, `doctor`) do not open transactions
 
 - Contains one transaction id when a transaction is in progress.
 - Written atomically before filesystem mutation begins.
+- Active marker replacement and removal are durable and idempotent; parent directory entries are synced where supported by the platform.
 
 ### `<txid>.json`
 
@@ -116,6 +117,8 @@ Rules:
 
 - Every mutating step must record forward action and rollback payload before execution.
 - Journal writes must be fsync-safe before moving to next step.
+- Package lifecycle rollback payloads are captured and journaled before destructive mutation.
+- Package apply `state=done` journal entries are appended only after the corresponding forward mutation succeeds.
 
 ## Transaction Lifecycle
 
@@ -156,11 +159,13 @@ Before any mutating command starts, Crosspack checks for `state/transactions/act
 
 If active transaction exists:
 
-1. Load `<txid>.json` and `<txid>.journal`.
-2. If status is `planning` or `applying`, auto-run rollback.
-3. If status is `committed`, finalize cleanup and remove stale `active`.
-4. If status is `rolling_back`, resume rollback.
-5. If status is `failed`, block mutation commands and instruct user to run repair command.
+1. Load `<txid>.json` and `<txid>.journal`, validating that metadata `txid` matches the trusted active marker or metadata file stem.
+2. If status is empty `planning`, cleanup stale planning metadata/staging.
+3. If status is `planning` with rollback payloads or `applying`, require rollback.
+4. If status is `committed` or legacy `completed`, finalize cleanup and remove stale `active`.
+5. If status is `rolling_back`, resume rollback.
+6. If status is `rolled_back`, clear stale `active`.
+7. If status is `failed`, unreadable, mismatched, or missing required rollback evidence, block mutation commands and instruct user to run repair command.
 
 Deterministic user messages:
 
@@ -194,6 +199,7 @@ Extend output with transaction health section:
 - `transaction: clean`
 - `transaction: active <txid>`
 - `transaction: failed <txid>`
+- `transaction_detail txid=<txid> status=<status> operation=<operation> step=<step-or-none>` (additive when trusted active metadata is available)
 
 ### `crosspack repair`
 
@@ -202,6 +208,10 @@ crosspack repair
 ```
 
 Runs deterministic recovery routine for `failed` transaction states and stale locks.
+
+Plain output includes additive recovery action diagnostics:
+
+- `repair action=<code>`
 
 ## Snapshot Consistency Binding
 

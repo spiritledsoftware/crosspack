@@ -919,22 +919,6 @@ fn run_upgrade_command(
                     )?;
                     journal_seq += 1;
 
-                    append_transaction_journal_entry(
-                        layout,
-                        &tx.txid,
-                        &TransactionJournalEntry {
-                            seq: journal_seq,
-                            step: package_apply_step_name(
-                                "upgrade",
-                                &package.manifest.name,
-                                install_mode_for_archive_type(package.archive_type),
-                            ),
-                            state: "done".to_string(),
-                            path: Some(package.manifest.name.clone()),
-                        },
-                    )?;
-                    journal_seq += 1;
-
                     let dependencies = build_dependency_receipts(package, &resolved);
                     let mut source_build_journal = SourceBuildJournal {
                         txid: &tx.txid,
@@ -957,6 +941,21 @@ fn run_upgrade_command(
                         },
                         Some(&mut source_build_journal),
                     )?;
+                    append_transaction_journal_entry(
+                        layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: package_apply_step_name(
+                                "upgrade",
+                                &package.manifest.name,
+                                install_mode_for_archive_type(package.archive_type),
+                            ),
+                            state: "done".to_string(),
+                            path: Some(package.manifest.name.clone()),
+                        },
+                    )?;
+                    journal_seq += 1;
                     if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name) {
                         print_status_with_progress(
                             renderer,
@@ -1099,22 +1098,6 @@ fn run_upgrade_command(
                         )?;
                         journal_seq += 1;
 
-                        append_transaction_journal_entry(
-                            layout,
-                            &tx.txid,
-                            &TransactionJournalEntry {
-                                seq: journal_seq,
-                                step: package_apply_step_name(
-                                    "upgrade",
-                                    &package.manifest.name,
-                                    install_mode_for_archive_type(package.archive_type),
-                                ),
-                                state: "done".to_string(),
-                                path: Some(package.manifest.name.clone()),
-                            },
-                        )?;
-                        journal_seq += 1;
-
                         let dependencies = build_dependency_receipts(package, resolved);
                         let mut source_build_journal = SourceBuildJournal {
                             txid: &tx.txid,
@@ -1137,6 +1120,21 @@ fn run_upgrade_command(
                             },
                             Some(&mut source_build_journal),
                         )?;
+                        append_transaction_journal_entry(
+                            layout,
+                            &tx.txid,
+                            &TransactionJournalEntry {
+                                seq: journal_seq,
+                                step: package_apply_step_name(
+                                    "upgrade",
+                                    &package.manifest.name,
+                                    install_mode_for_archive_type(package.archive_type),
+                                ),
+                                state: "done".to_string(),
+                                path: Some(package.manifest.name.clone()),
+                            },
+                        )?;
+                        journal_seq += 1;
                         if let Some(old) = receipts.iter().find(|r| r.name == package.manifest.name)
                         {
                             print_status_with_progress(
@@ -1377,12 +1375,32 @@ fn snapshot_gui_asset_path(snapshot_root: &Path, gui_storage_rel_path: &str) -> 
     snapshot_gui_root(snapshot_root).join(gui_storage_rel_path)
 }
 
+fn snapshot_integration_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("integrations")
+}
+
+fn snapshot_integration_path(snapshot_root: &Path, integration_storage_rel_path: &str) -> PathBuf {
+    snapshot_integration_root(snapshot_root).join(integration_storage_rel_path)
+}
+
 fn snapshot_native_sidecar_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root.join("native").join("sidecar.state")
 }
 
 fn snapshot_declared_services_sidecar_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root.join("services").join("declared.services")
+}
+
+fn snapshot_identity_pkgs_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("identity_pkgs")
+}
+
+fn snapshot_identity_state_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("identity_state")
+}
+
+fn snapshot_identity_pins_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("identity_pins")
 }
 
 fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifest> {
@@ -1396,6 +1414,7 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
                 bins: Vec::new(),
                 completions: Vec::new(),
                 gui_assets: Vec::new(),
+                integrations: Vec::new(),
                 native_sidecar_exists: false,
                 declared_services_sidecar_exists: false,
             });
@@ -1412,6 +1431,7 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
         bins: Vec::new(),
         completions: Vec::new(),
         gui_assets: Vec::new(),
+        integrations: Vec::new(),
         native_sidecar_exists: false,
         declared_services_sidecar_exists: false,
     };
@@ -1430,6 +1450,18 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
                 return Err(anyhow!("invalid snapshot manifest gui_asset row"));
             };
             manifest.gui_assets.push(GuiExposureAsset {
+                key: key.to_string(),
+                rel_path: rel_path.to_string(),
+            });
+        } else if let Some(integration) = line.strip_prefix("integration=") {
+            let mut fields = integration.splitn(3, '\t');
+            let (Some(kind), Some(key), Some(rel_path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(anyhow!("invalid snapshot manifest integration row"));
+            };
+            manifest.integrations.push(IntegrationProjection {
+                kind: kind.to_string(),
                 key: key.to_string(),
                 rel_path: rel_path.to_string(),
             });
@@ -1462,6 +1494,12 @@ fn write_snapshot_manifest(snapshot_root: &Path, manifest: &PackageSnapshotManif
     }
     for asset in &manifest.gui_assets {
         lines.push(format!("gui_asset={}\t{}", asset.key, asset.rel_path));
+    }
+    for integration in &manifest.integrations {
+        lines.push(format!(
+            "integration={}\t{}\t{}",
+            integration.kind, integration.key, integration.rel_path
+        ));
     }
     lines.push(format!(
         "native_sidecar_exists={}",
@@ -1526,6 +1564,19 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+fn copy_file_if_exists(src: &Path, dst: &Path) -> Result<bool> {
+    if !src.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+    }
+    std::fs::copy(src, dst)
+        .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))?;
+    Ok(true)
+}
+
 fn capture_package_state_snapshot(
     layout: &PrefixLayout,
     txid: &str,
@@ -1574,6 +1625,30 @@ fn capture_package_state_snapshot(
             snapshot_gui_root(&snapshot_root).display()
         )
     })?;
+    std::fs::create_dir_all(snapshot_integration_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot integration dir: {}",
+            snapshot_integration_root(&snapshot_root).display()
+        )
+    })?;
+    std::fs::create_dir_all(snapshot_identity_pkgs_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot identity package dir: {}",
+            snapshot_identity_pkgs_root(&snapshot_root).display()
+        )
+    })?;
+    std::fs::create_dir_all(snapshot_identity_state_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot identity state dir: {}",
+            snapshot_identity_state_root(&snapshot_root).display()
+        )
+    })?;
+    std::fs::create_dir_all(snapshot_identity_pins_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot identity pins dir: {}",
+            snapshot_identity_pins_root(&snapshot_root).display()
+        )
+    })?;
     let snapshot_native_dir = snapshot_native_sidecar_path(&snapshot_root)
         .parent()
         .map(Path::to_path_buf)
@@ -1601,6 +1676,7 @@ fn capture_package_state_snapshot(
         bins: Vec::new(),
         completions: Vec::new(),
         gui_assets: Vec::new(),
+        integrations: Vec::new(),
         native_sidecar_exists: false,
         declared_services_sidecar_exists: false,
     };
@@ -1667,6 +1743,17 @@ fn capture_package_state_snapshot(
         }
     }
 
+    manifest.integrations = read_integration_state(layout, package_name)?;
+    for integration in &manifest.integrations {
+        let source = layout.integrations_dir().join(&integration.rel_path);
+        if source.exists() {
+            copy_tree(
+                &source,
+                &snapshot_integration_path(&snapshot_root, &integration.rel_path),
+            )?;
+        }
+    }
+
     let native_sidecar_path = layout.gui_native_state_path(package_name);
     if native_sidecar_path.exists() {
         manifest.native_sidecar_exists = true;
@@ -1695,6 +1782,43 @@ fn capture_package_state_snapshot(
                 snapshot_declared_services_sidecar_path(&snapshot_root).display()
             )
         })?;
+    }
+
+    for state in read_all_installed_package_states(layout)?
+        .into_iter()
+        .filter(|state| state.identity.package == package_name)
+    {
+        let identity_package_dir = layout.identity_package_dir(&state.identity, &state.version);
+        if identity_package_dir.exists() {
+            let rel_path = identity_package_dir.strip_prefix(layout.identity_pkgs_dir()).with_context(|| {
+                format!(
+                    "failed deriving identity package snapshot path for {}",
+                    identity_package_dir.display()
+                )
+            })?;
+            copy_tree(
+                &identity_package_dir,
+                &snapshot_identity_pkgs_root(&snapshot_root).join(rel_path),
+            )?;
+        }
+
+        let state_key = state.identity.state_key();
+        for path in [
+            layout.identity_receipt_path(&state.identity),
+            layout.installed_identity_state_document_path(&state.identity),
+            layout.identity_gui_state_path(&state.identity),
+            layout.identity_gui_native_state_path(&state.identity),
+            layout.identity_declared_services_state_path(&state.identity),
+            layout.identity_integration_state_path(&state.identity),
+        ] {
+            if let Some(file_name) = path.file_name() {
+                copy_file_if_exists(&path, &snapshot_identity_state_root(&snapshot_root).join(file_name))?;
+            }
+        }
+        copy_file_if_exists(
+            &layout.identity_pin_path(&state.identity),
+            &snapshot_identity_pins_root(&snapshot_root).join(format!("{state_key}.pin")),
+        )?;
     }
 
     write_snapshot_manifest(&snapshot_root, &manifest)?;
@@ -1795,6 +1919,10 @@ fn restore_package_state_snapshot(
     snapshot_root: Option<&Path>,
 ) -> Result<()> {
     let package_root = layout.pkgs_dir().join(package_name);
+    let existing_identity_states = read_all_installed_package_states(layout)?
+        .into_iter()
+        .filter(|state| state.identity.package == package_name)
+        .collect::<Vec<_>>();
     let existing_receipt = read_install_receipts(layout)?
         .into_iter()
         .find(|receipt| receipt.name == package_name);
@@ -1840,10 +1968,35 @@ fn restore_package_state_snapshot(
     }
     write_gui_native_state(layout, package_name, &[])?;
 
+    let existing_integrations = read_integration_state(layout, package_name)?;
+    for integration in &existing_integrations {
+        remove_exposed_integration(layout, integration)?;
+    }
+    write_integration_state(layout, package_name, &[])?;
+
     if package_root.exists() {
         std::fs::remove_dir_all(&package_root).with_context(|| {
             format!("failed to remove package path: {}", package_root.display())
         })?;
+    }
+
+    for state in &existing_identity_states {
+        let identity_package_dir = layout.identity_package_dir(&state.identity, &state.version);
+        if identity_package_dir.exists() {
+            std::fs::remove_dir_all(&identity_package_dir).with_context(|| {
+                format!(
+                    "failed to remove identity package path: {}",
+                    identity_package_dir.display()
+                )
+            })?;
+        }
+        remove_file_if_exists(&layout.identity_receipt_path(&state.identity))?;
+        remove_file_if_exists(&layout.installed_identity_state_document_path(&state.identity))?;
+        remove_file_if_exists(&layout.identity_gui_state_path(&state.identity))?;
+        remove_file_if_exists(&layout.identity_gui_native_state_path(&state.identity))?;
+        remove_file_if_exists(&layout.identity_declared_services_state_path(&state.identity))?;
+        remove_file_if_exists(&layout.identity_integration_state_path(&state.identity))?;
+        remove_file_if_exists(&layout.identity_pin_path(&state.identity))?;
     }
 
     remove_file_if_exists(&layout.receipt_path(package_name))?;
@@ -1859,6 +2012,7 @@ fn restore_package_state_snapshot(
         bins,
         completions,
         gui_assets,
+        integrations,
         native_sidecar_exists,
         declared_services_sidecar_exists,
     } = read_snapshot_manifest(snapshot_root)?;
@@ -1933,6 +2087,22 @@ fn restore_package_state_snapshot(
     }
     write_gui_exposure_state(layout, package_name, &gui_assets)?;
 
+    for integration in &integrations {
+        let dst = layout.integrations_dir().join(&integration.rel_path);
+        remove_file_if_exists(&dst)?;
+        let src = snapshot_integration_path(snapshot_root, &integration.rel_path);
+        if src.exists() {
+            copy_tree(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring integration '{}' from {}",
+                    integration.key,
+                    src.display()
+                )
+            })?;
+        }
+    }
+    write_integration_state(layout, package_name, &integrations)?;
+
     if native_sidecar_exists {
         let dst = layout.gui_native_state_path(package_name);
         let src = snapshot_native_sidecar_path(snapshot_root);
@@ -1969,6 +2139,25 @@ fn restore_package_state_snapshot(
         }
     }
 
+    if snapshot_identity_pkgs_root(snapshot_root).exists() {
+        copy_tree(
+            &snapshot_identity_pkgs_root(snapshot_root),
+            &layout.identity_pkgs_dir(),
+        )?;
+    }
+    if snapshot_identity_state_root(snapshot_root).exists() {
+        copy_tree(
+            &snapshot_identity_state_root(snapshot_root),
+            &layout.installed_state_dir(),
+        )?;
+    }
+    if snapshot_identity_pins_root(snapshot_root).exists() {
+        copy_tree(
+            &snapshot_identity_pins_root(snapshot_root),
+            &layout.pins_dir(),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -2001,7 +2190,15 @@ fn replay_rollback_journal(layout: &PrefixLayout, txid: &str) -> Result<bool> {
     compensating_steps.sort_by_key(|step| std::cmp::Reverse(step.0));
 
     if compensating_steps.is_empty() {
-        return Ok(false);
+        let mut backup_steps = backups.into_iter().collect::<Vec<_>>();
+        backup_steps.sort_by(|left, right| left.0.cmp(&right.0));
+        if backup_steps.is_empty() {
+            return Ok(false);
+        }
+        for (package_name, snapshot_root) in backup_steps {
+            restore_package_state_snapshot(layout, &package_name, Some(snapshot_root.as_path()))?;
+        }
+        return Ok(true);
     }
 
     for (_, package_name) in &compensating_steps {
@@ -2055,6 +2252,7 @@ fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String
         let Some(metadata) = read_transaction_metadata(layout, txid)? else {
             continue;
         };
+        ensure_transaction_metadata_txid_matches(txid, &metadata)?;
         if matches!(
             metadata.status,
             TransactionStatus::Completed | TransactionStatus::Committed | TransactionStatus::RolledBack
@@ -2063,12 +2261,12 @@ fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String
         }
 
         match &latest {
-            None => latest = Some((metadata.started_at_unix, metadata.txid)),
+            None => latest = Some((metadata.started_at_unix, txid.to_string())),
             Some((best_started_at, best_txid)) => {
                 if metadata.started_at_unix > *best_started_at
-                    || (metadata.started_at_unix == *best_started_at && metadata.txid > *best_txid)
+                    || (metadata.started_at_unix == *best_started_at && txid > best_txid.as_str())
                 {
-                    latest = Some((metadata.started_at_unix, metadata.txid));
+                    latest = Some((metadata.started_at_unix, txid.to_string()));
                 }
             }
         }
@@ -2089,23 +2287,42 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
             txid
         }
         None => {
-            if let Some(active_txid) = read_active_transaction(layout)? {
-                active_txid
-            } else if let Some(candidate_txid) = latest_rollback_candidate_txid(layout)? {
-                candidate_txid
-            } else {
-                println!(
-                    "{}",
-                    render_status_line(output_style, "step", "no rollback needed")
-                );
-                return Ok(());
+            match read_active_transaction_marker(layout)? {
+                ActiveTransactionMarker::Present(active_txid) => active_txid,
+                ActiveTransactionMarker::Invalid => {
+                    return Err(anyhow!(
+                        "transaction state requires repair (reason=active_marker_invalid path={})",
+                        layout.transaction_active_path().display()
+                    ));
+                }
+                ActiveTransactionMarker::Absent => {
+                    if let Some(candidate_txid) = latest_rollback_candidate_txid(layout)? {
+                        candidate_txid
+                    } else {
+                        println!(
+                            "{}",
+                            render_status_line(output_style, "step", "no rollback needed")
+                        );
+                        return Ok(());
+                    }
+                }
             }
         }
     };
 
     let metadata = read_transaction_metadata(layout, &target_txid)?
         .ok_or_else(|| anyhow!("transaction metadata missing for rollback txid={target_txid}"))?;
-    let active_txid = read_active_transaction(layout)?;
+    ensure_transaction_metadata_txid_matches(&target_txid, &metadata)?;
+    let active_txid = match read_active_transaction_marker(layout)? {
+        ActiveTransactionMarker::Absent => None,
+        ActiveTransactionMarker::Invalid => {
+            return Err(anyhow!(
+                "transaction state requires repair (reason=active_marker_invalid path={})",
+                layout.transaction_active_path().display()
+            ));
+        }
+        ActiveTransactionMarker::Present(active_txid) => Some(active_txid),
+    };
 
     if matches!(
         metadata.status,
@@ -2177,47 +2394,43 @@ fn run_rollback_command(layout: &PrefixLayout, txid: Option<String>) -> Result<(
 fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
     let output_style = current_output_style();
     layout.ensure_base_dirs()?;
+    let action = TransactionCoordinator::new(layout).repair_transaction_state()?;
+    println!(
+        "{}",
+        render_status_line(
+            output_style,
+            "step",
+            &format_repair_action_line(&action)
+        )
+    );
 
-    let Some(txid) = read_active_transaction(layout)? else {
-        println!(
-            "{}",
-            render_status_line(output_style, "step", "repair: no action needed")
-        );
-        return Ok(());
-    };
-
-    let metadata = read_transaction_metadata(layout, &txid)?;
-    let Some(metadata) = metadata else {
-        clear_active_transaction(layout)?;
-        println!(
-            "{}",
-            render_status_line(
-                output_style,
-                "ok",
-                &format!("repair: cleared stale marker {txid}")
-            )
-        );
-        return Ok(());
-    };
-
-    if status_allows_stale_marker_cleanup(&metadata.status) {
-        clear_active_transaction(layout)?;
-        println!(
-            "{}",
-            render_status_line(
-                output_style,
-                "ok",
-                &format!("repair: cleared stale marker {txid}")
-            )
-        );
-        return Ok(());
-    }
-
-    match metadata.status {
-        TransactionStatus::Planning
-        | TransactionStatus::Applying
-        | TransactionStatus::Failed
-        | TransactionStatus::RollingBack => {
+    match &action {
+        TransactionRecoveryAction::Clean => {
+            println!(
+                "{}",
+                render_status_line(output_style, "step", "repair: no action needed")
+            );
+            Ok(())
+        }
+        TransactionRecoveryAction::CleanupPlanning { txid }
+        | TransactionRecoveryAction::FinalizeCommitted { txid }
+        | TransactionRecoveryAction::ClearRolledBack { txid } => {
+            println!(
+                "{}",
+                render_status_line(
+                    output_style,
+                    "ok",
+                    &format!("repair: cleared stale marker {txid}")
+                )
+            );
+            Ok(())
+        }
+        TransactionRecoveryAction::RepairRequired(reason) => {
+            Err(anyhow!(format_transaction_preflight_required(layout, reason)))
+        }
+        TransactionRecoveryAction::Rollback { txid }
+        | TransactionRecoveryAction::ResumeRollback { txid }
+        | TransactionRecoveryAction::BlockedFailed { txid } => {
             run_rollback_command(layout, Some(txid.clone()))?;
             println!(
                 "{}",
@@ -2229,10 +2442,51 @@ fn run_repair_command(layout: &PrefixLayout) -> Result<()> {
             );
             Ok(())
         }
-        status => Err(anyhow!(
-            "transaction {txid} requires manual repair (reason=unsupported_status status={status})"
-        )),
     }
+}
+
+fn format_repair_action_line(action: &TransactionRecoveryAction) -> String {
+    format!("repair action={}", transaction_recovery_action_code(action))
+}
+
+fn transaction_recovery_action_code(action: &TransactionRecoveryAction) -> &'static str {
+    match action {
+        TransactionRecoveryAction::Clean => "clean",
+        TransactionRecoveryAction::CleanupPlanning { .. } => "cleanup-planning",
+        TransactionRecoveryAction::Rollback { .. } => "rollback",
+        TransactionRecoveryAction::FinalizeCommitted { .. } => "finalize-committed",
+        TransactionRecoveryAction::ResumeRollback { .. } => "resume-rollback",
+        TransactionRecoveryAction::ClearRolledBack { .. } => "clear-rolled-back",
+        TransactionRecoveryAction::BlockedFailed { .. } => "blocked-failed",
+        TransactionRecoveryAction::RepairRequired(reason) => transaction_repair_reason_code(reason),
+    }
+}
+
+fn transaction_repair_reason_code(reason: &TransactionRepairReason) -> &'static str {
+    match reason {
+        TransactionRepairReason::ActiveMarkerUnreadable => "active-marker-unreadable",
+        TransactionRepairReason::ActiveMarkerInvalid { .. } => "active-marker-invalid",
+        TransactionRepairReason::ActiveMarkerWithoutMetadata { .. } => "metadata-missing",
+        TransactionRepairReason::MetadataUnreadable { .. } => "metadata-unreadable",
+        TransactionRepairReason::MetadataTxidMismatch { .. } => "metadata-txid-mismatch",
+        TransactionRepairReason::JournalUnreadable { .. } => "journal-unreadable",
+        TransactionRepairReason::ApplyingWithoutActiveMarker { .. } => "applying-without-active-marker",
+        TransactionRepairReason::RollbackEvidenceMissing { .. } => "rollback-evidence-missing",
+    }
+}
+
+fn ensure_transaction_metadata_txid_matches(
+    expected_txid: &str,
+    metadata: &TransactionMetadata,
+) -> Result<()> {
+    if metadata.txid != expected_txid {
+        return Err(anyhow!(
+            "transaction state requires repair (reason=metadata_txid_mismatch expected={} actual={})",
+            expected_txid,
+            metadata.txid
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2263,11 +2517,20 @@ fn run_uninstall_command_with_selector(
 
     execute_with_transaction(layout, "uninstall", None, |tx| {
         let mut journal_seq = 1_u64;
-        let mut snapshot_paths = HashMap::new();
         for state in read_all_installed_package_states(layout)? {
             let receipt = state.receipt;
             let snapshot_path = capture_package_state_snapshot(layout, &tx.txid, &receipt.name)?;
-            snapshot_paths.insert(receipt.name, snapshot_path);
+            append_transaction_journal_entry(
+                layout,
+                &tx.txid,
+                &TransactionJournalEntry {
+                    seq: journal_seq,
+                    step: format!("backup_package_state:{}", receipt.name),
+                    state: "done".to_string(),
+                    path: Some(snapshot_path.display().to_string()),
+                },
+            )?;
+            journal_seq += 1;
         }
 
         let result = if layout.identity_receipt_path(&identity).exists() {
@@ -2275,20 +2538,6 @@ fn run_uninstall_command_with_selector(
         } else {
             uninstall_package(layout, &name)?
         };
-
-        if let Some(snapshot_path) = snapshot_paths.get(&name) {
-            append_transaction_journal_entry(
-                layout,
-                &tx.txid,
-                &TransactionJournalEntry {
-                    seq: journal_seq,
-                    step: format!("backup_package_state:{}", name),
-                    state: "done".to_string(),
-                    path: Some(snapshot_path.display().to_string()),
-                },
-            )?;
-            journal_seq += 1;
-        }
 
         append_transaction_journal_entry(
             layout,
@@ -2303,20 +2552,6 @@ fn run_uninstall_command_with_selector(
         journal_seq += 1;
 
         for dependency in &result.pruned_dependencies {
-            if let Some(snapshot_path) = snapshot_paths.get(dependency) {
-                append_transaction_journal_entry(
-                    layout,
-                    &tx.txid,
-                    &TransactionJournalEntry {
-                        seq: journal_seq,
-                        step: format!("backup_package_state:{dependency}"),
-                        state: "done".to_string(),
-                        path: Some(snapshot_path.display().to_string()),
-                    },
-                )?;
-                journal_seq += 1;
-            }
-
             append_transaction_journal_entry(
                 layout,
                 &tx.txid,

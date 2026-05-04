@@ -92,6 +92,30 @@ pub enum TransactionStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionRecoveryAction {
+    Clean,
+    CleanupPlanning { txid: String },
+    Rollback { txid: String },
+    FinalizeCommitted { txid: String },
+    ResumeRollback { txid: String },
+    ClearRolledBack { txid: String },
+    BlockedFailed { txid: String },
+    RepairRequired(TransactionRepairReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionRepairReason {
+    ActiveMarkerUnreadable,
+    ActiveMarkerInvalid { path: String },
+    ActiveMarkerWithoutMetadata { txid: String },
+    MetadataUnreadable { txid: String },
+    MetadataTxidMismatch { expected: String, actual: String },
+    JournalUnreadable { txid: String },
+    ApplyingWithoutActiveMarker { txid: String },
+    RollbackEvidenceMissing { txid: String },
+}
+
 impl TransactionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {

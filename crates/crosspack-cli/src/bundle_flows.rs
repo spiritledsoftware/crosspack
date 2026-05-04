@@ -228,22 +228,6 @@ fn run_bundle_apply_command(
                 )?;
                 journal_seq += 1;
 
-                append_transaction_journal_entry(
-                    layout,
-                    &tx.txid,
-                    &TransactionJournalEntry {
-                        seq: journal_seq,
-                        step: package_apply_step_name(
-                            "install",
-                            &package.manifest.name,
-                            install_mode_for_archive_type(package.archive_type),
-                        ),
-                        state: "done".to_string(),
-                        path: Some(package.manifest.name.clone()),
-                    },
-                )?;
-                journal_seq += 1;
-
                 let dependencies = build_dependency_receipts(package, &plan.resolved);
                 let mut source_build_journal = SourceBuildJournal {
                     txid: &tx.txid,
@@ -266,6 +250,21 @@ fn run_bundle_apply_command(
                     },
                     Some(&mut source_build_journal),
                 )?;
+                append_transaction_journal_entry(
+                    layout,
+                    &tx.txid,
+                    &TransactionJournalEntry {
+                        seq: journal_seq,
+                        step: package_apply_step_name(
+                            "install",
+                            &package.manifest.name,
+                            install_mode_for_archive_type(package.archive_type),
+                        ),
+                        state: "done".to_string(),
+                        path: Some(package.manifest.name.clone()),
+                    },
+                )?;
+                journal_seq += 1;
                 print_install_outcome(&outcome, output_style);
             }
         }

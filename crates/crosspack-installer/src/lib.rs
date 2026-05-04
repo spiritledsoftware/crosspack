@@ -1,5 +1,6 @@
 mod artifact;
 mod atomic_write;
+mod durable;
 mod exposure;
 mod fs_utils;
 mod identity;
@@ -52,18 +53,21 @@ pub use receipts::{
     read_install_receipts, write_declared_services_state, write_identity_declared_services_state,
     write_identity_install_receipt, write_install_receipt, IdentityInstallReceipt,
 };
+#[cfg(test)]
+pub(crate) use transaction_coordinator::TransactionBeginCrashHook;
 pub use transaction_coordinator::{StartedTransaction, TransactionCoordinator};
 pub use transactions::{
     append_transaction_journal_entry, clear_active_transaction, current_unix_timestamp,
-    read_active_transaction, read_transaction_metadata, set_active_transaction,
-    update_transaction_status, write_transaction_metadata,
+    read_active_transaction, read_active_transaction_marker, read_transaction_journal_entries,
+    read_transaction_metadata, set_active_transaction, update_transaction_status,
+    write_transaction_metadata, ActiveTransactionMarker,
 };
 pub use types::{
     ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
     InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, IntegrationProjection,
     NativeServiceAction, NativeServiceOutcome, NativeSidecarState, NativeUninstallAction,
-    TransactionJournalEntry, TransactionMetadata, TransactionStatus, UninstallResult,
-    UninstallStatus,
+    TransactionJournalEntry, TransactionMetadata, TransactionRecoveryAction,
+    TransactionRepairReason, TransactionStatus, UninstallResult, UninstallStatus,
 };
 pub use uninstall::{
     uninstall_blocked_by_roots_with_dependency_overrides,

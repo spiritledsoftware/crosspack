@@ -8,6 +8,8 @@ use crosspack_core::{
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Command;
@@ -34,6 +36,7 @@ use crate::native::{
     select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
 use crate::receipts::{parse_identity_receipt, parse_receipt};
+use crate::transactions::fail_next_active_transaction_after_write_for_test;
 
 const TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-1\",\n  \"operation\": \"install\",\n  \"status\": \"applying\",\n  \"started_at_unix\": 1771001234,\n  \"snapshot_id\": \"git:abc123\"\n}\n";
 const TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-2\",\n  \"operation\": \"repair\",\n  \"status\": \"failed\",\n  \"started_at_unix\": 1771001235\n}\n";
@@ -1059,6 +1062,54 @@ fn read_transaction_metadata_round_trip() {
 }
 
 #[test]
+fn transaction_metadata_round_trips_with_snapshot_id() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let metadata = TransactionMetadata {
+        version: 1,
+        txid: "tx-meta-with-snapshot".to_string(),
+        operation: "install".to_string(),
+        status: TransactionStatus::Planning,
+        started_at_unix: 1_771_001_241,
+        snapshot_id: Some("git:snapshot-1".to_string()),
+    };
+
+    write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+    let loaded = read_transaction_metadata(&layout, &metadata.txid)
+        .expect("must read metadata")
+        .expect("metadata must exist");
+
+    assert_eq!(loaded, metadata);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_metadata_round_trips_without_snapshot_id() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let metadata = TransactionMetadata {
+        version: 1,
+        txid: "tx-meta-without-snapshot".to_string(),
+        operation: "repair".to_string(),
+        status: TransactionStatus::Failed,
+        started_at_unix: 1_771_001_242,
+        snapshot_id: None,
+    };
+
+    write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+    let loaded = read_transaction_metadata(&layout, &metadata.txid)
+        .expect("must read metadata")
+        .expect("metadata must exist");
+
+    assert_eq!(loaded, metadata);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
 fn transaction_metadata_parses_compatibility_fixture_with_snapshot() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
@@ -1123,6 +1174,26 @@ fn transaction_metadata_parser_keeps_legacy_line_fallback() {
     assert_eq!(metadata.txid, txid);
     assert_eq!(metadata.status, TransactionStatus::Committed);
     assert_eq!(metadata.snapshot_id.as_deref(), Some("git:legacy"));
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn legacy_transaction_metadata_still_parses() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let txid = "tx-legacy-metadata";
+    let raw = "version: 1\ntxid: \"tx-legacy-metadata\"\noperation: \"install\"\nstatus: \"completed\"\nstarted_at_unix: 1771001243\n";
+    fs::write(layout.transaction_metadata_path(txid), raw).expect("must write legacy fixture");
+
+    let metadata = read_transaction_metadata(&layout, txid)
+        .expect("must parse legacy metadata")
+        .expect("legacy metadata must exist");
+
+    assert_eq!(metadata.txid, txid);
+    assert_eq!(metadata.status, TransactionStatus::Completed);
+    assert_eq!(metadata.snapshot_id, None);
 
     let _ = fs::remove_dir_all(layout.prefix());
 }
@@ -1207,7 +1278,7 @@ fn read_transaction_metadata_rejects_truncated_quoted_value() {
         .expect_err("truncated quoted value should be recoverable parse error");
     let err_text = format!("{err:#}");
     assert!(
-        err_text.contains("invalid quoted transaction metadata value for field: txid"),
+        err_text.contains("invalid transaction metadata JSON"),
         "unexpected error: {err_text}"
     );
 
@@ -1236,6 +1307,41 @@ fn update_transaction_status_rewrites_metadata_status() {
         .expect("must read metadata")
         .expect("metadata should exist");
     assert_eq!(loaded.status, "applying");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_metadata_replacement_is_atomic() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let mut metadata = TransactionMetadata {
+        version: 1,
+        txid: "tx-atomic-replace".to_string(),
+        operation: "install".to_string(),
+        status: TransactionStatus::Planning,
+        started_at_unix: 1_771_001_251,
+        snapshot_id: None,
+    };
+
+    let metadata_path =
+        write_transaction_metadata(&layout, &metadata).expect("must write old metadata");
+    let mut permissions = fs::metadata(&metadata_path)
+        .expect("must stat metadata")
+        .permissions();
+    permissions.set_mode(0o444);
+    fs::set_permissions(&metadata_path, permissions).expect("must make metadata read-only");
+
+    metadata.status = TransactionStatus::Applying;
+    write_transaction_metadata(&layout, &metadata)
+        .expect("atomic replacement should replace read-only file");
+
+    let loaded = read_transaction_metadata(&layout, &metadata.txid)
+        .expect("must read replaced metadata")
+        .expect("metadata must exist");
+    assert_eq!(loaded.status, TransactionStatus::Applying);
 
     let _ = fs::remove_dir_all(layout.prefix());
 }
@@ -1290,6 +1396,606 @@ fn transaction_coordinator_begin_rejects_existing_active_marker_and_cleans_metad
 }
 
 #[test]
+fn crash_hook_after_metadata_write_leaves_orphan_planning_metadata_for_cleanup() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let err = TransactionCoordinator::new(&layout)
+        .begin_with_crash_hook_for_test(
+            "install",
+            None,
+            1_771_001_502,
+            TransactionBeginCrashHook::AfterMetadataWrite,
+        )
+        .expect_err("crash hook should stop begin after metadata write");
+    assert!(
+        err.to_string()
+            .contains("test crash after transaction metadata write"),
+        "unexpected error: {err}"
+    );
+
+    let txid = format!("tx-{}-{}", 1_771_001_502_u64, std::process::id());
+    assert!(layout.transaction_metadata_path(&txid).exists());
+    assert!(!layout.transaction_active_path().exists());
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify orphan planning transaction");
+    assert_eq!(action, TransactionRecoveryAction::CleanupPlanning { txid });
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn crash_hook_after_active_marker_leaves_active_planning_metadata_for_cleanup() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let err = TransactionCoordinator::new(&layout)
+        .begin_with_crash_hook_for_test(
+            "upgrade",
+            Some("git:abc123"),
+            1_771_001_503,
+            TransactionBeginCrashHook::AfterActiveMarker,
+        )
+        .expect_err("crash hook should stop begin after active marker");
+    assert!(
+        err.to_string()
+            .contains("test crash after active transaction marker"),
+        "unexpected error: {err}"
+    );
+
+    let txid = format!("tx-{}-{}", 1_771_001_503_u64, std::process::id());
+    assert_eq!(
+        read_active_transaction(&layout)
+            .expect("must read active marker")
+            .as_deref(),
+        Some(txid.as_str())
+    );
+    let metadata = read_transaction_metadata(&layout, &txid)
+        .expect("must read metadata")
+        .expect("metadata must exist");
+    assert_eq!(metadata.status, TransactionStatus::Planning);
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify active planning transaction");
+    assert_eq!(action, TransactionRecoveryAction::CleanupPlanning { txid });
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+fn transaction_metadata_for_test(txid: &str, status: TransactionStatus) -> TransactionMetadata {
+    TransactionMetadata {
+        version: 1,
+        txid: txid.to_string(),
+        operation: "install".to_string(),
+        status,
+        started_at_unix: 1_771_001_600,
+        snapshot_id: None,
+    }
+}
+
+fn write_transaction_metadata_for_recovery(layout: &PrefixLayout, status: TransactionStatus) {
+    let metadata = transaction_metadata_for_test("tx-recovery", status);
+    write_transaction_metadata(layout, &metadata).expect("must write metadata");
+}
+
+fn append_transaction_journal_entry_for_recovery(layout: &PrefixLayout) {
+    append_transaction_journal_entry(
+        layout,
+        "tx-recovery",
+        &TransactionJournalEntry {
+            seq: 1,
+            step: "stage_payload".to_string(),
+            state: "done".to_string(),
+            path: Some("staging/tx-recovery/payload".to_string()),
+        },
+    )
+    .expect("must append journal entry");
+}
+
+#[test]
+fn recovery_classification_returns_clean_without_active_or_problematic_metadata() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(action, TransactionRecoveryAction::Clean);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_matrix_for_active_transaction_statuses() {
+    let cases = [
+        (
+            TransactionStatus::Planning,
+            TransactionRecoveryAction::CleanupPlanning {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+        (
+            TransactionStatus::Applying,
+            TransactionRecoveryAction::Rollback {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+        (
+            TransactionStatus::Completed,
+            TransactionRecoveryAction::FinalizeCommitted {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+        (
+            TransactionStatus::Committed,
+            TransactionRecoveryAction::FinalizeCommitted {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+        (
+            TransactionStatus::RollingBack,
+            TransactionRecoveryAction::ResumeRollback {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+        (
+            TransactionStatus::RolledBack,
+            TransactionRecoveryAction::ClearRolledBack {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+        (
+            TransactionStatus::Failed,
+            TransactionRecoveryAction::BlockedFailed {
+                txid: "tx-recovery".to_string(),
+            },
+        ),
+    ];
+
+    for (status, expected) in cases {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_transaction_metadata_for_recovery(&layout, status);
+        set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+
+        let action = TransactionCoordinator::new(&layout)
+            .classify_recovery()
+            .expect("must classify recovery");
+
+        assert_eq!(action, expected, "status={status}");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+}
+
+#[test]
+fn recovery_classification_rolls_back_planning_with_staged_payload_or_journal() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Planning);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+    fs::write(
+        layout
+            .transaction_staging_path("tx-recovery")
+            .join("payload"),
+        b"staged",
+    )
+    .expect("must write staged payload");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::Rollback {
+            txid: "tx-recovery".to_string()
+        }
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_rolls_back_active_planning_with_journal_only() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Planning);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+    append_transaction_journal_entry_for_recovery(&layout);
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::Rollback {
+            txid: "tx-recovery".to_string()
+        }
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_cleans_up_orphan_planning_with_empty_staging() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Planning);
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::CleanupPlanning {
+            txid: "tx-recovery".to_string()
+        }
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_rolls_back_orphan_planning_with_staged_payload() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Planning);
+    fs::write(
+        layout
+            .transaction_staging_path("tx-recovery")
+            .join("payload"),
+        b"staged",
+    )
+    .expect("must write staged payload");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::Rollback {
+            txid: "tx-recovery".to_string()
+        }
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_rolls_back_orphan_planning_with_journal_only() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Planning);
+    append_transaction_journal_entry_for_recovery(&layout);
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::Rollback {
+            txid: "tx-recovery".to_string()
+        }
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_final_states_without_marker_are_clean() {
+    for status in [
+        TransactionStatus::Committed,
+        TransactionStatus::Completed,
+        TransactionStatus::RolledBack,
+    ] {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_transaction_metadata_for_recovery(&layout, status);
+
+        let action = TransactionCoordinator::new(&layout)
+            .classify_recovery()
+            .expect("must classify recovery");
+
+        assert_eq!(action, TransactionRecoveryAction::Clean, "status={status}");
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+}
+
+#[test]
+fn recovery_classification_fails_closed_for_marker_and_metadata_problems() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.transaction_active_path(), b"").expect("must write active marker");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(TransactionRepairReason::ActiveMarkerInvalid {
+            path: layout.transaction_active_path().display().to_string(),
+        })
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.transaction_active_path(), b"tx-missing-metadata\n")
+        .expect("must write active marker");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(
+            TransactionRepairReason::ActiveMarkerWithoutMetadata {
+                txid: "tx-missing-metadata".to_string(),
+            }
+        )
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_fails_closed_for_corrupt_metadata_or_journal() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.transaction_active_path(), b"tx-corrupt-metadata\n")
+        .expect("must write active marker");
+    fs::write(
+        layout.transaction_metadata_path("tx-corrupt-metadata"),
+        b"not metadata",
+    )
+    .expect("must write corrupt metadata");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(TransactionRepairReason::MetadataUnreadable {
+            txid: "tx-corrupt-metadata".to_string()
+        })
+    );
+
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.transaction_active_path(), b"tx-truncated-json\n")
+        .expect("must write active marker");
+    fs::write(
+        layout.transaction_metadata_path("tx-truncated-json"),
+        br#"{
+"version": 1,
+"txid": "tx-truncated-json",
+"operation": "install",
+"status": "planning",
+"started_at_unix": 1771001600
+"#,
+    )
+    .expect("must write truncated json metadata");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(TransactionRepairReason::MetadataUnreadable {
+            txid: "tx-truncated-json".to_string()
+        })
+    );
+
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.transaction_active_path(), b"tx-marker\n").expect("must write active marker");
+    write_transaction_metadata(
+        &layout,
+        &transaction_metadata_for_test("tx-metadata", TransactionStatus::Planning),
+    )
+    .expect("must write mismatched metadata");
+    fs::rename(
+        layout.transaction_metadata_path("tx-metadata"),
+        layout.transaction_metadata_path("tx-marker"),
+    )
+    .expect("must move mismatched metadata into marker path");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(TransactionRepairReason::MetadataTxidMismatch {
+            expected: "tx-marker".to_string(),
+            actual: "tx-metadata".to_string(),
+        })
+    );
+
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Applying);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+    fs::write(
+        layout.transaction_journal_path("tx-recovery"),
+        b"not json\n",
+    )
+    .expect("must write corrupt journal");
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(TransactionRepairReason::JournalUnreadable {
+            txid: "tx-recovery".to_string()
+        })
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn recovery_classification_fails_closed_for_applying_without_active_marker() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Applying);
+
+    let action = TransactionCoordinator::new(&layout)
+        .classify_recovery()
+        .expect("must classify recovery");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(
+            TransactionRepairReason::ApplyingWithoutActiveMarker {
+                txid: "tx-recovery".to_string()
+            }
+        )
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn repair_transaction_state_returns_clean_without_mutation_when_no_action_needed() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must repair clean state");
+
+    assert_eq!(action, TransactionRecoveryAction::Clean);
+    assert!(!layout.transaction_active_path().exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn repair_transaction_state_cleans_empty_planning_state_idempotently() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Planning);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must repair planning state");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::CleanupPlanning {
+            txid: "tx-recovery".to_string()
+        }
+    );
+    assert!(!layout.transaction_active_path().exists());
+    assert!(!layout.transaction_metadata_path("tx-recovery").exists());
+    assert!(!layout.transaction_staging_path("tx-recovery").exists());
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must repair already-clean state");
+    assert_eq!(action, TransactionRecoveryAction::Clean);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn repair_transaction_state_finalizes_terminal_active_marker_idempotently() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Committed);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must repair committed state");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::FinalizeCommitted {
+            txid: "tx-recovery".to_string()
+        }
+    );
+    assert!(!layout.transaction_active_path().exists());
+    assert!(layout.transaction_metadata_path("tx-recovery").exists());
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must repair already-finalized state");
+    assert_eq!(action, TransactionRecoveryAction::Clean);
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn repair_transaction_state_fails_closed_when_rollback_evidence_is_missing() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::Applying);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must classify repair need");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::RepairRequired(
+            TransactionRepairReason::RollbackEvidenceMissing {
+                txid: "tx-recovery".to_string()
+            }
+        )
+    );
+    assert!(layout.transaction_active_path().exists());
+    assert!(layout.transaction_metadata_path("tx-recovery").exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn repair_transaction_state_preserves_rollback_action_when_evidence_exists() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_transaction_metadata_for_recovery(&layout, TransactionStatus::RollingBack);
+    set_active_transaction(&layout, "tx-recovery").expect("must set active marker");
+    append_transaction_journal_entry_for_recovery(&layout);
+
+    let action = TransactionCoordinator::new(&layout)
+        .repair_transaction_state()
+        .expect("must preserve resumable rollback");
+
+    assert_eq!(
+        action,
+        TransactionRecoveryAction::ResumeRollback {
+            txid: "tx-recovery".to_string()
+        }
+    );
+    assert!(layout.transaction_active_path().exists());
+    assert!(layout.transaction_metadata_path("tx-recovery").exists());
+    assert!(layout.transaction_journal_path("tx-recovery").exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
 fn read_active_transaction_round_trip() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
@@ -1307,6 +2013,67 @@ fn read_active_transaction_round_trip() {
     );
 
     clear_active_transaction(&layout).expect("must clear active transaction");
+    assert!(read_active_transaction(&layout)
+        .expect("must read active transaction")
+        .is_none());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_active_transaction_marker_distinguishes_absent_from_empty_marker() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    assert_eq!(
+        read_active_transaction_marker(&layout).expect("must read absent marker"),
+        ActiveTransactionMarker::Absent
+    );
+
+    fs::write(layout.transaction_active_path(), b"").expect("must write empty marker");
+
+    assert_eq!(
+        read_active_transaction_marker(&layout).expect("must read empty marker"),
+        ActiveTransactionMarker::Invalid
+    );
+    assert!(read_active_transaction(&layout)
+        .expect("existing active transaction read remains compatible")
+        .is_none());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_active_transaction_marker_reports_corrupt_marker_without_breaking_legacy_read() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    fs::write(layout.transaction_active_path(), b"tx-one\ntx-two\n")
+        .expect("must write corrupt marker");
+
+    assert_eq!(
+        read_active_transaction_marker(&layout).expect("must read corrupt marker"),
+        ActiveTransactionMarker::Invalid
+    );
+    assert_eq!(
+        read_active_transaction(&layout)
+            .expect("legacy active transaction read remains compatible")
+            .as_deref(),
+        Some("tx-one\ntx-two")
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn clear_active_transaction_is_idempotent() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    set_active_transaction(&layout, "tx-clear-twice").expect("must write active transaction");
+    clear_active_transaction(&layout).expect("must clear active transaction");
+    clear_active_transaction(&layout).expect("second clear should tolerate missing marker");
+
     assert!(read_active_transaction(&layout)
         .expect("must read active transaction")
         .is_none());
@@ -1335,6 +2102,28 @@ fn set_active_transaction_rejects_when_marker_already_exists() {
             .as_deref(),
         Some("tx-first"),
         "first active marker should remain intact"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn set_active_transaction_cleans_marker_after_post_create_failure() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    fail_next_active_transaction_after_write_for_test();
+    let err = set_active_transaction(&layout, "tx-cleanup")
+        .expect_err("post-create failure should abort active claim");
+
+    assert!(
+        err.to_string()
+            .contains("test active transaction failure after write"),
+        "unexpected error: {err:#}"
+    );
+    assert!(
+        !layout.transaction_active_path().exists(),
+        "failed active claim should remove marker"
     );
 
     let _ = fs::remove_dir_all(layout.prefix());
@@ -1383,6 +2172,176 @@ fn append_transaction_journal_entries_in_order() {
     );
 
     let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn transaction_journal_append_preserves_line_shape() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    append_transaction_journal_entry(
+        &layout,
+        "tx-line-shape",
+        &TransactionJournalEntry {
+            seq: 7,
+            step: "write_metadata".to_string(),
+            state: "done".to_string(),
+            path: None,
+        },
+    )
+    .expect("must append journal entry");
+
+    let journal_raw = fs::read_to_string(layout.transaction_journal_path("tx-line-shape"))
+        .expect("must read journal");
+    assert_eq!(
+        journal_raw,
+        "{\"seq\":7,\"step\":\"write_metadata\",\"state\":\"done\"}\n"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_transaction_journal_entries_returns_empty_for_missing_journal() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    let entries = read_transaction_journal_entries(&layout, "tx-missing-journal")
+        .expect("missing journal should parse as empty");
+
+    assert!(entries.is_empty());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_transaction_journal_entries_parses_existing_line_shape() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(
+        layout.transaction_journal_path("tx-line-shape"),
+        "{\"seq\":7,\"step\":\"write_metadata\",\"state\":\"done\"}\n{\"seq\":8,\"step\":\"remove\",\"state\":\"done\",\"path\":\"pkgs/tool/1.0.0\"}\n",
+    )
+    .expect("must write journal fixture");
+
+    let entries =
+        read_transaction_journal_entries(&layout, "tx-line-shape").expect("journal should parse");
+
+    assert_eq!(
+        entries,
+        vec![
+            TransactionJournalEntry {
+                seq: 7,
+                step: "write_metadata".to_string(),
+                state: "done".to_string(),
+                path: None,
+            },
+            TransactionJournalEntry {
+                seq: 8,
+                step: "remove".to_string(),
+                state: "done".to_string(),
+                path: Some("pkgs/tool/1.0.0".to_string()),
+            },
+        ]
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn read_transaction_journal_entries_rejects_corrupt_non_empty_line() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.transaction_journal_path("tx-corrupt"), "not json\n")
+        .expect("must write corrupt journal");
+
+    let err = read_transaction_journal_entries(&layout, "tx-corrupt")
+        .expect_err("corrupt journal line should fail closed");
+    let err_text = format!("{err:#}");
+    assert!(
+        err_text.contains("failed parsing transaction journal line 1")
+            && err_text.contains("tx-corrupt.journal"),
+        "unexpected error: {err_text}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn durable_write_file_atomic_replaces_existing_content() {
+    let layout = test_layout();
+    let path = layout.transactions_dir().join("durable-replace.txt");
+
+    crate::durable::write_file_atomic(&path, b"old").expect("must write old content");
+    crate::durable::write_file_atomic(&path, b"new").expect("must replace content");
+
+    assert_eq!(fs::read_to_string(&path).expect("must read file"), "new");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn durable_append_line_appends_newline_delimited_records() {
+    let layout = test_layout();
+    let path = layout.transactions_dir().join("durable-append.log");
+
+    crate::durable::append_line(&path, "first").expect("must append first line");
+    crate::durable::append_line(&path, "second").expect("must append second line");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("must read appended file"),
+        "first\nsecond\n"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn durable_remove_file_if_exists_is_idempotent() {
+    let layout = test_layout();
+    let path = layout.transactions_dir().join("durable-remove.txt");
+
+    crate::durable::write_file_atomic(&path, b"remove me").expect("must write file");
+    crate::durable::remove_file_if_exists_durable(&path).expect("must remove file");
+    crate::durable::remove_file_if_exists_durable(&path).expect("missing file should be ok");
+
+    assert!(!path.exists());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn durable_sync_directory_tolerates_missing_directory() {
+    let layout = test_layout();
+    let path = layout.transactions_dir().join("missing");
+
+    crate::durable::sync_directory(&path).expect("missing directory sync should be best effort");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn durable_sync_directory_rejects_file_path() {
+    let layout = test_layout();
+    let path = layout.transactions_dir().join("not-a-directory");
+    fs::create_dir_all(layout.transactions_dir()).expect("must create transactions dir");
+    fs::write(&path, b"file").expect("must write file");
+
+    let err = crate::durable::sync_directory(&path).expect_err("file path should not sync as dir");
+
+    assert!(
+        err.to_string().contains("path is not a directory for sync"),
+        "unexpected error: {err:#}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn durable_sync_directory_tolerates_unsupported_directory_sync() {
+    crate::durable::sync_directory(Path::new("/proc"))
+        .expect("unsupported directory sync should be best effort");
 }
 
 #[test]

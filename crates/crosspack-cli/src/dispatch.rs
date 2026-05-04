@@ -229,22 +229,6 @@ fn run_cli(cli: Cli) -> Result<()> {
                     )?;
                     journal_seq += 1;
 
-                    append_transaction_journal_entry(
-                        &layout,
-                        &tx.txid,
-                        &TransactionJournalEntry {
-                            seq: journal_seq,
-                            step: package_apply_step_name(
-                                "install",
-                                &package.manifest.name,
-                                install_mode_for_archive_type(package.archive_type),
-                            ),
-                            state: "done".to_string(),
-                            path: Some(package.manifest.name.clone()),
-                        },
-                    )?;
-                    journal_seq += 1;
-
                     let dependencies = build_dependency_receipts(package, &resolved);
                     let mut source_build_journal = SourceBuildJournal {
                         txid: &tx.txid,
@@ -267,6 +251,21 @@ fn run_cli(cli: Cli) -> Result<()> {
                         },
                         Some(&mut source_build_journal),
                     )?;
+                    append_transaction_journal_entry(
+                        &layout,
+                        &tx.txid,
+                        &TransactionJournalEntry {
+                            seq: journal_seq,
+                            step: package_apply_step_name(
+                                "install",
+                                &package.manifest.name,
+                                install_mode_for_archive_type(package.archive_type),
+                            ),
+                            state: "done".to_string(),
+                            path: Some(package.manifest.name.clone()),
+                        },
+                    )?;
+                    journal_seq += 1;
                     print_install_outcome(&outcome, output_style);
                 }
 
@@ -544,6 +543,9 @@ fn run_cli(cli: Cli) -> Result<()> {
                     &doctor_transaction_health_line(&layout)?
                 )
             );
+            if let Some(detail_line) = doctor_transaction_detail_line(&layout)? {
+                println!("{}", render_status_line(output_style, "step", &detail_line));
+            }
             println!(
                 "{}",
                 render_status_line(output_style, "step", &doctor_installed_state_line(&layout))

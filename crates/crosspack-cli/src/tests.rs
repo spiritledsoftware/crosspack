@@ -334,6 +334,165 @@ mod tests {
     }
 
     #[test]
+    fn run_repair_command_recovers_failed_orphan_metadata_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-orphan-failed";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: TransactionStatus::Failed,
+            started_at_unix: 1_771_001_264,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+
+        let snapshot_root = layout.transaction_staging_path(txid).join("rollback").join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup step");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "install_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append mutating step");
+
+        run_repair_command(&layout).expect("repair should recover failed orphan metadata");
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_repair_command_recovers_orphan_planning_transaction_with_journal() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-orphan-planning";
+        write_transaction_metadata(
+            &layout,
+            &TransactionMetadata {
+                version: 1,
+                txid: txid.to_string(),
+                operation: "install".to_string(),
+                status: TransactionStatus::Planning,
+                started_at_unix: 1_771_001_265,
+                snapshot_id: None,
+            },
+        )
+        .expect("must write metadata");
+        let snapshot_root = layout.transaction_staging_path(txid).join("rollback").join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup-only journal step");
+
+        run_repair_command(&layout).expect("repair should recover orphan planning transaction");
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_repair_command_recovers_orphan_rolling_back_transaction() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-orphan-rolling-back";
+        write_transaction_metadata(
+            &layout,
+            &TransactionMetadata {
+                version: 1,
+                txid: txid.to_string(),
+                operation: "install".to_string(),
+                status: TransactionStatus::RollingBack,
+                started_at_unix: 1_771_001_266,
+                snapshot_id: None,
+            },
+        )
+        .expect("must write metadata");
+        let snapshot_root = layout.transaction_staging_path(txid).join("rollback").join("demo");
+        std::fs::create_dir_all(snapshot_root.join("package"))
+            .expect("must create snapshot package dir");
+        std::fs::create_dir_all(snapshot_root.join("receipt"))
+            .expect("must create snapshot receipt dir");
+        std::fs::write(
+            snapshot_root.join("manifest.txt"),
+            "package_exists=0\nreceipt_exists=0\n",
+        )
+        .expect("must write snapshot manifest");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "backup_package_state:demo".to_string(),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup-only journal step");
+
+        run_repair_command(&layout).expect("repair should recover orphan rolling_back transaction");
+
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should still exist");
+        assert_eq!(updated.status, "rolled_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn run_repair_command_recovers_active_applying_transaction() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -402,6 +561,24 @@ mod tests {
     }
 
     #[test]
+    fn format_repair_action_line_uses_deterministic_action_codes() {
+        assert_eq!(
+            format_repair_action_line(&TransactionRecoveryAction::Rollback {
+                txid: "tx-repair".to_string(),
+            }),
+            "repair action=rollback"
+        );
+        assert_eq!(
+            format_repair_action_line(&TransactionRecoveryAction::RepairRequired(
+                TransactionRepairReason::RollbackEvidenceMissing {
+                    txid: "tx-repair".to_string(),
+                },
+            )),
+            "repair action=rollback-evidence-missing"
+        );
+    }
+
+    #[test]
     fn run_rollback_command_fails_when_journal_replay_required() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -436,6 +613,74 @@ mod tests {
             .expect("must read metadata")
             .expect("metadata should still exist");
         assert_eq!(updated.status, "failed");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn rollback_restores_backup_only_crash_window_before_apply_done_journal() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let txid = "tx-backup-only";
+        let package_name = "demo";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "upgrade".to_string(),
+            status: TransactionStatus::Applying,
+            started_at_unix: 1_771_001_264,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let old_receipt = install_receipt(package_name, "1.0.0", InstallReason::Root, &[]);
+        std::fs::create_dir_all(layout.package_dir(package_name, "1.0.0"))
+            .expect("must create old package dir");
+        std::fs::write(
+            layout.package_dir(package_name, "1.0.0").join("old.txt"),
+            "old-state",
+        )
+        .expect("must write old marker");
+        write_install_receipt(&layout, &old_receipt).expect("must write old receipt");
+
+        let snapshot_root =
+            capture_package_state_snapshot(&layout, txid, package_name).expect("must capture backup");
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: format!("backup_package_state:{package_name}"),
+                state: "done".to_string(),
+                path: Some(snapshot_root.display().to_string()),
+            },
+        )
+        .expect("must append backup journal step");
+
+        std::fs::remove_dir_all(layout.pkgs_dir().join(package_name))
+            .expect("must remove old package tree");
+        std::fs::create_dir_all(layout.package_dir(package_name, "2.0.0"))
+            .expect("must create new package dir");
+        std::fs::write(
+            layout.package_dir(package_name, "2.0.0").join("new.txt"),
+            "new-state",
+        )
+        .expect("must write new marker");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("backup-only crash window must rollback");
+
+        assert!(layout
+            .package_dir(package_name, "1.0.0")
+            .join("old.txt")
+            .exists());
+        assert!(!layout.package_dir(package_name, "2.0.0").exists());
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata must exist");
+        assert_eq!(updated.status, "rolled_back");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -547,6 +792,228 @@ mod tests {
         assert!(
             snapshot_declared_services_sidecar_path(&snapshot_root).exists(),
             "declared services sidecar should be captured"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn capture_snapshot_includes_integration_sidecar_task_8_inventory_gap() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_name = "kubectx";
+        let package_version = "0.9.5";
+        let package_root = layout.package_dir(package_name, package_version);
+        std::fs::create_dir_all(&package_root).expect("must create package root");
+        std::fs::write(package_root.join("kubectl-ctx"), "#!/bin/sh\n")
+            .expect("must write package plugin");
+
+        let projection = IntegrationProjection {
+            kind: "path_plugin".to_string(),
+            key: "path_plugin:kubectl:ctx".to_string(),
+            rel_path: "path-plugins/kubectl/kubectl-ctx".to_string(),
+        };
+        std::fs::create_dir_all(
+            layout
+                .integrations_dir()
+                .join("path-plugins")
+                .join("kubectl"),
+        )
+        .expect("must create integration dir");
+        std::fs::write(layout.integrations_dir().join(&projection.rel_path), "old-plugin")
+            .expect("must write integration fixture");
+        write_integration_state(&layout, package_name, std::slice::from_ref(&projection))
+            .expect("must write integration sidecar");
+
+        let snapshot_root = capture_package_state_snapshot(&layout, "tx-integration", package_name)
+            .expect("must capture snapshot");
+
+        std::fs::remove_file(layout.integrations_dir().join(&projection.rel_path))
+            .expect("must remove live integration fixture");
+        write_integration_state(&layout, package_name, &[])
+            .expect("must clear live integration sidecar");
+        restore_package_state_snapshot(&layout, package_name, Some(&snapshot_root))
+            .expect("must restore integration sidecar snapshot");
+
+        assert_eq!(
+            read_integration_state(&layout, package_name).expect("must read restored integrations"),
+            vec![projection.clone()],
+            "Task 8 inventory gap: integration sidecar rollback payload coverage"
+        );
+        assert!(
+            layout.integrations_dir().join(&projection.rel_path).exists(),
+            "integration asset should be restored from rollback payload"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn identity_snapshot_restores_identity_scoped_payload_task_8_inventory_gap() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let identity = InstalledPackageIdentity {
+            profile: "default".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            source_namespace: "core".to_string(),
+            source_provenance: Some("git:https://example.test/core".to_string()),
+            package: "demo".to_string(),
+        };
+        let receipt = InstallReceipt {
+            name: identity.package.clone(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: identity.target.clone(),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let package_root = layout.identity_package_dir(&identity, &receipt.version);
+        std::fs::create_dir_all(&package_root).expect("must create identity package root");
+        std::fs::write(package_root.join("demo"), "identity-package")
+            .expect("must write identity package payload");
+        write_identity_install_receipt(&layout, &identity, &receipt)
+            .expect("must write identity receipt");
+        write_identity_gui_exposure_state(
+            &layout,
+            &identity,
+            &[GuiExposureAsset {
+                key: "app:demo".to_string(),
+                rel_path: "launchers/demo.desktop".to_string(),
+            }],
+        )
+        .expect("must write identity gui sidecar");
+        write_identity_gui_native_state(
+            &layout,
+            &identity,
+            &[GuiNativeRegistrationRecord {
+                key: "app:demo".to_string(),
+                kind: "desktop-entry".to_string(),
+                path: "/tmp/demo.desktop".to_string(),
+            }],
+        )
+        .expect("must write identity native sidecar");
+        write_identity_declared_services_state(
+            &layout,
+            &identity,
+            &[ServiceDeclaration {
+                name: "demo".to_string(),
+                native_id: Some("demo.service".to_string()),
+            }],
+        )
+        .expect("must write identity service sidecar");
+        write_identity_integration_state(
+            &layout,
+            &identity,
+            &[IntegrationProjection {
+                kind: "path_plugin".to_string(),
+                key: "demo".to_string(),
+                rel_path: "path/demo/demo".to_string(),
+            }],
+        )
+        .expect("must write identity integration sidecar");
+        write_installed_package_state(
+            &layout,
+            &InstalledPackageState {
+                identity: identity.clone(),
+                version: receipt.version.clone(),
+                receipt: receipt.clone(),
+                gui_assets: Vec::new(),
+                native_gui_records: Vec::new(),
+                services: Vec::new(),
+                integrations: Vec::new(),
+            },
+        )
+        .expect("must write identity installed state");
+
+        let snapshot_root = capture_package_state_snapshot(&layout, "tx-identity", &identity.package)
+            .expect("must capture identity snapshot");
+
+        std::fs::remove_dir_all(layout.identity_pkgs_dir()).expect("must remove live identity pkgs");
+        std::fs::remove_file(layout.identity_receipt_path(&identity))
+            .expect("must remove live identity receipt");
+        std::fs::remove_file(layout.installed_identity_state_document_path(&identity))
+            .expect("must remove live identity state document");
+        std::fs::remove_file(layout.identity_gui_state_path(&identity))
+            .expect("must remove live identity gui sidecar");
+        std::fs::remove_file(layout.identity_gui_native_state_path(&identity))
+            .expect("must remove live identity native sidecar");
+        std::fs::remove_file(layout.identity_declared_services_state_path(&identity))
+            .expect("must remove live identity service sidecar");
+        std::fs::remove_file(layout.identity_integration_state_path(&identity))
+            .expect("must remove live identity integration sidecar");
+
+        restore_package_state_snapshot(&layout, &identity.package, Some(&snapshot_root))
+            .expect("must restore identity snapshot");
+
+        assert!(layout.identity_package_dir(&identity, &receipt.version).join("demo").exists());
+        assert!(layout.identity_receipt_path(&identity).exists());
+        assert!(layout.installed_identity_state_document_path(&identity).exists());
+        assert!(layout.identity_gui_state_path(&identity).exists());
+        assert!(layout.identity_gui_native_state_path(&identity).exists());
+        assert!(layout.identity_declared_services_state_path(&identity).exists());
+        assert!(layout.identity_integration_state_path(&identity).exists());
+
+        let restored_states = read_all_installed_package_states(&layout)
+            .expect("must read restored identity state");
+        assert_eq!(restored_states.len(), 1);
+        assert_eq!(restored_states[0].identity, identity);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn uninstall_journals_rollback_payload_before_forward_mutation_task_8_inventory_gap() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let receipt = install_receipt("demo", "1.0.0", InstallReason::Root, &[]);
+        let identity = InstalledPackageIdentity::from_legacy_receipt(&receipt);
+        std::fs::create_dir_all(layout.package_dir("demo", "1.0.0"))
+            .expect("must create package dir");
+        write_install_receipt(&layout, &receipt).expect("must write receipt");
+        write_installed_package_state(
+            &layout,
+            &InstalledPackageState {
+                identity,
+                version: receipt.version.clone(),
+                receipt: receipt.clone(),
+                gui_assets: Vec::new(),
+                native_gui_records: Vec::new(),
+                services: Vec::new(),
+                integrations: Vec::new(),
+            },
+        )
+        .expect("must write installed state");
+
+        run_uninstall_command(&layout, "demo".to_string()).expect("must uninstall demo");
+        let txid = single_transaction_txid(&layout);
+        let entries = read_transaction_journal_records(&layout, &txid)
+            .expect("must read transaction journal");
+        let steps = entries
+            .iter()
+            .map(|entry| entry.step.as_str())
+            .collect::<Vec<_>>();
+
+        let backup_index = steps
+            .iter()
+            .position(|step| *step == "backup_package_state:demo")
+            .expect("backup journal entry should exist");
+        let uninstall_index = steps
+            .iter()
+            .position(|step| *step == "uninstall_target:demo")
+            .expect("uninstall journal entry should exist");
+        assert!(
+            backup_index < uninstall_index,
+            "Task 8 inventory gap: rollback payload journal entry must precede uninstall mutation journal entry; steps={steps:?}"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -1608,6 +2075,50 @@ mod tests {
     }
 
     #[test]
+    fn run_rollback_command_rejects_empty_active_marker() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        std::fs::write(layout.transaction_active_path(), "\n")
+            .expect("must write empty active marker fixture");
+
+        let err = run_rollback_command(&layout, None)
+            .expect_err("rollback must fail closed on empty active marker");
+        assert!(
+            err.to_string().contains("reason=active_marker_invalid"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_rollback_command_rejects_corrupt_active_marker_for_explicit_txid() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let txid = "tx-explicit-corrupt-active";
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: txid.to_string(),
+            operation: "install".to_string(),
+            status: TransactionStatus::Failed,
+            started_at_unix: 1_771_001_250,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        std::fs::write(layout.transaction_active_path(), "../escape\n")
+            .expect("must write corrupt active marker fixture");
+
+        let err = run_rollback_command(&layout, Some(txid.to_string()))
+            .expect_err("explicit rollback must fail closed on corrupt active marker");
+        assert!(
+            err.to_string().contains("reason=active_marker_invalid"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn run_rollback_command_rejects_active_applying_transaction() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -2008,6 +2519,46 @@ mod tests {
                 .expect("must read active transaction")
                 .is_none(),
             "committed active marker should be cleared"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn ensure_no_active_transaction_fails_closed_on_metadata_txid_mismatch() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-other".to_string(),
+            operation: "install".to_string(),
+            status: TransactionStatus::Committed,
+            started_at_unix: 1_771_001_361,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        std::fs::rename(
+            layout.transaction_metadata_path("tx-other"),
+            layout.transaction_metadata_path("tx-marker"),
+        )
+        .expect("must move mismatched metadata into marker path");
+        set_active_transaction(&layout, "tx-marker").expect("must write active marker");
+
+        let err = ensure_no_active_transaction(&layout)
+            .expect_err("metadata txid mismatch must require repair");
+        assert!(
+            err.to_string().contains(
+                "transaction state requires repair tx-marker (reason=metadata_txid_mismatch expected=tx-marker actual=tx-other)"
+            ),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-marker"),
+            "mismatched committed metadata must not clear active marker"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -2513,6 +3064,112 @@ mod tests {
         let line = doctor_transaction_health_line(&layout)
             .expect("doctor line should resolve for committed marker");
         assert_eq!(line, "transaction: clean");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_detail_line_reports_active_metadata_and_latest_step() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-detail".to_string(),
+            operation: "install".to_string(),
+            status: TransactionStatus::Applying,
+            started_at_unix: 1_771_001_662,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        set_active_transaction(&layout, "tx-detail").expect("must write active marker");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-detail",
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "resolve_plan:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append first journal entry");
+        append_transaction_journal_entry(
+            &layout,
+            "tx-detail",
+            &TransactionJournalEntry {
+                seq: 2,
+                step: "install_package:demo".to_string(),
+                state: "done".to_string(),
+                path: Some("demo".to_string()),
+            },
+        )
+        .expect("must append latest journal entry");
+
+        let line = doctor_transaction_detail_line(&layout)
+            .expect("detail line should render")
+            .expect("active trusted metadata should produce detail line");
+        assert_eq!(
+            line,
+            "transaction_detail txid=tx-detail status=applying operation=install step=install_package:demo"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_detail_line_is_best_effort_for_broken_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        set_active_transaction(&layout, "tx-broken-detail").expect("must write active marker");
+        std::fs::write(
+            layout.transaction_metadata_path("tx-broken-detail"),
+            "not metadata",
+        )
+        .expect("must write corrupt metadata");
+
+        assert_eq!(
+            doctor_transaction_detail_line(&layout).expect("broken detail should not fail doctor"),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn doctor_transaction_health_line_fails_closed_on_metadata_txid_mismatch() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let metadata = TransactionMetadata {
+            version: 1,
+            txid: "tx-other".to_string(),
+            operation: "install".to_string(),
+            status: TransactionStatus::Committed,
+            started_at_unix: 1_771_001_661,
+            snapshot_id: None,
+        };
+        write_transaction_metadata(&layout, &metadata).expect("must write metadata");
+        std::fs::rename(
+            layout.transaction_metadata_path("tx-other"),
+            layout.transaction_metadata_path("tx-marker"),
+        )
+        .expect("must move mismatched metadata into marker path");
+        set_active_transaction(&layout, "tx-marker").expect("must write active marker");
+
+        let line = doctor_transaction_health_line(&layout)
+            .expect("doctor line should report mismatched metadata");
+        assert_eq!(
+            line,
+            "transaction: failed tx-marker (reason=metadata_txid_mismatch expected=tx-marker actual=tx-other)"
+        );
+        assert_eq!(
+            read_active_transaction(&layout)
+                .expect("must read active transaction")
+                .as_deref(),
+            Some("tx-marker"),
+            "mismatched committed metadata must not clear active marker"
+        );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -9342,6 +9999,77 @@ install_commands = ["sh", "-c", "true"]
 
     #[cfg(unix)]
     #[test]
+    fn upgrade_all_roots_journals_source_install_before_apply_done_task_8_inventory_gap() {
+        let home_root = build_test_layout_path(current_unix_nanos());
+        std::fs::create_dir_all(&home_root).expect("must create test HOME root");
+
+        with_test_home_layout(&home_root, |layout| {
+            layout.ensure_base_dirs().expect("must create base dirs");
+            configure_ready_source(layout, "official");
+            let target = host_target_triple().to_string();
+
+            for package_name in ["demo", "tool"] {
+                let mut receipt = install_receipt(package_name, "1.0.0", InstallReason::Root, &[]);
+                receipt.target = Some(target.clone());
+                std::fs::create_dir_all(layout.package_dir(package_name, "1.0.0"))
+                    .expect("must create old package dir");
+                write_install_receipt(layout, &receipt).expect("must write old receipt");
+
+                let source_archive_sha256 =
+                    seed_source_build_tar_gz_cache(layout, package_name, "2.0.0", &target);
+                write_signed_source_build_manifest(
+                    layout,
+                    "official",
+                    package_name,
+                    "2.0.0",
+                    &target,
+                    &source_archive_sha256,
+                );
+            }
+
+            run_upgrade_command(
+                layout,
+                None,
+                None,
+                UpgradeCommandOptions {
+                    dry_run: false,
+                    explain: false,
+                    build_from_source: true,
+                    provider_overrides: &BTreeMap::new(),
+                    interaction_policy: InstallInteractionPolicy::default(),
+                },
+            )
+            .expect("upgrade all roots should succeed");
+
+            let txid = single_transaction_txid(layout);
+            let records =
+                read_transaction_journal_records(layout, &txid).expect("must read journal records");
+            let steps = records
+                .iter()
+                .map(|entry| entry.step.as_str())
+                .collect::<Vec<_>>();
+
+            for package_name in ["demo", "tool"] {
+                let source_install_index = steps
+                    .iter()
+                    .position(|step| *step == format!("source_install:{package_name}"))
+                    .expect("source install step must be journaled");
+                let apply_done_index = steps
+                    .iter()
+                    .position(|step| *step == format!("upgrade_package:{package_name}"))
+                    .expect("upgrade apply done step must be journaled");
+                assert!(
+                    source_install_index < apply_done_index,
+                    "Task 8 inventory gap: forward source mutation must be journaled before upgrade apply done; steps={steps:?}"
+                );
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(home_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bundle_apply_build_from_source_executes_install_and_records_source_steps() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -9401,23 +10129,31 @@ name = "bundle-demo"
 
         let records = read_transaction_journal_records(&layout, &txid)
             .expect("must read bundle apply journal records");
+        let steps = records
+            .iter()
+            .map(|entry| entry.step.as_str())
+            .collect::<Vec<_>>();
+        let source_fetch_index = steps
+            .iter()
+            .position(|step| *step == "source_fetch:bundle-demo")
+            .expect("bundle apply source-build flow must record source_fetch step");
+        let build_system_index = steps
+            .iter()
+            .position(|step| *step == "source_build_system:bundle-demo:shell")
+            .expect("bundle apply source-build flow must record build-system step");
+        let source_install_index = steps
+            .iter()
+            .position(|step| *step == "source_install:bundle-demo")
+            .expect("bundle apply source-build flow must record source_install step");
+        let apply_done_index = steps
+            .iter()
+            .position(|step| *step == "install_package:bundle-demo")
+            .expect("bundle apply flow must record install apply done step");
         assert!(
-            records
-                .iter()
-                .any(|entry| entry.step == "source_fetch:bundle-demo"),
-            "bundle apply source-build flow must record source_fetch step"
-        );
-        assert!(
-            records
-                .iter()
-                .any(|entry| entry.step == "source_build_system:bundle-demo:shell"),
-            "bundle apply source-build flow must record build-system step"
-        );
-        assert!(
-            records
-                .iter()
-                .any(|entry| entry.step == "source_install:bundle-demo"),
-            "bundle apply source-build flow must record source_install step"
+            source_fetch_index < build_system_index
+                && build_system_index < source_install_index
+                && source_install_index < apply_done_index,
+            "Task 8 inventory gap: bundle apply source-build mutation must be journaled before apply done; steps={steps:?}"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -9916,7 +10652,6 @@ sha256 = "abc"
         run(&layout)
     }
 
-    #[cfg(unix)]
     fn single_transaction_txid(layout: &PrefixLayout) -> String {
         let mut txids = std::fs::read_dir(layout.transactions_dir())
             .expect("must read transactions dir")
