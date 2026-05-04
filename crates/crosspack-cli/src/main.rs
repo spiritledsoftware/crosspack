@@ -169,11 +169,34 @@ fn build_artifact_install_options<'a>(
 }
 
 fn resolve_output_style(stdout_is_tty: bool, stderr_is_tty: bool) -> OutputStyle {
+    if internal_ui_snapshot_enabled() {
+        return OutputStyle::Rich;
+    }
+
     if stdout_is_tty && stderr_is_tty {
         OutputStyle::Rich
     } else {
         OutputStyle::Plain
     }
+}
+
+fn internal_ui_snapshot_enabled() -> bool {
+    std::env::var("CROSSPACK_INTERNAL_UI_SNAPSHOT").is_ok_and(|value| value == "1")
+}
+
+fn internal_no_color_enabled() -> bool {
+    std::env::var("CROSSPACK_INTERNAL_NO_COLOR").is_ok_and(|value| value == "1")
+}
+
+fn internal_terminal_width() -> Option<usize> {
+    if !internal_ui_snapshot_enabled() {
+        return None;
+    }
+
+    std::env::var("CROSSPACK_INTERNAL_TERM_WIDTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|width| *width > 0)
 }
 
 fn resolve_progress_enabled(style: OutputStyle, stderr_is_tty: bool) -> bool {
@@ -196,14 +219,14 @@ fn render_status_line(style: OutputStyle, status: &str, message: &str) -> String
     match style {
         OutputStyle::Plain => message.to_string(),
         OutputStyle::Rich => {
-            let badge = match status {
-                "ok" => "[OK]",
-                "warn" => "[WARN]",
-                "error" => "[ERR]",
-                "step" => "[..]",
-                _ => "[*]",
+            let marker = match status {
+                "ok" => "✓",
+                "warn" => "!",
+                "error" => "×",
+                "step" => "•",
+                _ => "•",
             };
-            format!("{badge} {message}")
+            format!("{marker} {message}")
         }
     }
 }

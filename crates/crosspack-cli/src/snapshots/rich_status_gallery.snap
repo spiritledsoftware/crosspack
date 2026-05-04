@@ -1,0 +1,9 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9593
+expression: output
+---
+✓ installed ripgrep 14.1.0
+! completion sync skipped
+× source sync failed
+• cache: downloaded

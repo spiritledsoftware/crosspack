@@ -56,9 +56,7 @@ impl TerminalRenderer {
     fn start_progress(self, label: &str, total: u64) -> TerminalProgress {
         let progress_bar = if self.style == OutputStyle::Rich {
             let progress_bar = ProgressBar::new(total.max(1));
-            if let Ok(style) = ProgressStyle::with_template(
-                "{spinner:.cyan.bold} {msg:<12} [{bar:20.cyan/blue}] {pos:>3}/{len:3} {elapsed_precise}",
-            ) {
+            if let Ok(style) = ProgressStyle::with_template(progress_template()) {
                 progress_bar.set_style(
                     style
                         .tick_chars(progress_tick_chars(label))
@@ -66,6 +64,7 @@ impl TerminalRenderer {
                 );
             }
             progress_bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(12));
+            progress_bar.set_prefix(label.to_string());
             progress_bar.set_message(label.to_string());
             Some(progress_bar)
         } else {
@@ -185,6 +184,19 @@ fn progress_tick_chars(label: &str) -> &'static str {
     }
 }
 
+fn progress_template() -> &'static str {
+    if internal_no_color_enabled() {
+        "{spinner} {prefix:<11} {wide_msg} [{bar:16}] {pos:>2}/{len:2} {elapsed_precise}"
+    } else {
+        "{spinner:.cyan.bold} {prefix:<11} {wide_msg} [{bar:16.cyan/blue}] {pos:>2}/{len:2} {elapsed_precise}"
+    }
+}
+
+#[cfg(test)]
+fn progress_template_for_tests() -> &'static str {
+    progress_template()
+}
+
 fn render_install_phase_message(
     package: &str,
     phase: &str,
@@ -226,6 +238,10 @@ fn progress_bar_style() -> Style {
 }
 
 fn colorize(style: Style, text: &str) -> String {
+    if internal_no_color_enabled() {
+        return text.to_string();
+    }
+
     format!("{}{}{}", style.render(), text, style.render_reset())
 }
 
@@ -239,7 +255,7 @@ fn ui_mode_from_style(style: OutputStyle) -> UiMode {
 fn render_section_header(mode: UiMode, title: &str) -> Option<String> {
     match mode {
         UiMode::Plain => None,
-        UiMode::Interactive => Some(format!("== {title} ==")),
+        UiMode::Interactive => Some(title.to_string()),
     }
 }
 
@@ -260,7 +276,8 @@ fn render_compact_table(style: OutputStyle, rows: &[Vec<String>]) -> Vec<String>
         }
     }
 
-    rows.iter()
+    let lines = rows
+        .iter()
         .map(|row| {
             let mut line = String::new();
             for (index, &width) in widths.iter().enumerate() {
@@ -277,13 +294,41 @@ fn render_compact_table(style: OutputStyle, rows: &[Vec<String>]) -> Vec<String>
             }
             line
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    render_compact_table_with_width(lines, internal_terminal_width())
+}
+
+fn render_compact_table_with_width(lines: Vec<String>, width: Option<usize>) -> Vec<String> {
+    match width {
+        Some(width) => lines
+            .into_iter()
+            .map(|line| truncate_to_display_width(&line, width))
+            .collect(),
+        None => lines,
+    }
+}
+
+fn truncate_to_display_width(value: &str, max_width: usize) -> String {
+    let mut rendered = String::new();
+    let mut used_width = 0_usize;
+    for ch in value.chars() {
+        let mut buffer = [0_u8; 4];
+        let text = ch.encode_utf8(&mut buffer);
+        let char_width = console::measure_text_width(text);
+        if used_width + char_width > max_width {
+            break;
+        }
+        rendered.push(ch);
+        used_width += char_width;
+    }
+    rendered
 }
 
 fn render_key_value_detail(style: OutputStyle, key: &str, value: &str) -> String {
     match style {
         OutputStyle::Plain => format!("{key}: {value}"),
-        OutputStyle::Rich => format!("     {key:<9} {value}"),
+        OutputStyle::Rich => format!("  {key:<10} {value}"),
     }
 }
 
@@ -336,22 +381,6 @@ fn render_progress_line(
     ))
 }
 
-fn install_detail_status_label(status: &str) -> &'static str {
-    match status {
-        "ok" => "OK",
-        "warn" => "WARN",
-        "error" => "ERR",
-        "step" => "STEP",
-        _ => "INFO",
-    }
-}
-
-fn render_rich_install_detail_row(status: &str, key: &str, value: &str) -> String {
-    let key_label = format!("{key}:");
-    format!(
-        "{:<4} | {:<18} | {}",
-        install_detail_status_label(status),
-        key_label,
-        value
-    )
+fn render_rich_install_detail_row(_status: &str, key: &str, value: &str) -> String {
+    format!("{key:<18} {value}")
 }

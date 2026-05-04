@@ -1,0 +1,7 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9748
+expression: output
+---
+! edge kind=filesystem priority=10 location=/opt/crosspack/edge-registry snapshot=error:snapshot-unreadable
+✓ core kind=git priority=100 location=https://github.com/spiritledsoftware/crosspack-registry.git snapshot=ready:git:0123456789abcdef

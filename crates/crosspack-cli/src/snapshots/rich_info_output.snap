@@ -1,0 +1,14 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9748
+expression: output
+---
+✓ compiler
+  version    2.1.0
+  summary    Portable toolchain
+  homepage   https://example.test/compiler
+  license    MIT OR Apache-2.0
+  provides   c-compiler, cc
+  conflicts  legacy-cc(*)
+  replaces   old-cc(<2.0.0)
+  policy     provides=2 conflicts=1 replaces=1

@@ -26,6 +26,40 @@ fn doctor_stdout_has_no_terminal_control_sequences_when_captured() {
     assert_no_terminal_control_sequences("stderr", &stderr);
 }
 
+#[test]
+fn doctor_stdout_snapshot_when_captured() {
+    let home = std::env::temp_dir().join(format!(
+        "crosspack-cli-doctor-snapshot-home-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&home);
+    let output = Command::cargo_bin("crosspack")
+        .expect("crosspack binary should build")
+        .arg("doctor")
+        .env("HOME", &home)
+        .env("LOCALAPPDATA", &home)
+        .env_remove("CROSSPACK_INTERNAL_UI_SNAPSHOT")
+        .env_remove("CROSSPACK_INTERNAL_TERM_WIDTH")
+        .env_remove("CROSSPACK_INTERNAL_NO_COLOR")
+        .output()
+        .expect("doctor should run");
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(output.status.success(), "doctor should succeed");
+    assert!(
+        output.stderr.is_empty(),
+        "doctor stderr should be empty: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    insta::with_settings!({ prepend_module_to_snapshot => false }, {
+        let stdout = String::from_utf8_lossy(&output.stdout).replace(&home.display().to_string(), "[HOME]");
+        insta::assert_snapshot!(
+            "captured_doctor_stdout",
+            stdout
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_pty_output_has_no_clear_line_or_legacy_progress_tokens() {

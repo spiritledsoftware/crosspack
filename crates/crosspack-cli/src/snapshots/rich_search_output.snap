@@ -1,0 +1,9 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9748
+expression: output
+---
+✓ 2 packages matched 'rip'
+name      description                     latest  source
+ripgrep   Fast line-oriented search tool  14.1.0  core
+roundrip  -                               0.9.0   community

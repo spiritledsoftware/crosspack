@@ -6597,10 +6597,10 @@ description = "   \n\t"
 
         let lines = format_info_lines_for_style(OutputStyle::Rich, "ripgrep", &[manifest]);
 
-        assert!(lines.contains(&"[OK] ripgrep".to_string()));
-        assert!(lines.contains(&"     version   14.1.0".to_string()));
-        assert!(lines.contains(&"     summary   line search".to_string()));
-        assert!(lines.contains(&"     license   MIT".to_string()));
+        assert!(lines.contains(&"✓ ripgrep".to_string()));
+        assert!(lines.contains(&"  version    14.1.0".to_string()));
+        assert!(lines.contains(&"  summary    line search".to_string()));
+        assert!(lines.contains(&"  license    MIT".to_string()));
     }
 
     #[test]
@@ -6623,10 +6623,10 @@ old-cc = "<2.0.0"
 
         let lines = format_info_lines_for_style(OutputStyle::Rich, "compiler", &[manifest]);
 
-        assert!(lines.contains(&"     provides  c-compiler, cc".to_string()));
-        assert!(lines.contains(&"     conflicts legacy-cc(*)".to_string()));
-        assert!(lines.contains(&"     replaces  old-cc(<2.0.0)".to_string()));
-        assert!(lines.contains(&"     policy    provides=2 conflicts=1 replaces=1".to_string()));
+        assert!(lines.contains(&"  provides   c-compiler, cc".to_string()));
+        assert!(lines.contains(&"  conflicts  legacy-cc(*)".to_string()));
+        assert!(lines.contains(&"  replaces   old-cc(<2.0.0)".to_string()));
+        assert!(lines.contains(&"  policy     provides=2 conflicts=1 replaces=1".to_string()));
     }
 
     #[test]
@@ -6849,7 +6849,7 @@ old-cc = "<2.0.0"
         assert_eq!(plain, format_registry_list_lines(sources.clone()));
 
         let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
-        assert!(rich.iter().any(|line| line.starts_with("[OK]")));
+        assert!(rich.iter().any(|line| line.starts_with("✓")));
         assert!(rich.iter().any(|line| line.contains("snapshot")));
     }
 
@@ -6871,7 +6871,7 @@ old-cc = "<2.0.0"
         let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
         assert_eq!(
             rich,
-            vec!["[WARN] mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=none".to_string()]
+            vec!["! mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=none".to_string()]
         );
     }
 
@@ -6896,7 +6896,7 @@ old-cc = "<2.0.0"
         let rich = format_registry_list_status_lines(OutputStyle::Rich, sources);
         assert_eq!(
             rich,
-            vec!["[WARN] mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=error:snapshot-unreadable".to_string()]
+            vec!["! mirror kind=git priority=100 location=https://example.test/registry?snapshot=ready:misleading snapshot=error:snapshot-unreadable".to_string()]
         );
     }
 
@@ -6905,23 +6905,21 @@ old-cc = "<2.0.0"
         assert_eq!(
             format_installed_list_lines_for_style(OutputStyle::Rich, &[]),
             vec![
-                "[WARN] No installed packages".to_string(),
-                "[..] Run `crosspack install <name>` to install a package.".to_string(),
+                "! No installed packages".to_string(),
+                "• Run `crosspack install <name>` to install a package.".to_string(),
             ]
         );
     }
 
     #[test]
-    fn render_list_command_outcome_preserves_receipt_order_and_plain_output() {
+    fn format_installed_list_lines_plain_preserves_receipt_order_and_plain_output() {
         let receipts = vec![
             install_receipt("zeta", "2.0.0", InstallReason::Root, &[]),
             install_receipt("alpha", "1.0.0", InstallReason::Root, &[]),
         ];
 
-        let outcome = build_list_command_outcome(receipts);
-
         assert_eq!(
-            render_list_command_outcome(outcome),
+            format_installed_list_lines_for_style(OutputStyle::Plain, &receipts),
             vec!["zeta 2.0.0".to_string(), "alpha 1.0.0".to_string()]
         );
     }
@@ -7395,7 +7393,7 @@ sha256 = "abc"
         assert_eq!(
             format_search_results_for_style(OutputStyle::Rich, &results, "rip"),
             vec![
-                "[OK] 1 package matched 'rip'".to_string(),
+                "✓ 1 package matched 'rip'".to_string(),
                 "name     description  latest  source".to_string(),
                 "ripgrep  line search  14.1.0  core".to_string(),
             ]
@@ -7549,6 +7547,47 @@ sha256 = "abc"
     }
 
     #[test]
+    fn internal_ui_snapshot_forces_rich_output_without_changing_plain_rendering() {
+        let _env_lock = ui_env_lock().lock().expect("ui env lock must be available");
+        let _snapshot_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_UI_SNAPSHOT", "1");
+
+        assert_eq!(resolve_output_style(false, false), OutputStyle::Rich);
+        assert_eq!(
+            render_status_line(OutputStyle::Plain, "ok", "installed ripgrep"),
+            "installed ripgrep"
+        );
+    }
+
+    #[test]
+    fn internal_terminal_width_reads_positive_width_only() {
+        let _env_lock = ui_env_lock().lock().expect("ui env lock must be available");
+        let _snapshot_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_UI_SNAPSHOT", "1");
+        let width_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_TERM_WIDTH", "88");
+
+        assert_eq!(internal_terminal_width(), Some(88));
+
+        drop(width_guard);
+        let _invalid_width_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_TERM_WIDTH", "0");
+        assert_eq!(internal_terminal_width(), None);
+    }
+
+    #[test]
+    fn internal_terminal_width_is_ignored_outside_snapshot_mode() {
+        let _env_lock = ui_env_lock().lock().expect("ui env lock must be available");
+        let _width_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_TERM_WIDTH", "88");
+
+        assert_eq!(internal_terminal_width(), None);
+    }
+
+    #[test]
+    fn internal_no_color_strips_rich_style_escape_sequences() {
+        let _env_lock = ui_env_lock().lock().expect("ui env lock must be available");
+        let _color_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_NO_COLOR", "1");
+
+        assert_eq!(colorize(section_style(), "Installed ripgrep"), "Installed ripgrep");
+    }
+
+    #[test]
     fn render_install_phase_message_includes_package_phase_and_step() {
         assert_eq!(
             render_install_phase_message("ripgrep", "download", 2, 7, Some((50, Some(200)))),
@@ -7594,6 +7633,19 @@ sha256 = "abc"
         let progress = renderer.start_progress("install", 7);
 
         assert!(progress.has_progress_bar_for_tests());
+    }
+
+    #[test]
+    fn internal_no_color_uses_unstyled_progress_template() {
+        let _env_lock = ui_env_lock().lock().expect("ui env lock must be available");
+        let _color_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_NO_COLOR", "1");
+
+        let template = progress_template_for_tests();
+
+        assert_eq!(
+            template,
+            "{spinner} {prefix:<11} {wide_msg} [{bar:16}] {pos:>2}/{len:2} {elapsed_precise}"
+        );
     }
 
     #[test]
@@ -7829,10 +7881,10 @@ sha256 = "abc"
     }
 
     #[test]
-    fn render_status_line_rich_includes_ascii_badge() {
+    fn render_status_line_rich_includes_modern_marker() {
         assert_eq!(
             render_status_line(OutputStyle::Rich, "ok", "installed ripgrep 14.1.0"),
-            "[OK] installed ripgrep 14.1.0"
+            "✓ installed ripgrep 14.1.0"
         );
     }
 
@@ -7840,7 +7892,7 @@ sha256 = "abc"
     fn render_status_line_rich_formats_warning() {
         assert_eq!(
             render_status_line(OutputStyle::Rich, "warn", "completion sync skipped"),
-            "[WARN] completion sync skipped"
+            "! completion sync skipped"
         );
     }
 
@@ -7872,6 +7924,8 @@ sha256 = "abc"
 
     #[test]
     fn render_compact_table_rich_uses_display_width_for_unicode() {
+        use pretty_assertions::assert_eq;
+
         let rows = vec![
             vec!["name".to_string(), "version".to_string()],
             vec!["工具".to_string(), "1.0.0".to_string()],
@@ -7889,10 +7943,55 @@ sha256 = "abc"
     }
 
     #[test]
+    fn internal_terminal_width_caps_rich_compact_table_lines() {
+        let rows = vec![
+            vec![
+                "name".to_string(),
+                "version".to_string(),
+                "status".to_string(),
+            ],
+            vec![
+                "ripgrep".to_string(),
+                "14.1.0".to_string(),
+                "installed".to_string(),
+            ],
+        ];
+
+        assert_eq!(
+            render_compact_table_with_width(render_compact_table(OutputStyle::Rich, &rows), Some(12)),
+            vec!["name     ver".to_string(), "ripgrep  14.".to_string()]
+        );
+    }
+
+    #[test]
+    fn compact_table_width_cap_is_testable_without_global_env() {
+        assert_eq!(
+            render_compact_table_with_width(
+                vec!["name     version".to_string(), "ripgrep  14.1.0".to_string()],
+                Some(12),
+            ),
+            vec!["name     ver".to_string(), "ripgrep  14.".to_string()]
+        );
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_status_gallery() {
+        let output = [
+            render_status_line(OutputStyle::Rich, "ok", "installed ripgrep 14.1.0"),
+            render_status_line(OutputStyle::Rich, "warn", "completion sync skipped"),
+            render_status_line(OutputStyle::Rich, "error", "source sync failed"),
+            render_status_line(OutputStyle::Rich, "step", "cache: downloaded"),
+        ]
+        .join("\n");
+
+        assert_terminal_snapshot("rich_status_gallery", output);
+    }
+
+    #[test]
     fn render_key_value_detail_rich_aligns_key() {
         assert_eq!(
             render_key_value_detail(OutputStyle::Rich, "snapshot", "abc123"),
-            "     snapshot  abc123"
+            "  snapshot   abc123"
         );
     }
 
@@ -7925,8 +8024,8 @@ sha256 = "abc"
                 Some("Run `crosspack install <name>` to add one."),
             ),
             vec![
-                "[WARN] No installed packages".to_string(),
-                "[..] Run `crosspack install <name>` to add one.".to_string(),
+                "! No installed packages".to_string(),
+                "• Run `crosspack install <name>` to add one.".to_string(),
             ]
         );
     }
@@ -7935,8 +8034,136 @@ sha256 = "abc"
     fn render_empty_state_rich_omits_missing_hint() {
         assert_eq!(
             render_empty_state(OutputStyle::Rich, "No installed packages", None),
-            vec!["[WARN] No installed packages".to_string()]
+            vec!["! No installed packages".to_string()]
         );
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_empty_state() {
+        let output = render_empty_state(
+            OutputStyle::Rich,
+            "No installed packages",
+            Some("Run `crosspack install <name>` to add one."),
+        )
+        .join("\n");
+
+        assert_terminal_snapshot("rich_empty_state", output);
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_compact_table() {
+        let rows = vec![
+            vec!["name".to_string(), "version".to_string(), "status".to_string()],
+            vec!["ripgrep".to_string(), "14.1.0".to_string(), "installed".to_string()],
+            vec!["工具".to_string(), "1.0.0".to_string(), "available".to_string()],
+        ];
+        let output = render_compact_table(OutputStyle::Rich, &rows).join("\n");
+
+        assert_terminal_snapshot("rich_compact_table", output);
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_search_output() {
+        let results = vec![
+            SearchResult {
+                name: "ripgrep".to_string(),
+                description: Some("Fast line-oriented search tool".to_string()),
+                latest_version: "14.1.0".to_string(),
+                source: "core".to_string(),
+                match_kind: SearchMatchKind::Exact,
+            },
+            SearchResult {
+                name: "roundrip".to_string(),
+                description: None,
+                latest_version: "0.9.0".to_string(),
+                source: "community".to_string(),
+                match_kind: SearchMatchKind::Prefix,
+            },
+        ];
+        let output = format_search_results_for_style(OutputStyle::Rich, &results, "rip").join("\n");
+
+        assert_terminal_snapshot("rich_search_output", output);
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_info_output() {
+        let manifest = PackageManifest::from_toml_str(
+            r#"
+name = "compiler"
+version = "2.1.0"
+description = "Portable toolchain"
+license = "MIT OR Apache-2.0"
+homepage = "https://example.test/compiler"
+provides = ["c-compiler", "cc"]
+
+[conflicts]
+legacy-cc = "*"
+
+[replaces]
+old-cc = "<2.0.0"
+"#,
+        )
+        .expect("manifest must parse");
+        let output = format_info_lines_for_style(OutputStyle::Rich, "compiler", &[manifest]).join("\n");
+
+        assert_terminal_snapshot("rich_info_output", output);
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_registry_status_output() {
+        let sources = vec![
+            RegistrySourceWithSnapshotState {
+                source: RegistrySourceRecord {
+                    name: "core".to_string(),
+                    kind: RegistrySourceKind::Git,
+                    location: "https://github.com/spiritledsoftware/crosspack-registry.git"
+                        .to_string(),
+                    fingerprint_sha256:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_string(),
+                    enabled: true,
+                    priority: 100,
+                    community: None,
+                },
+                snapshot: RegistrySourceSnapshotState::Ready {
+                    snapshot_id: "git:0123456789abcdef".to_string(),
+                },
+            },
+            RegistrySourceWithSnapshotState {
+                source: RegistrySourceRecord {
+                    name: "edge".to_string(),
+                    kind: RegistrySourceKind::Filesystem,
+                    location: "/opt/crosspack/edge-registry".to_string(),
+                    fingerprint_sha256:
+                        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                            .to_string(),
+                    enabled: true,
+                    priority: 10,
+                    community: None,
+                },
+                snapshot: RegistrySourceSnapshotState::Error {
+                    status: RegistrySourceWithSnapshotStatus::Unreadable,
+                    reason_code: "snapshot-unreadable".to_string(),
+                },
+            },
+        ];
+        let output = format_registry_list_status_lines(OutputStyle::Rich, sources).join("\n");
+
+        assert_terminal_snapshot("rich_registry_status_output", output);
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_update_output() {
+        let report = sample_update_report();
+        let plan = plan_update_output(&report, OutputStyle::Rich);
+        let output = plan
+            .lines
+            .into_iter()
+            .chain(std::iter::once(plan.summary_line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_terminal_snapshot("rich_update_output", output);
     }
 
     #[test]
@@ -7954,8 +8181,8 @@ sha256 = "abc"
         );
 
         let rich = format_pin_status_lines(OutputStyle::Rich, "ripgrep", &requirement, pin_path);
-        assert_eq!(rich[0], "[OK] pinned ripgrep to ^14");
-        assert_eq!(rich[1], format!("[..] pin: {}", pin_path.display()));
+        assert_eq!(rich[0], "✓ pinned ripgrep to ^14");
+        assert_eq!(rich[1], format!("• pin: {}", pin_path.display()));
     }
 
     #[test]
@@ -7979,10 +8206,10 @@ sha256 = "abc"
             100,
             "0123456789abcdef0123456789abcdef",
         );
-        assert_eq!(rich[0], "[OK] added registry core");
-        assert_eq!(rich[1], "[..] kind: git");
-        assert_eq!(rich[2], "[..] priority: 100");
-        assert_eq!(rich[3], "[..] fingerprint: 0123456789abcdef...");
+        assert_eq!(rich[0], "✓ added registry core");
+        assert_eq!(rich[1], "• kind: git");
+        assert_eq!(rich[2], "• priority: 100");
+        assert_eq!(rich[3], "• fingerprint: 0123456789abcdef...");
     }
 
     #[test]
@@ -7995,7 +8222,7 @@ sha256 = "abc"
         let rich = format_bundle_export_status_line(OutputStyle::Rich, bundle_path);
         assert_eq!(
             rich,
-            format!("[OK] bundle exported: {}", bundle_path.display())
+            format!("✓ bundle exported: {}", bundle_path.display())
         );
     }
 
@@ -8050,17 +8277,33 @@ sha256 = "abc"
 
     #[test]
     fn render_rich_install_detail_row_is_structured_and_badge_free() {
-        let line = render_rich_install_detail_row("step", "archive", "tar.zst");
-        let columns = line.split('|').map(str::trim).collect::<Vec<_>>();
+        let cases = [
+            ("step", "archive", "tar.zst"),
+            ("ok", "resolved", "ripgrep 14.1.0 for x86_64-unknown-linux-gnu"),
+            ("warn", "warning", "signature metadata missing"),
+        ];
 
-        assert_eq!(columns, vec!["STEP", "archive:", "tar.zst"]);
-        assert!(
-            !line.contains("[OK]")
-                && !line.contains("[..]")
-                && !line.contains("[ERR]")
-                && !line.contains("[WARN]"),
-            "rich install detail row must avoid plain status badges: {line}"
-        );
+        for (status, key, value) in cases {
+            let line = render_rich_install_detail_row(status, key, value);
+            let columns = line.split_whitespace().collect::<Vec<_>>();
+            let expected_columns = std::iter::once(key)
+                .chain(value.split_whitespace())
+                .collect::<Vec<_>>();
+
+            assert_eq!(columns, expected_columns);
+            assert!(!line.contains('|'));
+            assert!(
+                !line.contains('✓') && !line.contains('!') && !line.contains('×'),
+                "rich install detail row must avoid status markers: {line}"
+            );
+            assert!(
+                !line.contains("[OK]")
+                    && !line.contains("[..]")
+                    && !line.contains("[ERR]")
+                    && !line.contains("[WARN]"),
+                "rich install detail row must avoid plain status badges: {line}"
+            );
+        }
     }
 
     #[test]
@@ -8100,14 +8343,14 @@ sha256 = "abc"
         assert_eq!(plain_plan.lines, report.lines);
 
         let rich_plan = plan_update_output(&report, OutputStyle::Rich);
-        assert_eq!(rich_plan.lines[0], "[OK] core: updated (snapshot=git:abc)");
+        assert_eq!(rich_plan.lines[0], "✓ core: updated (snapshot=git:abc)");
         assert_eq!(
             rich_plan.lines[1],
-            "[..] mirror: up-to-date (snapshot=git:abc)"
+            "• mirror: up-to-date (snapshot=git:abc)"
         );
         assert_eq!(
             rich_plan.lines[2],
-            "[ERR] edge: failed (reason=source-sync-failed)"
+            "× edge: failed (reason=source-sync-failed)"
         );
     }
 
@@ -8124,13 +8367,15 @@ sha256 = "abc"
     fn format_update_output_lines_rich_adds_status_badges() {
         let report = sample_update_report();
         let lines = format_update_output_lines(&report, OutputStyle::Rich);
-        assert_eq!(lines[0], "[OK] core: updated (snapshot=git:abc)");
-        assert_eq!(lines[1], "[..] mirror: up-to-date (snapshot=git:abc)");
-        assert_eq!(lines[2], "[ERR] edge: failed (reason=source-sync-failed)");
+        assert_eq!(lines[0], "✓ core: updated (snapshot=git:abc)");
+        assert_eq!(lines[1], "• mirror: up-to-date (snapshot=git:abc)");
+        assert_eq!(lines[2], "× edge: failed (reason=source-sync-failed)");
     }
 
     #[test]
     fn format_install_outcome_lines_plain_matches_existing_contract() {
+        use pretty_assertions::assert_eq;
+
         let outcome = sample_install_outcome();
         let lines = format_install_outcome_lines(&outcome, OutputStyle::Plain);
         assert_eq!(
@@ -8161,8 +8406,8 @@ sha256 = "abc"
         let lines = format_rich_install_outcome_lines(&outcome);
 
         assert!(
-            lines.iter().all(|line| line.contains('|')),
-            "rich install detail rows must use status/key/value columns: {lines:?}"
+            lines.iter().all(|line| !line.contains('|')),
+            "rich install detail rows must avoid table chrome: {lines:?}"
         );
         assert!(
             lines.iter().all(|line| {
@@ -8174,8 +8419,8 @@ sha256 = "abc"
             "rich install detail rows must avoid plain status badges: {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.starts_with("WARN")),
-            "rich install detail rows must preserve warning severity: {lines:?}"
+            lines.iter().any(|line| line.starts_with("warning")),
+            "rich install detail rows must preserve warning key: {lines:?}"
         );
     }
 
@@ -8196,6 +8441,13 @@ sha256 = "abc"
                 .all(|line| !line.contains("[OK]") && !line.contains("[..]")),
             "rich install outcome details must avoid plain status badges: {lines:?}"
         );
+    }
+
+    #[test]
+    fn terminal_snapshot_rich_install_outcome() {
+        let output = format_rich_install_outcome_lines(&sample_install_outcome()).join("\n");
+
+        assert_terminal_snapshot("rich_install_outcome", output);
     }
 
     #[test]
@@ -9509,6 +9761,12 @@ sha256 = "abc"
         }
     }
 
+    fn assert_terminal_snapshot(name: &str, output: String) {
+        insta::with_settings!({ prepend_module_to_snapshot => false }, {
+            insta::assert_snapshot!(name, output);
+        });
+    }
+
     fn empty_update_report() -> super::UpdateReport {
         super::UpdateReport {
             lines: Vec::new(),
@@ -9529,6 +9787,39 @@ sha256 = "abc"
     fn download_backend_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn ui_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.name, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.name);
+                },
+            }
+        }
     }
 
     struct DownloadBackendEnvGuard {

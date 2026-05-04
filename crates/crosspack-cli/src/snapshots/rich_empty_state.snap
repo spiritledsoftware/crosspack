@@ -1,0 +1,7 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9593
+expression: output
+---
+! No installed packages
+• Run `crosspack install <name>` to add one.

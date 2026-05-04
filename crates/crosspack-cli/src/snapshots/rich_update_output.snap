@@ -1,0 +1,9 @@
+---
+source: crates/crosspack-cli/src/tests.rs
+assertion_line: 9748
+expression: output
+---
+✓ core: updated (snapshot=git:abc)
+• mirror: up-to-date (snapshot=git:abc)
+× edge: failed (reason=source-sync-failed)
+update summary: updated=1 up-to-date=1 failed=1
