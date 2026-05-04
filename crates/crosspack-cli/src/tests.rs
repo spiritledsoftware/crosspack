@@ -7653,8 +7653,19 @@ sha256 = "abc"
 
         assert_eq!(
             template,
-            "{spinner} {prefix:<11} {wide_msg} [{bar:16}] {pos:>2}/{len:2} {elapsed_precise}"
+            "{spinner} {prefix:<11} [{bar:20}] {pos:>2}/{len:2} {wide_msg}"
         );
+    }
+
+    #[test]
+    fn progress_template_keeps_bar_before_variable_width_message() {
+        let template = progress_template_for_tests();
+
+        let bar_position = template.find("{bar:").expect("template should include bar");
+        let message_position = template
+            .find("{wide_msg}")
+            .expect("template should include message");
+        assert!(bar_position < message_position);
     }
 
     #[test]

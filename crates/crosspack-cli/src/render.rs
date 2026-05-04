@@ -64,6 +64,7 @@ impl TerminalRenderer {
                 );
             }
             progress_bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(12));
+            progress_bar.enable_steady_tick(Duration::from_millis(120));
             progress_bar.set_prefix(label.to_string());
             progress_bar.set_message(String::new());
             Some(progress_bar)
@@ -184,21 +185,15 @@ fn format_elapsed(elapsed: Duration) -> String {
 }
 
 fn progress_tick_chars(label: &str) -> &'static str {
-    match label {
-        "install" => ".oO@* ",
-        "upgrade" => "-=~* ",
-        "update" => "<^>v ",
-        "uninstall" => "\\|/- ",
-        "self-update" => ".:;* ",
-        _ => "|/-\\ ",
-    }
+    let _ = label;
+    "|/-\\ "
 }
 
 fn progress_template() -> &'static str {
     if internal_no_color_enabled() {
-        "{spinner} {prefix:<11} {wide_msg} [{bar:16}] {pos:>2}/{len:2} {elapsed_precise}"
+        "{spinner} {prefix:<11} [{bar:20}] {pos:>2}/{len:2} {wide_msg}"
     } else {
-        "{spinner:.cyan.bold} {prefix:<11} {wide_msg} [{bar:16.cyan/blue}] {pos:>2}/{len:2} {elapsed_precise}"
+        "{spinner:.cyan} {prefix:<11} [{bar:20.cyan/blue}] {pos:>2}/{len:2} {wide_msg}"
     }
 }
 
