@@ -4,10 +4,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::durable;
 use crate::{PrefixLayout, TransactionJournalEntry, TransactionMetadata, TransactionStatus};
+
+#[cfg(test)]
+static FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn fail_next_active_transaction_after_write_for_test() {
+    FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST.store(true, Ordering::SeqCst);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveTransactionMarker {
@@ -46,22 +56,35 @@ pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathB
         }
     };
 
-    file.write_all(format!("{txid}\n").as_bytes())
-        .with_context(|| {
+    let write_result = (|| -> Result<()> {
+        file.write_all(format!("{txid}\n").as_bytes())
+            .with_context(|| {
+                format!(
+                    "failed to write active transaction file: {}",
+                    path.display()
+                )
+            })?;
+        #[cfg(test)]
+        if FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("test active transaction failure after write");
+        }
+        file.sync_all().with_context(|| {
             format!(
-                "failed to write active transaction file: {}",
+                "failed to flush active transaction file: {}",
                 path.display()
             )
         })?;
-    file.sync_all().with_context(|| {
-        format!(
-            "failed to flush active transaction file: {}",
-            path.display()
-        )
-    })?;
-    if let Some(parent) = path.parent() {
-        durable::sync_directory(parent)?;
+        if let Some(parent) = path.parent() {
+            durable::sync_directory(parent)?;
+        }
+        Ok(())
+    })();
+    drop(file);
+
+    if write_result.is_err() {
+        let _ = durable::remove_file_if_exists_durable(&path);
     }
+    write_result?;
 
     Ok(path)
 }

@@ -36,6 +36,7 @@ use crate::native::{
     select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
 use crate::receipts::{parse_identity_receipt, parse_receipt};
+use crate::transactions::fail_next_active_transaction_after_write_for_test;
 
 const TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-1\",\n  \"operation\": \"install\",\n  \"status\": \"applying\",\n  \"started_at_unix\": 1771001234,\n  \"snapshot_id\": \"git:abc123\"\n}\n";
 const TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-2\",\n  \"operation\": \"repair\",\n  \"status\": \"failed\",\n  \"started_at_unix\": 1771001235\n}\n";
@@ -2101,6 +2102,28 @@ fn set_active_transaction_rejects_when_marker_already_exists() {
             .as_deref(),
         Some("tx-first"),
         "first active marker should remain intact"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn set_active_transaction_cleans_marker_after_post_create_failure() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+
+    fail_next_active_transaction_after_write_for_test();
+    let err = set_active_transaction(&layout, "tx-cleanup")
+        .expect_err("post-create failure should abort active claim");
+
+    assert!(
+        err.to_string()
+            .contains("test active transaction failure after write"),
+        "unexpected error: {err:#}"
+    );
+    assert!(
+        !layout.transaction_active_path().exists(),
+        "failed active claim should remove marker"
     );
 
     let _ = fs::remove_dir_all(layout.prefix());
