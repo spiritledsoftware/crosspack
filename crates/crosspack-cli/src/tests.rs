@@ -7636,6 +7636,15 @@ sha256 = "abc"
     }
 
     #[test]
+    fn terminal_renderer_uses_label_once_in_initial_progress_state() {
+        let renderer = TerminalRenderer::from_style(OutputStyle::Rich);
+        let progress = renderer.start_progress("install", 7);
+
+        assert_eq!(progress.progress_prefix_for_tests().as_deref(), Some("install"));
+        assert_eq!(progress.progress_message_for_tests().as_deref(), Some(""));
+    }
+
+    #[test]
     fn internal_no_color_uses_unstyled_progress_template() {
         let _env_lock = ui_env_lock().lock().expect("ui env lock must be available");
         let _color_guard = EnvVarGuard::set("CROSSPACK_INTERNAL_NO_COLOR", "1");

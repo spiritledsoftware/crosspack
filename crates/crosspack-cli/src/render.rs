@@ -65,7 +65,7 @@ impl TerminalRenderer {
             }
             progress_bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(12));
             progress_bar.set_prefix(label.to_string());
-            progress_bar.set_message(label.to_string());
+            progress_bar.set_message(String::new());
             Some(progress_bar)
         } else {
             None
@@ -92,6 +92,16 @@ impl TerminalProgress {
     #[cfg(test)]
     fn has_progress_bar_for_tests(&self) -> bool {
         self.progress_bar.is_some()
+    }
+
+    #[cfg(test)]
+    fn progress_prefix_for_tests(&self) -> Option<String> {
+        self.progress_bar.as_ref().map(ProgressBar::prefix)
+    }
+
+    #[cfg(test)]
+    fn progress_message_for_tests(&self) -> Option<String> {
+        self.progress_bar.as_ref().map(ProgressBar::message)
     }
 
     fn print_status(&self, status: &str, message: &str) {
