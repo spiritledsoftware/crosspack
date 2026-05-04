@@ -2,7 +2,7 @@
 
 **Status:** roadmap, non-GA
 **Related shipped docs:** `docs/transaction-rollback-spec.md`, `docs/install-flow.md`
-**Last updated:** 2026-04-29
+**Last updated:** 2026-05-04
 
 ## Problem
 
@@ -146,8 +146,17 @@ Plain output must remain script-friendly and deterministic.
 4. Add crash simulation tests using controlled failure hooks.
 5. Tighten `doctor`, `repair`, and `rollback` diagnostics.
 
-## Open Questions
+## Resolved Decisions
 
-- Should `plan_digest` be required before v0.5 is considered complete?
-- How much fsync behavior should be best-effort on platforms with weaker directory sync support?
-- Should repair ever auto-quarantine corrupt transaction state, or always require explicit user action?
+- `plan_digest` is not required before v0.5 is considered complete; it remains optional future metadata.
+- Directory fsync behavior is best-effort on platforms with weaker directory sync support.
+- Repair does not auto-quarantine corrupt transaction state in v0.5; corrupt or mismatched transaction state fails closed with deterministic repair-required diagnostics.
+
+## Implementation Notes
+
+- `plan_digest` remains optional future metadata and is not required for v0.5 hardening completion. Metadata version stays backward-compatible with existing optional fields.
+- Metadata writes use atomic replacement; active marker write/remove paths are durable and idempotent; journal append paths flush entries before subsequent forward mutations proceed.
+- Begin crash simulation is covered at metadata-write and active-marker boundaries. Broader lifecycle crash coverage is represented by payload-before-mutation ordering tests and rollback replay tests rather than adding test-only seams through every CLI mutation adapter.
+- Recovery classification is centralized in `TransactionCoordinator::classify_recovery`, and repair execution is centralized in `TransactionCoordinator::repair_transaction_state`.
+- Metadata `txid` mismatches between trusted marker/file-stem paths and metadata contents fail closed with deterministic `metadata_txid_mismatch` diagnostics.
+- CLI preflight, doctor, rollback, and repair paths preserve existing `transaction: ...` contracts while adding deterministic `transaction_detail ...` and `repair action=...` diagnostics.

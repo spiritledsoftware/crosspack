@@ -24,7 +24,7 @@ use crosspack_installer::{
     default_user_prefix, expose_binary, expose_completion, expose_gui_app, expose_integration,
     exposed_completion_path, gui_asset_path, install_from_artifact_to_dir,
     install_from_source_archive_to_dir, projected_exposed_completion_path, projected_gui_assets,
-    projected_integration, read_active_transaction, read_all_declared_services_states,
+    projected_integration, read_active_transaction_marker, read_all_declared_services_states,
     read_all_gui_exposure_states, read_all_installed_package_states, read_all_integration_states,
     read_all_pins, read_gui_exposure_state, read_gui_native_state, read_install_receipts,
     read_integration_state, read_transaction_metadata, register_native_gui_app_best_effort,
@@ -39,14 +39,17 @@ use crosspack_installer::{
     write_identity_gui_exposure_state, write_identity_gui_native_state,
     write_identity_install_receipt, write_identity_integration_state, write_identity_pin,
     write_install_receipt, write_installed_package_state, write_integration_state, write_pin,
-    ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
+    ActiveTransactionMarker, ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
     InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity,
     InstalledPackageSelector, InstalledPackageState, IntegrationProjection, NativeServiceAction,
     NativeServiceOutcome, PrefixLayout, TransactionCoordinator, TransactionJournalEntry,
-    TransactionMetadata, TransactionStatus, UninstallResult, UninstallStatus,
+    TransactionMetadata, TransactionRecoveryAction, TransactionRepairReason, TransactionStatus,
+    UninstallResult, UninstallStatus,
 };
 #[cfg(test)]
-use crosspack_installer::{set_active_transaction, write_transaction_metadata};
+use crosspack_installer::{
+    read_active_transaction, set_active_transaction, write_transaction_metadata,
+};
 use crosspack_registry::{
     ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
     RegistrySourceSnapshotState, RegistrySourceStore, RegistrySourceWithSnapshotState,

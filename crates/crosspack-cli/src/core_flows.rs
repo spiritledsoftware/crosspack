@@ -508,6 +508,7 @@ struct PackageSnapshotManifest {
     bins: Vec<String>,
     completions: Vec<String>,
     gui_assets: Vec<GuiExposureAsset>,
+    integrations: Vec<IntegrationProjection>,
     native_sidecar_exists: bool,
     declared_services_sidecar_exists: bool,
 }
@@ -599,7 +600,7 @@ where
             let current_status = read_transaction_metadata(layout, &tx.txid)
                 .ok()
                 .flatten()
-                .map(|metadata| metadata.status);
+                .and_then(|metadata| (metadata.txid == tx.txid).then_some(metadata.status));
             let preserve_recovery_state = current_status
                 .as_ref()
                 .map(|status| {
@@ -631,13 +632,6 @@ where
     }
 }
 
-fn status_allows_stale_marker_cleanup(status: &TransactionStatus) -> bool {
-    matches!(
-        status,
-        TransactionStatus::Completed | TransactionStatus::Committed | TransactionStatus::RolledBack
-    )
-}
-
 fn normalize_command_token(command: &str) -> String {
     let command = command.trim().to_ascii_lowercase();
     if command.is_empty() {
@@ -655,102 +649,165 @@ fn ensure_no_active_transaction_for(layout: &PrefixLayout, command: &str) -> Res
 }
 
 fn ensure_no_active_transaction(layout: &PrefixLayout) -> Result<()> {
-    let active_txid = match read_active_transaction(layout) {
-        Ok(active_txid) => active_txid,
-        Err(_) => {
-            return Err(anyhow!(
-                "transaction state requires repair (reason=active_marker_unreadable path={})",
-                layout.transaction_active_path().display()
-            ));
+    let action = TransactionCoordinator::new(layout).classify_recovery()?;
+    match action {
+        TransactionRecoveryAction::Clean
+        | TransactionRecoveryAction::FinalizeCommitted { .. }
+        | TransactionRecoveryAction::ClearRolledBack { .. } => {
+            TransactionCoordinator::new(layout).clear_active()?;
+            Ok(())
         }
-    };
-
-    if let Some(txid) = active_txid {
-        let metadata = match read_transaction_metadata(layout, &txid) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                return Err(anyhow!(
-                    "transaction {txid} requires repair (reason=metadata_unreadable path={})",
-                    layout.transaction_metadata_path(&txid).display()
-                ));
-            }
-        };
-
-        if let Some(metadata) = metadata {
-            if status_allows_stale_marker_cleanup(&metadata.status) {
-                TransactionCoordinator::new(layout).clear_active()?;
-                return Ok(());
-            }
-            if metadata.status == TransactionStatus::RollingBack {
-                return Err(anyhow!(
-                    "transaction {txid} requires repair (reason=rolling_back)"
-                ));
-            }
-            if metadata.status == TransactionStatus::Failed {
-                return Err(anyhow!(
-                    "transaction {txid} requires repair (reason=failed)"
-                ));
-            }
-
-            return Err(anyhow!(
-                "transaction {txid} is active (reason=active_status status={})",
-                metadata.status
-            ));
+        TransactionRecoveryAction::CleanupPlanning { txid } => Err(anyhow!(
+            "transaction {txid} is active (reason=active_status status=planning)"
+        )),
+        TransactionRecoveryAction::Rollback { txid } => Err(anyhow!(
+            "transaction {txid} is active (reason=active_status status=applying)"
+        )),
+        TransactionRecoveryAction::ResumeRollback { txid } => Err(anyhow!(
+            "transaction {txid} requires repair (reason=rolling_back)"
+        )),
+        TransactionRecoveryAction::BlockedFailed { txid } => Err(anyhow!(
+            "transaction {txid} requires repair (reason=failed)"
+        )),
+        TransactionRecoveryAction::RepairRequired(reason) => {
+            Err(anyhow!(format_transaction_preflight_required(layout, &reason)))
         }
-
-        return Err(anyhow!(
-            "transaction {txid} requires repair (reason=metadata_missing path={})",
-            layout.transaction_metadata_path(&txid).display()
-        ));
     }
-
-    Ok(())
 }
 
 fn doctor_transaction_health_line(layout: &PrefixLayout) -> Result<String> {
-    let active_txid = match read_active_transaction(layout) {
-        Ok(active_txid) => active_txid,
-        Err(_) => {
-            return Ok(format!(
-                "transaction: failed (reason=active_marker_unreadable path={})",
-                layout.transaction_active_path().display()
-            ));
+    let action = TransactionCoordinator::new(layout).classify_recovery()?;
+    Ok(match action {
+        TransactionRecoveryAction::Clean => "transaction: clean".to_string(),
+        TransactionRecoveryAction::FinalizeCommitted { .. }
+        | TransactionRecoveryAction::ClearRolledBack { .. } => {
+            TransactionCoordinator::new(layout).clear_active()?;
+            "transaction: clean".to_string()
+        }
+        TransactionRecoveryAction::CleanupPlanning { txid } => format!("transaction: active {txid}"),
+        TransactionRecoveryAction::Rollback { txid } => format!("transaction: active {txid}"),
+        TransactionRecoveryAction::ResumeRollback { txid } => {
+            format!("transaction: failed {txid} (reason=rolling_back)")
+        }
+        TransactionRecoveryAction::BlockedFailed { txid } => {
+            format!("transaction: failed {txid} (reason=failed)")
+        }
+        TransactionRecoveryAction::RepairRequired(reason) => {
+            format_transaction_repair_failed_line(layout, &reason)
+        }
+    })
+}
+
+fn doctor_transaction_detail_line(layout: &PrefixLayout) -> Result<Option<String>> {
+    let Ok(ActiveTransactionMarker::Present(txid)) = read_active_transaction_marker(layout) else {
+        return Ok(None);
+    };
+    let Ok(Some(metadata)) = read_transaction_metadata(layout, &txid) else {
+        return Ok(None);
+    };
+    if metadata.txid != txid {
+        return Ok(None);
+    }
+    match format_transaction_detail_line(layout, &metadata) {
+        Ok(line) => Ok(Some(line)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn format_transaction_detail_line(
+    layout: &PrefixLayout,
+    metadata: &TransactionMetadata,
+) -> Result<String> {
+    let step = latest_transaction_journal_step(layout, &metadata.txid)?.unwrap_or_else(|| "none".to_string());
+    Ok(format!(
+        "transaction_detail txid={} status={} operation={} step={}",
+        metadata.txid, metadata.status, metadata.operation, step
+    ))
+}
+
+fn latest_transaction_journal_step(layout: &PrefixLayout, txid: &str) -> Result<Option<String>> {
+    let entries = match read_transaction_journal_records(layout, txid) {
+        Ok(entries) => entries,
+        Err(err) => {
+            if layout.transaction_journal_path(txid).exists() {
+                return Err(err);
+            }
+            return Ok(None);
         }
     };
+    Ok(entries.into_iter().max_by_key(|entry| entry.seq).map(|entry| entry.step))
+}
 
-    let Some(txid) = active_txid else {
-        return Ok("transaction: clean".to_string());
-    };
-
-    let metadata = match read_transaction_metadata(layout, &txid) {
-        Ok(metadata) => metadata,
-        Err(_) => {
-            return Ok(format!(
-                "transaction: failed {txid} (reason=metadata_unreadable path={})",
-                layout.transaction_metadata_path(&txid).display()
-            ));
+fn format_transaction_repair_failed_line(
+    layout: &PrefixLayout,
+    reason: &TransactionRepairReason,
+) -> String {
+    match reason {
+        TransactionRepairReason::ActiveMarkerUnreadable => format!(
+            "transaction: failed (reason=active_marker_unreadable path={})",
+            layout.transaction_active_path().display()
+        ),
+        TransactionRepairReason::ActiveMarkerInvalid { path } => {
+            format!("transaction: failed (reason=active_marker_invalid path={path})")
         }
-    };
-
-    let Some(metadata) = metadata else {
-        return Ok(format!(
+        TransactionRepairReason::ActiveMarkerWithoutMetadata { txid } => format!(
             "transaction: failed {txid} (reason=metadata_missing path={})",
-            layout.transaction_metadata_path(&txid).display()
-        ));
-    };
+            layout.transaction_metadata_path(txid).display()
+        ),
+        TransactionRepairReason::MetadataUnreadable { txid } => format!(
+            "transaction: failed {txid} (reason=metadata_unreadable path={})",
+            layout.transaction_metadata_path(txid).display()
+        ),
+        TransactionRepairReason::MetadataTxidMismatch { expected, actual } => format!(
+            "transaction: failed {expected} (reason=metadata_txid_mismatch expected={expected} actual={actual})"
+        ),
+        TransactionRepairReason::JournalUnreadable { txid } => format!(
+            "transaction: failed {txid} (reason=journal_unreadable path={})",
+            layout.transaction_journal_path(txid).display()
+        ),
+        TransactionRepairReason::ApplyingWithoutActiveMarker { txid } => {
+            format!("transaction: failed {txid} (reason=applying_without_active_marker)")
+        }
+        TransactionRepairReason::RollbackEvidenceMissing { txid } => {
+            format!("transaction: failed {txid} (reason=rollback_evidence_missing)")
+        }
+    }
+}
 
-    if metadata.status == TransactionStatus::RollingBack {
-        return Ok(format!("transaction: failed {txid} (reason=rolling_back)"));
+fn format_transaction_preflight_required(
+    layout: &PrefixLayout,
+    reason: &TransactionRepairReason,
+) -> String {
+    match reason {
+        TransactionRepairReason::ActiveMarkerUnreadable => format!(
+            "transaction state requires repair (reason=active_marker_unreadable path={})",
+            layout.transaction_active_path().display()
+        ),
+        TransactionRepairReason::ActiveMarkerInvalid { path } => {
+            format!("transaction state requires repair (reason=active_marker_invalid path={path})")
+        }
+        TransactionRepairReason::ActiveMarkerWithoutMetadata { txid } => format!(
+            "transaction {txid} requires repair (reason=metadata_missing path={})",
+            layout.transaction_metadata_path(txid).display()
+        ),
+        TransactionRepairReason::MetadataUnreadable { txid } => format!(
+            "transaction {txid} requires repair (reason=metadata_unreadable path={})",
+            layout.transaction_metadata_path(txid).display()
+        ),
+        TransactionRepairReason::MetadataTxidMismatch { expected, actual } => format!(
+            "transaction state requires repair {expected} (reason=metadata_txid_mismatch expected={expected} actual={actual})"
+        ),
+        TransactionRepairReason::JournalUnreadable { txid } => format!(
+            "transaction {txid} requires repair (reason=journal_unreadable path={})",
+            layout.transaction_journal_path(txid).display()
+        ),
+        TransactionRepairReason::ApplyingWithoutActiveMarker { txid } => {
+            format!("transaction {txid} requires repair (reason=applying_without_active_marker)")
+        }
+        TransactionRepairReason::RollbackEvidenceMissing { txid } => {
+            format!("transaction {txid} requires repair (reason=rollback_evidence_missing)")
+        }
     }
-    if metadata.status == TransactionStatus::Failed {
-        return Ok(format!("transaction: failed {txid} (reason=failed)"));
-    }
-    if status_allows_stale_marker_cleanup(&metadata.status) {
-        TransactionCoordinator::new(layout).clear_active()?;
-        return Ok("transaction: clean".to_string());
-    }
-
-    Ok(format!("transaction: active {txid}"))
 }
 
 fn doctor_installed_state_line(layout: &PrefixLayout) -> String {

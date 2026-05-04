@@ -118,14 +118,26 @@ Crosspack executes install/upgrade/uninstall mutations under a transaction state
 Rollback snapshot/replay contract (current behavior):
 
 - per-package snapshots include package tree, receipt, exposed binaries, exposed package completions, exposed GUI assets, and optional native sidecar state,
+- transaction metadata writes are atomic replacements, active marker writes/removals are durable and idempotent, journal appends are flushed before subsequent forward mutations are considered complete, and parent directory entries are synced where the platform supports it,
+- rollback payloads are captured and journaled before destructive package lifecycle mutations; package apply `state=done` entries are journaled only after successful forward mutation,
 - source-build package application journals explicit source phase steps (`source_fetch:*`, `source_build_system:*`, `source_install:*`) in addition to package apply steps, with `source_build_system:*` recorded only after successful source build execution,
 - rollback replays compensating package steps in reverse journal order, including native step names (`install_native_package:<name>`, `upgrade_native_package:<name>`),
 - native uninstall actions are replayed before managed snapshot restore for native package steps.
 
+Recovery classification is deterministic and installer-owned:
+
+- clean terminal state: no action,
+- empty `planning`: cleanup stale planning metadata/staging,
+- `planning` with payload or `applying`: require rollback,
+- `committed` or legacy `completed`: finalize stale active marker,
+- `rolling_back`: resume rollback,
+- `rolled_back`: clear stale active marker,
+- `failed` or unreadable/mismatched metadata/journal state: fail closed with repair-required reason code.
+
 Operator commands:
 - `rollback [txid]`: replay rollback for eligible interrupted/failed transactions.
-- `repair`: clear stale markers and reconcile recoverable interrupted state.
-- `doctor`: surface transaction health and prefix diagnostics.
+- `repair`: clear stale markers and reconcile recoverable interrupted state; plain output includes additive `repair action=<code>` diagnostics.
+- `doctor`: surface transaction health and prefix diagnostics; when trusted active metadata exists it also emits additive `transaction_detail txid=<txid> status=<status> operation=<operation> step=<step-or-none>`.
 
 ## Dependency Policy Behavior
 

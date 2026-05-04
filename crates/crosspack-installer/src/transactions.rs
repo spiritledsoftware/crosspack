@@ -6,7 +6,15 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::durable;
 use crate::{PrefixLayout, TransactionJournalEntry, TransactionMetadata, TransactionStatus};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveTransactionMarker {
+    Absent,
+    Invalid,
+    Present(String),
+}
 
 pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathBuf> {
     let path = layout.transaction_active_path();
@@ -45,12 +53,15 @@ pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathB
                 path.display()
             )
         })?;
-    file.flush().with_context(|| {
+    file.sync_all().with_context(|| {
         format!(
             "failed to flush active transaction file: {}",
             path.display()
         )
     })?;
+    if let Some(parent) = path.parent() {
+        durable::sync_directory(parent)?;
+    }
 
     Ok(path)
 }
@@ -75,16 +86,45 @@ pub fn read_active_transaction(layout: &PrefixLayout) -> Result<Option<String>> 
     Ok(Some(txid.to_string()))
 }
 
+pub fn read_active_transaction_marker(layout: &PrefixLayout) -> Result<ActiveTransactionMarker> {
+    let path = layout.transaction_active_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(ActiveTransactionMarker::Absent);
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to read active transaction file: {}", path.display())
+            });
+        }
+    };
+
+    let txid = raw.trim();
+    if !is_valid_active_txid(txid) || txid.lines().count() != 1 {
+        return Ok(ActiveTransactionMarker::Invalid);
+    }
+
+    Ok(ActiveTransactionMarker::Present(txid.to_string()))
+}
+
+fn is_valid_active_txid(txid: &str) -> bool {
+    !txid.is_empty()
+        && txid.starts_with("tx-")
+        && txid.len() <= 128
+        && txid
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 pub fn clear_active_transaction(layout: &PrefixLayout) -> Result<()> {
     let path = layout.transaction_active_path();
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| {
-            format!(
-                "failed to clear active transaction file: {}",
-                path.display()
-            )
-        })?;
-    }
+    durable::remove_file_if_exists_durable(&path).with_context(|| {
+        format!(
+            "failed to clear active transaction file: {}",
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -104,12 +144,13 @@ pub fn write_transaction_metadata(
         )
     })?;
 
-    fs::write(&path, serialize_transaction_metadata(metadata)).with_context(|| {
-        format!(
-            "failed to write transaction metadata file: {}",
-            path.display()
-        )
-    })?;
+    durable::write_file_atomic(&path, serialize_transaction_metadata(metadata).as_bytes())
+        .with_context(|| {
+            format!(
+                "failed to write transaction metadata file: {}",
+                path.display()
+            )
+        })?;
     Ok(path)
 }
 
@@ -147,6 +188,12 @@ pub fn update_transaction_status(
 ) -> Result<()> {
     let mut metadata = read_transaction_metadata(layout, txid)?
         .ok_or_else(|| anyhow!("transaction metadata not found for '{txid}'"))?;
+    if metadata.txid != txid {
+        return Err(anyhow!(
+            "transaction metadata txid mismatch: expected {txid}, found {}",
+            metadata.txid
+        ));
+    }
     metadata.status = status;
     write_transaction_metadata(layout, &metadata)?;
     Ok(())
@@ -163,22 +210,46 @@ pub fn append_transaction_journal_entry(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("failed to open transaction journal: {}", path.display()))?;
-    file.write_all(serialize_transaction_journal_entry(entry).as_bytes())
+    durable::append_line(&path, &serialize_transaction_journal_entry(entry))
         .with_context(|| format!("failed to append transaction journal: {}", path.display()))?;
-    file.write_all(b"\n").with_context(|| {
-        format!(
-            "failed to append transaction journal newline: {}",
-            path.display()
-        )
-    })?;
-    file.flush()
-        .with_context(|| format!("failed to flush transaction journal: {}", path.display()))?;
     Ok(path)
+}
+
+pub fn read_transaction_journal_entries(
+    layout: &PrefixLayout,
+    txid: &str,
+) -> Result<Vec<TransactionJournalEntry>> {
+    let path = layout.transaction_journal_path(txid);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to read transaction journal: {}", path.display())
+            });
+        }
+    };
+
+    let mut entries = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let entry = serde_json::from_str::<TransactionJournalEntryDocument>(line)
+            .map(TransactionJournalEntry::from)
+            .with_context(|| {
+                format!(
+                    "failed parsing transaction journal line {}: {}",
+                    index + 1,
+                    path.display()
+                )
+            })?;
+        entries.push(entry);
+    }
+
+    Ok(entries)
 }
 
 pub fn current_unix_timestamp() -> Result<u64> {
@@ -208,13 +279,48 @@ fn serialize_transaction_journal_entry(entry: &TransactionJournalEntry) -> Strin
     format!("{{{}}}", fields.join(","))
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct TransactionJournalEntryDocument {
+    seq: u64,
+    step: String,
+    state: String,
+    path: Option<String>,
+}
+
+impl From<TransactionJournalEntryDocument> for TransactionJournalEntry {
+    fn from(document: TransactionJournalEntryDocument) -> Self {
+        Self {
+            seq: document.seq,
+            step: document.step,
+            state: document.state,
+            path: document.path,
+        }
+    }
+}
+
+impl From<TransactionJournalEntry> for TransactionJournalEntryDocument {
+    fn from(entry: TransactionJournalEntry) -> Self {
+        Self {
+            seq: entry.seq,
+            step: entry.step,
+            state: entry.state,
+            path: entry.path,
+        }
+    }
+}
+
 fn parse_transaction_metadata(raw: &str) -> Result<TransactionMetadata> {
     match serde_json::from_str::<TransactionMetadataDocument>(raw) {
         Ok(document) => TransactionMetadata::try_from(document),
-        Err(serde_error) => match parse_transaction_metadata_legacy(raw) {
-            Ok(metadata) => Ok(metadata),
-            Err(legacy_error) => Err(legacy_error).context(serde_error),
-        },
+        Err(serde_error) => {
+            if raw.trim_start().starts_with('{') {
+                return Err(serde_error).context("invalid transaction metadata JSON");
+            }
+            match parse_transaction_metadata_legacy(raw) {
+                Ok(metadata) => Ok(metadata),
+                Err(legacy_error) => Err(legacy_error).context(serde_error),
+            }
+        }
     }
 }
 
