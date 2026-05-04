@@ -2297,6 +2297,23 @@ fn durable_sync_directory_tolerates_missing_directory() {
     let _ = fs::remove_dir_all(layout.prefix());
 }
 
+#[test]
+fn durable_sync_directory_rejects_file_path() {
+    let layout = test_layout();
+    let path = layout.transactions_dir().join("not-a-directory");
+    fs::create_dir_all(layout.transactions_dir()).expect("must create transactions dir");
+    fs::write(&path, b"file").expect("must write file");
+
+    let err = crate::durable::sync_directory(&path).expect_err("file path should not sync as dir");
+
+    assert!(
+        err.to_string().contains("path is not a directory for sync"),
+        "unexpected error: {err:#}"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn durable_sync_directory_tolerates_unsupported_directory_sync() {

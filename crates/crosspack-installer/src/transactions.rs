@@ -101,7 +101,7 @@ pub fn read_active_transaction_marker(layout: &PrefixLayout) -> Result<ActiveTra
     };
 
     let txid = raw.trim();
-    if !is_valid_active_txid(txid) || txid.lines().count() != 1 {
+    if !is_valid_active_txid(txid) {
         return Ok(ActiveTransactionMarker::Invalid);
     }
 

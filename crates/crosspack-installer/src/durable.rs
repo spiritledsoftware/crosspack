@@ -80,15 +80,44 @@ pub(crate) fn remove_file_if_exists_durable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort parent directory sync for transaction durability.
+///
+/// Some supported platforms/filesystems reject opening or syncing directory
+/// handles. Those known portability cases are treated as best-effort misses,
+/// while unexpected I/O errors still propagate to callers.
 pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     let dir = match fs::File::open(path) {
         Ok(dir) => dir,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Ok(()),
+        Err(err) if is_best_effort_directory_sync_error(&err) => return Ok(()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to open directory for sync: {}", path.display()));
+        }
     };
 
-    let _ = dir.sync_all();
-    Ok(())
+    if !dir
+        .metadata()
+        .with_context(|| format!("failed to stat directory for sync: {}", path.display()))?
+        .is_dir()
+    {
+        anyhow::bail!("path is not a directory for sync: {}", path.display());
+    }
+
+    match dir.sync_all() {
+        Ok(()) => Ok(()),
+        Err(err) if is_best_effort_directory_sync_error(&err) => Ok(()),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to sync directory: {}", path.display()))
+        }
+    }
+}
+
+fn is_best_effort_directory_sync_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
+    )
 }
 
 fn temporary_sibling_path(path: &Path) -> PathBuf {
