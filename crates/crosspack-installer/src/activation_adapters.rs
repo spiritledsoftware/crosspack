@@ -659,6 +659,10 @@ impl ActivationFilesystem for RealActivationFs {
                     });
                 }
             }
+            return Some(ActivationFsEntry::ServiceMetadata {
+                source: path.to_string(),
+                owner: Some(owner),
+            });
         }
         Some(ActivationFsEntry::File)
     }
@@ -717,6 +721,39 @@ impl ActivationFilesystem for RealActivationFs {
         let _ = fs::remove_file(&temp_path);
         let written =
             fs::write(&temp_path, contents).is_ok() && rename_temp_over_path(&temp_path, path);
+        if !written {
+            let _ = fs::remove_file(&temp_path);
+        }
+        if written {
+            self.owners.insert(
+                path.to_string(),
+                ActivationOwner {
+                    package_state_key: package_state_key.to_string(),
+                    package: package.to_string(),
+                    integration_key: integration_key.to_string(),
+                },
+            );
+        }
+        written
+    }
+
+    fn write_owned_service_metadata_for(
+        &mut self,
+        path: &str,
+        source: &str,
+        package_state_key: &str,
+        package: &str,
+        integration_key: &str,
+    ) -> bool {
+        if path.contains(':') {
+            return true;
+        }
+        let Some(temp_path) = temp_replace_path(path) else {
+            return false;
+        };
+        let _ = fs::remove_file(&temp_path);
+        let written =
+            fs::copy(source, &temp_path).is_ok() && rename_temp_over_path(&temp_path, path);
         if !written {
             let _ = fs::remove_file(&temp_path);
         }
@@ -1305,15 +1342,19 @@ pub fn replay_activation_rollback_entry_with_fs(
         ActivationRollbackOperation::RemoveCreatedServiceMetadata => {
             match fs.entry(&entry.path) {
                 Some(ActivationFsEntry::ServiceMetadata { source, owner })
-                    if entry
-                        .created_symlink_target
-                        .as_ref()
-                        .is_none_or(|expected| expected == &source)
-                        && owner_matches_rollback_expectation(
-                            entry.created_owner.as_ref(),
-                            owner.as_ref(),
-                        ) =>
+                    if owner_matches_rollback_expectation(
+                        entry.created_owner.as_ref(),
+                        owner.as_ref(),
+                    ) =>
                 {
+                    if owner.is_none()
+                        && entry
+                            .created_symlink_target
+                            .as_ref()
+                            .is_some_and(|expected| expected != &source)
+                    {
+                        return ActivationAdapterOutcome::conflict();
+                    }
                     if !fs.remove_entry(&entry.path) {
                         return ActivationAdapterOutcome::conflict();
                     }
@@ -1444,12 +1485,12 @@ pub fn apply_service_plan(
     executor: &mut impl ActivationCommandExecutor,
     plan: &IntegrationActivationPlan,
 ) -> ActivationAdapterOutcome {
-    let mut fs = MemoryActivationFs::new(platform_for_service_plan(plan));
+    let mut fs = RealActivationFs::new(platform_for_service_plan(plan), Vec::new());
     apply_service_plan_with_fs(&mut fs, executor, plan)
 }
 
 pub fn apply_service_plan_with_fs(
-    fs: &mut MemoryActivationFs,
+    fs: &mut impl ActivationFilesystem,
     executor: &mut impl ActivationCommandExecutor,
     plan: &IntegrationActivationPlan,
 ) -> ActivationAdapterOutcome {
@@ -1485,12 +1526,15 @@ pub fn disable_service_plan(
     executor: &mut impl ActivationCommandExecutor,
     plan: &IntegrationActivationPlan,
 ) -> ActivationAdapterOutcome {
-    let mut fs = MemoryActivationFs::new(platform_for_service_plan(plan));
+    let mut fs = RealActivationFs::new(
+        platform_for_service_plan(plan),
+        [(plan.host_path.clone(), owner_for_plan(plan))],
+    );
     disable_service_plan_with_fs(&mut fs, executor, plan)
 }
 
 pub fn disable_service_plan_with_fs(
-    fs: &mut MemoryActivationFs,
+    fs: &mut impl ActivationFilesystem,
     executor: &mut impl ActivationCommandExecutor,
     plan: &IntegrationActivationPlan,
 ) -> ActivationAdapterOutcome {
@@ -1609,7 +1653,7 @@ fn run_service_commands(
 }
 
 fn install_service_metadata(
-    fs: &mut MemoryActivationFs,
+    fs: &mut impl ActivationFilesystem,
     plan: &IntegrationActivationPlan,
 ) -> Result<Vec<ActivationRollbackEntry>, IntegrationReasonCode> {
     if !matches!(
@@ -1620,22 +1664,24 @@ fn install_service_metadata(
     }
 
     let expected_owner = owner_for_plan(plan);
-    match fs.entries.get(&plan.host_path).cloned() {
-        Some(MemoryActivationFileEntry::ServiceMetadata { source, owner })
+    match fs.entry(&plan.host_path) {
+        Some(ActivationFsEntry::ServiceMetadata { source, owner })
             if source == plan.source_path && owner.as_ref() == Some(&expected_owner) =>
         {
             Ok(Vec::new())
         }
-        Some(MemoryActivationFileEntry::ServiceMetadata { source, owner })
+        Some(ActivationFsEntry::ServiceMetadata { source, owner })
             if owner.as_ref() == Some(&expected_owner) =>
         {
-            fs.write_service_metadata_for(
+            if !fs.write_owned_service_metadata_for(
                 &plan.host_path,
                 &plan.source_path,
                 &plan.package_state_key,
                 &plan.package,
                 &plan.integration_key,
-            );
+            ) {
+                return Err(IntegrationReasonCode::HostPathConflict);
+            }
             Ok(vec![ActivationRollbackEntry {
                 operation: ActivationRollbackOperation::RestoreOwnedServiceMetadata,
                 path: plan.host_path.clone(),
@@ -1660,13 +1706,15 @@ fn install_service_metadata(
                 else {
                     return Err(IntegrationReasonCode::HostPathConflict);
                 };
-                fs.write_service_metadata_for(
+                if !fs.write_owned_service_metadata_for(
                     &plan.host_path,
                     &plan.source_path,
                     &plan.package_state_key,
                     &plan.package,
                     &plan.integration_key,
-                );
+                ) {
+                    return Err(IntegrationReasonCode::HostPathConflict);
+                }
                 Ok(vec![ActivationRollbackEntry {
                     operation: ActivationRollbackOperation::RemoveCreatedServiceMetadata,
                     path: plan.host_path.clone(),
@@ -1683,13 +1731,15 @@ fn install_service_metadata(
                     created_parent_dirs,
                 }])
             } else {
-                fs.write_service_metadata_for(
+                if !fs.write_owned_service_metadata_for(
                     &plan.host_path,
                     &plan.source_path,
                     &plan.package_state_key,
                     &plan.package,
                     &plan.integration_key,
-                );
+                ) {
+                    return Err(IntegrationReasonCode::HostPathConflict);
+                }
                 Ok(vec![ActivationRollbackEntry {
                     operation: ActivationRollbackOperation::RemoveCreatedServiceMetadata,
                     path: plan.host_path.clone(),
@@ -1711,7 +1761,7 @@ fn install_service_metadata(
 }
 
 fn remove_service_metadata(
-    fs: &mut MemoryActivationFs,
+    fs: &mut impl ActivationFilesystem,
     plan: &IntegrationActivationPlan,
 ) -> Vec<ActivationRollbackEntry> {
     if !matches!(
@@ -1721,11 +1771,13 @@ fn remove_service_metadata(
         return Vec::new();
     }
 
-    let Some(MemoryActivationFileEntry::ServiceMetadata { source, owner }) =
-        fs.entries.remove(&plan.host_path)
+    let Some(ActivationFsEntry::ServiceMetadata { source, owner }) = fs.entry(&plan.host_path)
     else {
         return Vec::new();
     };
+    if !fs.remove_entry(&plan.host_path) {
+        return Vec::new();
+    }
 
     vec![ActivationRollbackEntry {
         operation: ActivationRollbackOperation::RestoreOwnedServiceMetadata,

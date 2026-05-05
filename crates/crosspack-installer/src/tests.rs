@@ -1235,7 +1235,8 @@ fn service_adapter_linux_systemd_user_install_enable_start_status_sequence() {
         NativeCommandResult::success("Active: active (running)", ""),
     ]);
 
-    let outcome = apply_service_plan(&mut executor, &plan);
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+    let outcome = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
 
     assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
     assert_eq!(outcome.applied_state, IntegrationAppliedState::Running);
@@ -1300,7 +1301,8 @@ fn service_adapter_macos_launchd_user_bootstrap_enable_kickstart_print_sequence(
         NativeCommandResult::success("state = running", ""),
     ]);
 
-    let outcome = apply_service_plan(&mut executor, &plan);
+    let mut fs = MemoryActivationFs::new(HostPlatform::Macos);
+    let outcome = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
 
     assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
     assert_eq!(outcome.applied_state, IntegrationAppliedState::Running);
@@ -1544,6 +1546,58 @@ fn service_adapter_macos_plist_install_and_remove_use_typed_fs_with_rollback() {
         disable.rollback[0].operation,
         ActivationRollbackOperation::RestoreOwnedServiceMetadata
     );
+}
+
+#[test]
+fn service_adapter_macos_real_fs_copies_and_removes_launch_agent() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let source = layout
+        .prefix()
+        .join("share")
+        .join("integrations")
+        .join("services")
+        .join("com.example.caddy.plist");
+    fs::create_dir_all(source.parent().expect("source must have parent"))
+        .expect("must create source parent");
+    fs::write(&source, b"<plist><dict/></plist>").expect("must write source plist");
+    let host_path = layout
+        .prefix()
+        .join("home")
+        .join("test")
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.example.caddy.plist");
+    let plan = service_adapter_plan(
+        HostPlatform::Macos,
+        IntegrationAdapterKind::LaunchdUser,
+        host_path.to_str().expect("host path must be utf-8"),
+        source.to_str().expect("source path must be utf-8"),
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("state = running", ""),
+    ]);
+
+    let apply = apply_service_plan(&mut executor, &plan);
+
+    assert_eq!(apply.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        fs::read(&host_path).expect("must read launch agent"),
+        fs::read(&source).expect("must read source")
+    );
+
+    let mut executor = FakeActivationCommandExecutor::default();
+    let disable = disable_service_plan(&mut executor, &plan);
+
+    assert_eq!(disable.reason_code, IntegrationReasonCode::Ok);
+    assert!(
+        !host_path.exists(),
+        "disable must remove copied launch agent"
+    );
+    let _ = fs::remove_dir_all(layout.prefix());
 }
 
 #[test]

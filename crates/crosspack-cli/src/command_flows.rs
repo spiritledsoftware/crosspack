@@ -235,6 +235,7 @@ struct ManagedServiceRow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeclaredServiceRecord {
+    package_state_key: String,
     package: String,
     service: ServiceDeclaration,
 }
@@ -301,6 +302,7 @@ fn declared_service_for_package_service(
         ));
     };
     Ok(DeclaredServiceRecord {
+        package_state_key: package_state_key_for_cli(layout, package)?,
         package: package.to_string(),
         service: declared,
     })
@@ -322,6 +324,8 @@ fn collect_declared_services(
             let existing = services.insert(
                 service.name.clone(),
                 DeclaredServiceRecord {
+                    package_state_key: InstalledPackageIdentity::from_legacy_receipt(receipt)
+                        .state_key(),
                     package: receipt.name.clone(),
                     service: service.clone(),
                 },
@@ -418,7 +422,8 @@ fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServ
         let activation = activation_records
             .iter()
             .find(|activation| {
-                activation.package == record.package && activation.integration_key == integration_key
+                activation.package_state_key == record.package_state_key
+                    && activation.integration_key == integration_key
             })
             .cloned();
         rows.push(ManagedServiceRow {

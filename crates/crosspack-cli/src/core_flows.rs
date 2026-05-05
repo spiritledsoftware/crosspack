@@ -1908,6 +1908,18 @@ fn activate_enabled_services_for_install(
         let mut executor = SystemActivationCommandExecutor;
         let outcome = apply_service_plan(&mut executor, &plan);
         if outcome.reason_code != IntegrationReasonCode::Ok {
+            if let Err(rollback_err) = replay_failed_service_activation_rollback(
+                host,
+                &outcome.rollback,
+            ) {
+                return Err(anyhow!(
+                    "service activation failed package={} service={} reason={} rollback_failed={}",
+                    package_name,
+                    name,
+                    outcome.reason_code.as_str(),
+                    rollback_err
+                ));
+            }
             return Err(anyhow!(
                 "service activation failed package={} service={} reason={}",
                 package_name,
@@ -1929,6 +1941,39 @@ fn activate_enabled_services_for_install(
             reason_code: outcome.reason_code,
         });
         write_integration_activation_state(layout, &records).map(|_| ())?;
+    }
+    Ok(())
+}
+
+fn replay_failed_service_activation_rollback(
+    host: &HostActivationContext,
+    rollback: &[ActivationRollbackEntry],
+) -> Result<()> {
+    if rollback.is_empty() {
+        return Ok(());
+    }
+
+    let owners = rollback.iter().filter_map(|entry| {
+        let owner = match entry.operation {
+            ActivationRollbackOperation::RemoveCreatedSymlink
+            | ActivationRollbackOperation::RemoveCreatedWindowsShim
+            | ActivationRollbackOperation::RemoveCreatedServiceMetadata => entry.created_owner.clone(),
+            ActivationRollbackOperation::RestoreOwnedSymlink
+            | ActivationRollbackOperation::RestoreOwnedWindowsShim
+            | ActivationRollbackOperation::RestoreOwnedServiceMetadata => entry.expected_current_owner.clone(),
+        }?;
+        Some((entry.path.clone(), owner))
+    });
+    let mut fs = RealActivationFs::new(host.platform, owners);
+    for entry in rollback.iter().rev() {
+        let outcome = replay_activation_rollback_entry_with_fs(&mut fs, entry);
+        if outcome.reason_code != IntegrationReasonCode::Ok {
+            return Err(anyhow!(
+                "path={} reason={}",
+                entry.path,
+                outcome.reason_code.as_str()
+            ));
+        }
     }
     Ok(())
 }

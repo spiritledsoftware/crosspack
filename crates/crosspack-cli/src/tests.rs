@@ -5985,25 +5985,24 @@ ripgrep-legacy = "*"
     fn managed_services_list_reports_applied_false_for_ok_but_stopped_activation() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
-        write_install_receipt(
-            &layout,
-            &InstallReceipt {
-                name: "caddy".to_string(),
-                version: "1.0.0".to_string(),
-                dependencies: Vec::new(),
-                target: Some("x86_64-unknown-linux-gnu".to_string()),
-                artifact_url: None,
-                artifact_sha256: None,
-                cache_path: None,
-                exposed_bins: Vec::new(),
-                exposed_completions: Vec::new(),
-                snapshot_id: None,
-                install_mode: InstallMode::Managed,
-                install_reason: InstallReason::Root,
-                install_status: "installed".to_string(),
-                installed_at_unix: 1,
-            },
-        )
+        let receipt = InstallReceipt {
+            name: "caddy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let package_state_key = InstalledPackageIdentity::from_legacy_receipt(&receipt).state_key();
+        write_install_receipt(&layout, &receipt)
         .expect("must write receipt");
         write_declared_services_state(
             &layout,
@@ -6016,18 +6015,32 @@ ripgrep-legacy = "*"
         .expect("must write declared services");
         write_integration_activation_state(
             &layout,
-            &[IntegrationActivationRecord {
-                package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
-                package: "caddy".to_string(),
-                integration_key: "service:caddy".to_string(),
-                kind: "service".to_string(),
-                adapter: IntegrationAdapterKind::SystemdUser,
-                scope: IntegrationActivationScope::User,
-                desired_state: IntegrationDesiredState::Projected,
-                applied_state: IntegrationAppliedState::Stopped,
-                host_path: Some("systemd-user:caddy.service".to_string()),
-                reason_code: IntegrationReasonCode::Ok,
-            }],
+            &[
+                IntegrationActivationRecord {
+                    package_state_key: "stale--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+                    package: "caddy".to_string(),
+                    integration_key: "service:caddy".to_string(),
+                    kind: "service".to_string(),
+                    adapter: IntegrationAdapterKind::SystemdUser,
+                    scope: IntegrationActivationScope::User,
+                    desired_state: IntegrationDesiredState::Running,
+                    applied_state: IntegrationAppliedState::Running,
+                    host_path: Some("systemd-user:caddy.service".to_string()),
+                    reason_code: IntegrationReasonCode::Ok,
+                },
+                IntegrationActivationRecord {
+                    package_state_key,
+                    package: "caddy".to_string(),
+                    integration_key: "service:caddy".to_string(),
+                    kind: "service".to_string(),
+                    adapter: IntegrationAdapterKind::SystemdUser,
+                    scope: IntegrationActivationScope::User,
+                    desired_state: IntegrationDesiredState::Projected,
+                    applied_state: IntegrationAppliedState::Stopped,
+                    host_path: Some("systemd-user:caddy.service".to_string()),
+                    reason_code: IntegrationReasonCode::Ok,
+                },
+            ],
         )
         .expect("must seed activation state");
 
@@ -9945,6 +9958,65 @@ old-cc = "<2.0.0"
         assert!(
             !journal.contains("RemoveCreatedServiceMetadata"),
             "synthetic service rollback must not be journaled: {journal}"
+        );
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn service_activation_transaction_failure_removes_copied_launch_agent() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let prefix = layout.prefix().to_path_buf();
+        let source_path = prefix
+            .join("share")
+            .join("integrations")
+            .join("agents")
+            .join("caddy.plist");
+        std::fs::create_dir_all(source_path.parent().expect("source must have parent"))
+            .expect("must create source parent");
+        std::fs::write(&source_path, b"<plist><dict/></plist>").expect("must write source plist");
+        let home = prefix.join("home").join("user");
+        let launch_agent = home
+            .join("Library")
+            .join("LaunchAgents")
+            .join("caddy.plist");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: None,
+            macos_launch_agent: Some("agents/caddy.plist".to_string()),
+            windows_service: None,
+            enable: true,
+        };
+        let projections = projected_integrations("caddy", &integration)
+            .expect("must project service integration");
+        write_integration_state(&layout, "caddy", &projections)
+            .expect("must seed projected integration state");
+        let host = HostActivationContext::macos()
+            .with_prefix(prefix.to_str().expect("prefix must be utf-8"))
+            .with_home(home.to_str().expect("home must be utf-8"));
+
+        let err = activate_enabled_services_for_install(
+            &layout,
+            "caddy",
+            "default--aarch64-apple-darwin--core--caddy",
+            &host,
+            std::slice::from_ref(&integration),
+            &projections,
+        )
+        .expect_err("launchctl failure should fail closed");
+
+        assert!(
+            err.to_string().contains("service activation failed"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !launch_agent.exists(),
+            "failed install-time activation must remove copied launch agent"
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty()
         );
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
