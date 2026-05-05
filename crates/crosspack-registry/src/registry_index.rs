@@ -31,6 +31,11 @@ pub struct PackageSkipDiagnostic {
     pub detail: String,
 }
 
+type PackageManifestSet = (String, Vec<PackageManifest>);
+type PackageDiagnostics = Vec<PackageSkipDiagnostic>;
+type PackageManifestSetsWithDiagnostics = (Vec<PackageManifestSet>, PackageDiagnostics);
+type SourcePackageVersionsWithDiagnostics = (Option<PackageManifestSet>, PackageDiagnostics);
+
 #[derive(Debug, Clone)]
 struct ConfiguredSnapshotSource {
     name: String,
@@ -76,12 +81,7 @@ impl RegistryIndex {
         Ok((names, diagnostics))
     }
 
-    fn package_manifests_with_diagnostics(
-        &self,
-    ) -> Result<(
-        Vec<(String, Vec<PackageManifest>)>,
-        Vec<PackageSkipDiagnostic>,
-    )> {
+    fn package_manifests_with_diagnostics(&self) -> Result<PackageManifestSetsWithDiagnostics> {
         let mut packages = Vec::new();
         let mut diagnostics = Vec::new();
         let source = self.root.display().to_string();
@@ -571,10 +571,7 @@ impl ConfiguredRegistryIndex {
     pub fn package_versions_with_source_and_diagnostics(
         &self,
         package: &str,
-    ) -> Result<(
-        Option<(String, Vec<PackageManifest>)>,
-        Vec<PackageSkipDiagnostic>,
-    )> {
+    ) -> Result<SourcePackageVersionsWithDiagnostics> {
         let mut diagnostics = Vec::new();
         for source in &self.sources {
             let (manifests, mut source_diagnostics) = source

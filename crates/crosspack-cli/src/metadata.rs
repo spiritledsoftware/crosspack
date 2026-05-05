@@ -4,6 +4,10 @@ enum MetadataBackend {
     Configured(ConfiguredRegistryIndex),
 }
 
+type SourcePackageManifests = (String, Vec<PackageManifest>);
+type PackageDiagnostics = Vec<PackageSkipDiagnostic>;
+type SearchPackageVersions = (Option<SourcePackageManifests>, PackageDiagnostics);
+
 impl MetadataBackend {
     fn search_names_with_diagnostics(
         &self,
@@ -53,7 +57,7 @@ impl MetadataBackend {
     fn package_versions_with_source_for_search(
         &self,
         name: &str,
-    ) -> Result<(Option<(String, Vec<PackageManifest>)>, Vec<PackageSkipDiagnostic>)> {
+    ) -> Result<SearchPackageVersions> {
         match self {
             Self::Legacy(index) => {
                 let (manifests, diagnostics) = index.package_versions_with_diagnostics(name)?;
