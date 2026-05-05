@@ -60,9 +60,18 @@ impl RegistryIndex {
         &self,
         needle: &str,
     ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
-        let (mut names, diagnostics) = self.package_names_with_diagnostics()?;
-        names.retain(|name| name.contains(needle));
-
+        let mut diagnostics = Vec::new();
+        let source = self.root.display().to_string();
+        let mut names = Vec::new();
+        for name in self.package_record_names()? {
+            if !name.contains(needle) {
+                continue;
+            }
+            let manifests = self.package_versions_tolerant(&name, &source, &mut diagnostics)?;
+            if !manifests.is_empty() {
+                names.push(name);
+            }
+        }
         names.sort();
         Ok((names, diagnostics))
     }
@@ -291,6 +300,7 @@ fn is_skippable_package_poison(error: &anyhow::Error) -> bool {
     }
     rendered.contains("failed parsing package template")
         || rendered.contains("failed reading package template")
+        || rendered.contains("failed to read release directory")
         || rendered.contains("failed parsing release metadata")
         || rendered.contains("failed reading release file")
         || rendered.contains("failed parsing merged manifest")
@@ -488,8 +498,19 @@ impl ConfiguredRegistryIndex {
         &self,
         needle: &str,
     ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
-        let (mut names, diagnostics) = self.package_names_with_diagnostics()?;
-        names.retain(|name| name.contains(needle));
+        let mut deduped = HashSet::new();
+        let mut diagnostics = Vec::new();
+        for source in &self.sources {
+            let (names, mut source_diagnostics) =
+                source.index.search_names_with_diagnostics(needle)?;
+            retag_diagnostics_source(&mut source_diagnostics, &source.name);
+            diagnostics.append(&mut source_diagnostics);
+            for name in names {
+                deduped.insert(name);
+            }
+        }
+
+        let mut names: Vec<String> = deduped.into_iter().collect();
         names.sort();
         Ok((names, diagnostics))
     }

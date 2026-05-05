@@ -2007,6 +2007,12 @@ fn search_names_skips_poisoned_package_records() {
     assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
     assert_eq!(diagnostics[0].source, root.display().to_string());
 
+    let (narrow_names, narrow_diagnostics) = index
+        .search_names_with_diagnostics("good")
+        .expect("narrow search must ignore unrelated poisoned package");
+    assert_eq!(narrow_names, vec!["good".to_string()]);
+    assert!(narrow_diagnostics.is_empty());
+
     let direct_error = index
         .package_versions("bad")
         .expect_err("direct selected package load must remain strict");
@@ -2034,10 +2040,10 @@ fn search_names_skips_signed_unreadable_package_template_with_diagnostics() {
 
     let index = RegistryIndex::open(&root);
     let (names, diagnostics) = index
-        .search_names_with_diagnostics("good")
+        .search_names_with_diagnostics("bad")
         .expect("broad search must skip unreadable package-local metadata");
 
-    assert_eq!(names, vec!["good".to_string()]);
+    assert!(names.is_empty());
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].package, "bad");
     assert!(diagnostics[0]
@@ -2067,10 +2073,10 @@ fn search_names_skips_orphaned_package_template_with_diagnostics() {
 
     let index = RegistryIndex::open(&root);
     let (names, diagnostics) = index
-        .search_names_with_diagnostics("good")
+        .search_names_with_diagnostics("orphaned")
         .expect("broad search must skip orphaned package-local metadata");
 
-    assert_eq!(names, vec!["good".to_string()]);
+    assert!(names.is_empty());
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].package, "orphaned");
     assert!(diagnostics[0].detail.contains("orphaned package template"));
@@ -2079,7 +2085,37 @@ fn search_names_skips_orphaned_package_template_with_diagnostics() {
 }
 
 #[test]
-fn search_names_fails_when_unmatched_package_signature_is_missing() {
+fn search_names_skips_unreadable_release_directory_with_diagnostics() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(root.join("releases")).expect("must create releases root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+    write_signed_package_template(&root, &signing_key, "bad", &package_template_toml("bad"));
+    fs::write(root.join("releases").join("bad"), "not a directory")
+        .expect("must create unreadable release directory fixture");
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("bad")
+        .expect("broad search must skip unreadable release directory");
+
+    assert!(names.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert!(diagnostics[0]
+        .detail
+        .contains("failed to read release directory"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_fails_when_matched_package_signature_is_missing() {
     let root = test_registry_root();
     let signing_key = signing_key();
     fs::create_dir_all(&root).expect("must create registry root");
@@ -2107,8 +2143,8 @@ fn search_names_fails_when_unmatched_package_signature_is_missing() {
 
     let index = RegistryIndex::open(&root);
     let err = index
-        .search_names_with_diagnostics("good")
-        .expect_err("unmatched missing signature must remain fatal");
+        .search_names_with_diagnostics("unrelated")
+        .expect_err("matched missing signature must remain fatal");
     assert!(err.to_string().contains(".sig"));
 
     let _ = fs::remove_dir_all(&root);
