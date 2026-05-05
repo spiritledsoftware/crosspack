@@ -1548,6 +1548,7 @@ fn service_adapter_macos_plist_install_and_remove_use_typed_fs_with_rollback() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn service_adapter_macos_real_fs_copies_and_removes_launch_agent() {
     let layout = test_layout();
