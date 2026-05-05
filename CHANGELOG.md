@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.1](https://github.com/spiritledsoftware/crosspack/compare/v0.14.0...v0.14.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* filter service integrations by host platform ([#124](https://github.com/spiritledsoftware/crosspack/issues/124)) ([4c13a52](https://github.com/spiritledsoftware/crosspack/commit/4c13a52fc2da8c5fd7a1da1a02160c911df54838))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to bf0f26dc08aab01369b8380ffccdc77bdef649f7 ([e5ed745](https://github.com/spiritledsoftware/crosspack/commit/e5ed745c4cc4f6b22974c8b0c16966c45cf52bb0))
+
 ## [0.14.0](https://github.com/spiritledsoftware/crosspack/compare/v0.13.1...v0.14.0) (2026-05-05)
 
 
