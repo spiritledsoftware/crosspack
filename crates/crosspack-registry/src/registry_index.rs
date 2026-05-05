@@ -23,6 +23,14 @@ pub struct ConfiguredRegistryIndex {
     sources: Vec<ConfiguredSnapshotSource>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PackageSkipDiagnostic {
+    pub package: String,
+    pub reason_code: &'static str,
+    pub source: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone)]
 struct ConfiguredSnapshotSource {
     name: String,
@@ -39,33 +47,76 @@ impl RegistryIndex {
     }
 
     pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
+        let (names, _) = self.search_names_with_diagnostics(needle)?;
+        Ok(names)
+    }
+
+    pub fn search_names_with_diagnostics(
+        &self,
+        needle: &str,
+    ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
+        let (mut names, diagnostics) = self.package_names_with_diagnostics()?;
+        names.retain(|name| name.contains(needle));
+
+        names.sort();
+        Ok((names, diagnostics))
+    }
+
+    pub fn package_names(&self) -> Result<Vec<String>> {
+        let (names, _) = self.package_names_with_diagnostics()?;
+        Ok(names)
+    }
+
+    pub fn package_names_with_diagnostics(
+        &self,
+    ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
         let mut names = Vec::new();
-        for name in self.package_names()? {
-            if name.contains(needle) {
-                let manifests = self.package_versions(&name)?;
-                if !manifests.is_empty() {
-                    names.push(name);
+        let mut diagnostics = Vec::new();
+        let source = self.root.display().to_string();
+        for name in self.package_record_names()? {
+            let manifests = self.package_versions_tolerant(&name, &source, &mut diagnostics)?;
+            if !manifests.is_empty() {
+                names.push(name);
+            }
+        }
+        names.sort();
+        Ok((names, diagnostics))
+    }
+
+    fn package_record_names(&self) -> Result<Vec<String>> {
+        let mut names = HashSet::new();
+        let releases_root = self.root.join("releases");
+        if releases_root.exists() {
+            for entry in fs::read_dir(releases_root).context("failed to read registry releases")? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    names.insert(entry.file_name().to_string_lossy().to_string());
                 }
             }
         }
 
-        names.sort();
-        Ok(names)
-    }
-
-    pub fn package_names(&self) -> Result<Vec<String>> {
-        let releases_root = self.root.join("releases");
-        if !releases_root.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut names = Vec::new();
-        for entry in fs::read_dir(releases_root).context("failed to read registry releases")? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                names.push(entry.file_name().to_string_lossy().to_string());
+        let packages_root = self.root.join("packages");
+        if packages_root.exists() {
+            for entry in fs::read_dir(packages_root).context("failed to read registry packages")? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+                    continue;
+                }
+                let Some(package) = path.file_stem().and_then(|value| value.to_str()) else {
+                    anyhow::bail!(
+                        "failed reading registry packages: non-utf8 package filename {}",
+                        path.display()
+                    );
+                };
+                names.insert(package.to_string());
             }
         }
+
+        let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
         Ok(names)
     }
@@ -162,11 +213,17 @@ impl RegistryIndex {
     }
 
     pub fn provider_versions(&self, capability: &str) -> Result<Vec<PackageManifest>> {
+        let (providers, _) = self.provider_versions_with_diagnostics(capability)?;
+        Ok(providers)
+    }
+
+    pub fn provider_versions_with_diagnostics(
+        &self,
+        capability: &str,
+    ) -> Result<(Vec<PackageManifest>, Vec<PackageSkipDiagnostic>)> {
         let mut providers = Vec::new();
-        for package_name in self.package_names()? {
-            if !self.package_mentions_capability(&package_name, capability)? {
-                continue;
-            }
+        let (package_names, diagnostics) = self.package_names_with_diagnostics()?;
+        for package_name in package_names {
             providers.extend(self.package_versions(&package_name)?.into_iter().filter(
                 |manifest| {
                     manifest
@@ -176,59 +233,58 @@ impl RegistryIndex {
                 },
             ));
         }
-        Ok(providers)
+        Ok((providers, diagnostics))
     }
 
-    fn package_mentions_capability(&self, package: &str, capability: &str) -> Result<bool> {
-        let package_template_path = self.root.join("packages").join(format!("{package}.toml"));
-        if file_mentions_capability(&package_template_path, capability)? {
-            return Ok(true);
-        }
+    pub fn package_versions_with_diagnostics(
+        &self,
+        package: &str,
+    ) -> Result<(Vec<PackageManifest>, Vec<PackageSkipDiagnostic>)> {
+        let mut diagnostics = Vec::new();
+        let source = self.root.display().to_string();
+        let manifests = self.package_versions_tolerant(package, &source, &mut diagnostics)?;
+        Ok((manifests, diagnostics))
+    }
 
-        let release_dir = self.root.join("releases").join(package);
-        if !release_dir.exists() {
-            return Ok(false);
+    fn package_versions_tolerant(
+        &self,
+        package: &str,
+        source: &str,
+        diagnostics: &mut Vec<PackageSkipDiagnostic>,
+    ) -> Result<Vec<PackageManifest>> {
+        match self.package_versions(package) {
+            Ok(manifests) => Ok(manifests),
+            Err(error) => {
+                if !is_skippable_package_poison(&error) {
+                    return Err(error);
+                }
+                diagnostics.push(PackageSkipDiagnostic {
+                    package: package.to_string(),
+                    reason_code: "package-metadata-invalid",
+                    source: source.to_string(),
+                    detail: error.to_string(),
+                });
+                Ok(Vec::new())
+            }
         }
-        for entry in fs::read_dir(&release_dir)
-            .with_context(|| format!("failed to read release directory: {package}"))?
-        {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|v| v.to_str()) != Some("toml") {
-                continue;
-            }
-            if file_mentions_capability(&path, capability)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 
-fn file_mentions_capability(path: &Path, capability: &str) -> Result<bool> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err).with_context(|| format!("failed reading {}", path.display())),
-    };
-    if !content.contains("provides") || !content.contains(capability) {
-        return Ok(false);
+fn is_skippable_package_poison(error: &anyhow::Error) -> bool {
+    let rendered = error.to_string();
+    if rendered.contains("signature")
+        || rendered.contains("trusted registry key")
+        || rendered.contains("registry.pub")
+        || rendered.contains("fingerprint")
+    {
+        return false;
     }
-    let value = content
-        .parse::<Table>()
-        .with_context(|| format!("failed parsing provider metadata hint: {}", path.display()))?;
-    Ok(value
-        .get("provides")
-        .and_then(Value::as_array)
-        .map(|provides| {
-            provides
-                .iter()
-                .any(|provided| provided.as_str() == Some(capability))
-        })
-        .unwrap_or(false))
+    rendered.contains("failed parsing package template")
+        || rendered.contains("failed parsing release metadata")
+        || rendered.contains("failed parsing merged manifest")
+        || rendered.contains("failed serializing merged manifest")
+        || rendered.contains("expected TOML table")
+        || rendered.contains("not valid UTF-8")
 }
 
 fn verify_signed_toml_document(
@@ -411,29 +467,42 @@ impl ConfiguredRegistryIndex {
     }
 
     pub fn search_names(&self, needle: &str) -> Result<Vec<String>> {
-        let mut deduped = HashSet::new();
-        for source in &self.sources {
-            for name in source.index.search_names(needle)? {
-                deduped.insert(name);
-            }
-        }
-
-        let mut names: Vec<String> = deduped.into_iter().collect();
-        names.sort();
+        let (names, _) = self.search_names_with_diagnostics(needle)?;
         Ok(names)
     }
 
+    pub fn search_names_with_diagnostics(
+        &self,
+        needle: &str,
+    ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
+        let (mut names, diagnostics) = self.package_names_with_diagnostics()?;
+        names.retain(|name| name.contains(needle));
+        names.sort();
+        Ok((names, diagnostics))
+    }
+
     pub fn package_names(&self) -> Result<Vec<String>> {
+        let (names, _) = self.package_names_with_diagnostics()?;
+        Ok(names)
+    }
+
+    pub fn package_names_with_diagnostics(
+        &self,
+    ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
         let mut deduped = HashSet::new();
+        let mut diagnostics = Vec::new();
         for source in &self.sources {
-            for name in source.index.package_names()? {
+            let (names, mut source_diagnostics) = source.index.package_names_with_diagnostics()?;
+            retag_diagnostics_source(&mut source_diagnostics, &source.name);
+            diagnostics.append(&mut source_diagnostics);
+            for name in names {
                 deduped.insert(name);
             }
         }
 
         let mut names: Vec<String> = deduped.into_iter().collect();
         names.sort();
-        Ok(names)
+        Ok((names, diagnostics))
     }
 
     pub fn package_versions(&self, package: &str) -> Result<Vec<PackageManifest>> {
@@ -444,16 +513,31 @@ impl ConfiguredRegistryIndex {
     }
 
     pub fn provider_versions(&self, capability: &str) -> Result<Vec<PackageManifest>> {
-        let mut providers = Vec::new();
-        for source in &self.sources {
-            providers.extend(source.index.provider_versions(capability).with_context(|| {
-                format!(
-                    "failed loading provider metadata for capability '{capability}' from configured source '{}'",
-                    source.name
-                )
-            })?);
-        }
+        let (providers, _) = self.provider_versions_with_diagnostics(capability)?;
         Ok(providers)
+    }
+
+    pub fn provider_versions_with_diagnostics(
+        &self,
+        capability: &str,
+    ) -> Result<(Vec<PackageManifest>, Vec<PackageSkipDiagnostic>)> {
+        let mut providers = Vec::new();
+        let mut diagnostics = Vec::new();
+        for source in &self.sources {
+            let (mut source_providers, mut source_diagnostics) = source
+                .index
+                .provider_versions_with_diagnostics(capability)
+                .with_context(|| {
+                    format!(
+                        "failed loading provider metadata for capability '{capability}' from configured source '{}'",
+                        source.name
+                    )
+                })?;
+            retag_diagnostics_source(&mut source_diagnostics, &source.name);
+            providers.append(&mut source_providers);
+            diagnostics.append(&mut source_diagnostics);
+        }
+        Ok((providers, diagnostics))
     }
 
     pub fn package_versions_with_source(
@@ -472,5 +556,38 @@ impl ConfiguredRegistryIndex {
             }
         }
         Ok(None)
+    }
+
+    pub fn package_versions_with_source_and_diagnostics(
+        &self,
+        package: &str,
+    ) -> Result<(
+        Option<(String, Vec<PackageManifest>)>,
+        Vec<PackageSkipDiagnostic>,
+    )> {
+        let mut diagnostics = Vec::new();
+        for source in &self.sources {
+            let (manifests, mut source_diagnostics) = source
+                .index
+                .package_versions_with_diagnostics(package)
+                .with_context(|| {
+                    format!(
+                        "failed loading package '{package}' from configured source '{}'",
+                        source.name
+                    )
+                })?;
+            retag_diagnostics_source(&mut source_diagnostics, &source.name);
+            diagnostics.append(&mut source_diagnostics);
+            if !manifests.is_empty() {
+                return Ok((Some((source.name.clone(), manifests)), diagnostics));
+            }
+        }
+        Ok((None, diagnostics))
+    }
+}
+
+fn retag_diagnostics_source(diagnostics: &mut [PackageSkipDiagnostic], source: &str) {
+    for diagnostic in diagnostics {
+        diagnostic.source = source.to_string();
     }
 }

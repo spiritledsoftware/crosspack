@@ -84,9 +84,12 @@ fn run_cli(cli: Cli) -> Result<()> {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);
             let backend = select_metadata_backend(cli.registry_root.as_deref(), &layout)?;
-            let results = run_search_command(&backend, &query)?;
+            let outcome = run_search_command(&backend, &query)?;
+            for diagnostic in &outcome.skipped_packages {
+                eprintln!("{}", format_package_skip_warning(diagnostic));
+            }
             let output_style = current_output_style();
-            let lines = format_search_results_for_style(output_style, &results, &query);
+            let lines = format_search_results_for_style(output_style, &outcome.results, &query);
             for line in lines {
                 println!("{line}");
             }

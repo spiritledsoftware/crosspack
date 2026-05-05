@@ -5,10 +5,13 @@ enum MetadataBackend {
 }
 
 impl MetadataBackend {
-    fn search_names(&self, query: &str) -> Result<Vec<String>> {
+    fn search_names_with_diagnostics(
+        &self,
+        query: &str,
+    ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
         match self {
-            Self::Legacy(index) => index.search_names(query),
-            Self::Configured(index) => index.search_names(query),
+            Self::Legacy(index) => index.search_names_with_diagnostics(query),
+            Self::Configured(index) => index.search_names_with_diagnostics(query),
         }
     }
 
@@ -46,6 +49,23 @@ impl MetadataBackend {
             Self::Configured(index) => index.package_versions_with_source(name),
         }
     }
+
+    fn package_versions_with_source_for_search(
+        &self,
+        name: &str,
+    ) -> Result<(Option<(String, Vec<PackageManifest>)>, Vec<PackageSkipDiagnostic>)> {
+        match self {
+            Self::Legacy(index) => {
+                let (manifests, diagnostics) = index.package_versions_with_diagnostics(name)?;
+                if manifests.is_empty() {
+                    Ok((None, diagnostics))
+                } else {
+                    Ok((Some((index.root().display().to_string(), manifests)), diagnostics))
+                }
+            }
+            Self::Configured(index) => index.package_versions_with_source_and_diagnostics(name),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,10 +84,16 @@ struct SearchResult {
     match_kind: SearchMatchKind,
 }
 
-fn run_search_command(backend: &MetadataBackend, query: &str) -> Result<Vec<SearchResult>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchCommandOutcome {
+    results: Vec<SearchResult>,
+    skipped_packages: Vec<PackageSkipDiagnostic>,
+}
+
+fn run_search_command(backend: &MetadataBackend, query: &str) -> Result<SearchCommandOutcome> {
     let query = query.trim();
-    let names = backend
-        .search_names(query)
+    let (names, mut skipped_packages) = backend
+        .search_names_with_diagnostics(query)
         .with_context(|| SEARCH_METADATA_GUIDANCE)?;
 
     let mut results = Vec::new();
@@ -75,9 +101,10 @@ fn run_search_command(backend: &MetadataBackend, query: &str) -> Result<Vec<Sear
         let Some(match_kind) = classify_search_match(&name, query) else {
             continue;
         };
-        let sourced = backend
-            .package_versions_with_source(&name)
+        let (sourced, source_diagnostics) = backend
+            .package_versions_with_source_for_search(&name)
             .with_context(|| SEARCH_METADATA_GUIDANCE)?;
+        append_unique_package_diagnostics(&mut skipped_packages, source_diagnostics);
         let Some((source, manifests)) = sourced else {
             continue;
         };
@@ -99,7 +126,28 @@ fn run_search_command(backend: &MetadataBackend, query: &str) -> Result<Vec<Sear
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| left.source.cmp(&right.source))
     });
-    Ok(results)
+    Ok(SearchCommandOutcome {
+        results,
+        skipped_packages,
+    })
+}
+
+fn format_package_skip_warning(diagnostic: &PackageSkipDiagnostic) -> String {
+    format!(
+        "warning: registry_package_skipped package={:?} reason={:?} source={:?} detail={:?}",
+        diagnostic.package, diagnostic.reason_code, diagnostic.source, diagnostic.detail
+    )
+}
+
+fn append_unique_package_diagnostics(
+    diagnostics: &mut Vec<PackageSkipDiagnostic>,
+    candidates: Vec<PackageSkipDiagnostic>,
+) {
+    for candidate in candidates {
+        if !diagnostics.iter().any(|existing| existing == &candidate) {
+            diagnostics.push(candidate);
+        }
+    }
 }
 
 fn classify_search_match(name: &str, query: &str) -> Option<SearchMatchKind> {

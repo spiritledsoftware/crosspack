@@ -10,8 +10,7 @@ use crate::{
     compute_filesystem_snapshot_id, copy_source_to_temp, count_manifest_files,
     git_head_snapshot_id, read_snapshot_id, run_git_clone, run_git_command, unique_suffix,
     validate_community_recipe_catalog_path, validate_staged_registry_layout, write_snapshot_file,
-    RegistryIndex, RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore,
-    SourceUpdateStatus,
+    RegistrySourceKind, RegistrySourceRecord, RegistrySourceStore, SourceUpdateStatus,
 };
 
 #[derive(Debug, Deserialize)]
@@ -368,16 +367,142 @@ pub(crate) fn verify_metadata_signature_policy(
     staged_root: &Path,
     source_name: &str,
 ) -> Result<()> {
-    let index = RegistryIndex::open(staged_root);
     let package_names = collect_metadata_packages(staged_root, source_name)?;
+    let trusted_key_path = staged_root.join("registry.pub");
+    let trusted_public_key_hex = fs::read_to_string(&trusted_key_path).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{source_name}' missing registry.pub {}",
+            trusted_key_path.display()
+        )
+    })?;
+    let trusted_public_key_hex = trusted_public_key_hex.trim();
 
-    for package in package_names {
-        index.package_versions(&package).with_context(|| {
+    for document_path in signed_metadata_documents(staged_root, source_name)? {
+        let document_bytes = fs::read(&document_path).with_context(|| {
             format!(
-                "source-metadata-invalid: source '{}' package '{}' failed metadata signature validation",
-                source_name, package
+                "source-metadata-invalid: source '{}' failed reading {}",
+                source_name,
+                document_path.display()
             )
         })?;
+        verify_signed_metadata_document(
+            source_name,
+            &document_path,
+            &document_bytes,
+            trusted_public_key_hex,
+        )?;
+    }
+
+    for package in &package_names {
+        let package_template_path = staged_root.join("packages").join(format!("{package}.toml"));
+        let release_dir = staged_root.join("releases").join(package);
+        if package_template_path.exists() && !release_dir.exists() {
+            anyhow::bail!(
+                "source-metadata-invalid: source '{}' orphaned package template without releases directory: package template {}, expected release directory {}",
+                source_name,
+                package_template_path.display(),
+                release_dir.display()
+            );
+        }
+        if release_dir.exists() && !package_template_path.exists() {
+            anyhow::bail!(
+                "source-metadata-invalid: source '{}' release directory {} missing package template {}",
+                source_name,
+                release_dir.display(),
+                package_template_path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn signed_metadata_documents(staged_root: &Path, source_name: &str) -> Result<Vec<PathBuf>> {
+    let mut documents = Vec::new();
+    let packages_root = staged_root.join("packages");
+    for entry in fs::read_dir(&packages_root).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed reading packages {}",
+            source_name,
+            packages_root.display()
+        )
+    })? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("toml") {
+            documents.push(path);
+        }
+    }
+
+    let releases_root = staged_root.join("releases");
+    for package_entry in fs::read_dir(&releases_root).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' failed reading releases {}",
+            source_name,
+            releases_root.display()
+        )
+    })? {
+        let package_entry = package_entry?;
+        if !package_entry.file_type()?.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(package_entry.path()).with_context(|| {
+            format!(
+                "source-metadata-invalid: source '{}' failed reading release package directory {}",
+                source_name,
+                package_entry.path().display()
+            )
+        })? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("toml") {
+                documents.push(path);
+            }
+        }
+    }
+
+    documents.sort();
+    Ok(documents)
+}
+
+fn verify_signed_metadata_document(
+    source_name: &str,
+    document_path: &Path,
+    document_bytes: &[u8],
+    trusted_public_key_hex: &str,
+) -> Result<()> {
+    let signature_path = document_path.with_extension("toml.sig");
+    let signature_hex = fs::read_to_string(&signature_path).with_context(|| {
+        format!(
+            "source-metadata-invalid: source '{}' missing metadata signature {}",
+            source_name,
+            signature_path.display()
+        )
+    })?;
+    let signature_hex = signature_hex.trim();
+
+    let signature_is_valid =
+        verify_ed25519_signature_hex(document_bytes, trusted_public_key_hex, signature_hex)
+            .with_context(|| {
+                format!(
+                    "source-metadata-invalid: source '{}' failed verifying metadata signature {}",
+                    source_name,
+                    signature_path.display()
+                )
+            })?;
+    if !signature_is_valid {
+        anyhow::bail!(
+            "source-metadata-invalid: source '{}' invalid metadata signature for document {}, signature {}",
+            source_name,
+            document_path.display(),
+            signature_path.display()
+        );
     }
 
     Ok(())

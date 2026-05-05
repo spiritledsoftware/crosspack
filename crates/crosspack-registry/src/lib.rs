@@ -7,7 +7,7 @@ mod source_store;
 mod source_sync;
 mod source_types;
 
-pub use registry_index::{ConfiguredRegistryIndex, RegistryIndex};
+pub use registry_index::{ConfiguredRegistryIndex, PackageSkipDiagnostic, RegistryIndex};
 pub use source_store::RegistrySourceStore;
 pub use source_types::{
     RegistrySourceCommunity, RegistrySourceKind, RegistrySourceRecord, RegistrySourceSnapshotState,
