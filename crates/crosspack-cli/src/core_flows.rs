@@ -1803,9 +1803,20 @@ fn sync_integration_projection_state(
     integrations: &[PackageIntegration],
 ) -> Result<Vec<IntegrationProjection>> {
     let previous_projections = read_identity_integration_state(layout, identity)?;
+    let host_platform = current_host_platform();
     let desired_projections = integrations
         .iter()
-        .map(|integration| projected_integrations(package_name, integration))
+        .map(|integration| {
+            projected_integrations(package_name, integration).map(|projections| {
+                projections
+                    .into_iter()
+                    .filter(|projection| {
+                        projection.kind != "service"
+                            || service_projection_matches_host(projection, host_platform)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
@@ -1831,11 +1842,12 @@ fn sync_integration_projection_state(
 
     let mut current_projections = Vec::new();
     for integration in integrations {
-        current_projections.extend(expose_integrations(
+        current_projections.extend(expose_integrations_for_host_platform(
             layout,
             install_root,
             package_name,
             integration,
+            host_platform,
         )?);
     }
 

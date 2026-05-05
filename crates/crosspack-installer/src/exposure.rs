@@ -6,7 +6,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::fs_utils::remove_file_if_exists;
-use crate::{GuiExposureAsset, InstalledPackageIdentity, IntegrationProjection, PrefixLayout};
+use crate::{
+    GuiExposureAsset, HostPlatform, InstalledPackageIdentity, IntegrationProjection, PrefixLayout,
+};
 
 const INTEGRATION_STATE_VERSION: u32 = 1;
 
@@ -467,6 +469,29 @@ pub fn expose_integrations(
     Ok(projections)
 }
 
+pub fn expose_integrations_for_host_platform(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    package_name: &str,
+    integration: &PackageIntegration,
+    platform: HostPlatform,
+) -> Result<Vec<IntegrationProjection>> {
+    let sources =
+        projected_integration_sources_for_host_platform(package_name, integration, platform)?;
+    let mut projections = Vec::new();
+    for (source, projection) in &sources {
+        let source_path = preflight_integration_source(install_root, source)?;
+        projections.push((source_path, projection.clone()));
+    }
+    for (source_path, projection) in &projections {
+        copy_integration_source(layout, source_path, projection)?;
+    }
+    Ok(projections
+        .into_iter()
+        .map(|(_, projection)| projection)
+        .collect())
+}
+
 fn preflight_integration_source(install_root: &Path, source: &str) -> Result<PathBuf> {
     let source_rel = validated_relative_integration_source_path(source)?;
     let source_path = install_root.join(source_rel);
@@ -640,6 +665,26 @@ fn projected_integration_sources(
     }
 }
 
+fn projected_integration_sources_for_host_platform(
+    package_name: &str,
+    integration: &PackageIntegration,
+    platform: HostPlatform,
+) -> Result<Vec<(String, IntegrationProjection)>> {
+    match integration {
+        PackageIntegration::Service { .. } => {
+            projected_integration_sources(package_name, integration).map(|sources| {
+                sources
+                    .into_iter()
+                    .filter(|(_, projection)| service_projection_matches_host(projection, platform))
+                    .collect()
+            })
+        }
+        PackageIntegration::DockerCliPlugin { .. } | PackageIntegration::PathPlugin { .. } => {
+            projected_integration_sources(package_name, integration)
+        }
+    }
+}
+
 fn push_service_projection(
     projections: &mut Vec<IntegrationProjection>,
     kind: &str,
@@ -661,6 +706,17 @@ fn push_service_projection(
             suffix
         ),
     });
+}
+
+pub fn service_projection_matches_host(
+    projection: &IntegrationProjection,
+    platform: HostPlatform,
+) -> bool {
+    match platform {
+        HostPlatform::Linux => projection.rel_path.ends_with(".service"),
+        HostPlatform::Macos => projection.rel_path.ends_with(".launchd.plist"),
+        HostPlatform::Windows => projection.rel_path.ends_with(".windows-service.toml"),
+    }
 }
 
 fn validate_integration_projections(

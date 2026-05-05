@@ -856,14 +856,6 @@ fn select_host_service_projection(
     }
 }
 
-fn service_projection_matches_host(projection: &IntegrationProjection, platform: HostPlatform) -> bool {
-    match platform {
-        HostPlatform::Linux => projection.rel_path.ends_with(".service"),
-        HostPlatform::Macos => projection.rel_path.ends_with(".launchd.plist"),
-        HostPlatform::Windows => projection.rel_path.ends_with(".windows-service.toml"),
-    }
-}
-
 fn format_projected_integration_line(row: &ProjectedIntegrationRow) -> String {
     if let Some(activation) = &row.activation {
         return format_integration_activation_row(row, activation);

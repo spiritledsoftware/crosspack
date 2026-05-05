@@ -5757,6 +5757,56 @@ fn expose_service_integration_projects_platform_sources() {
 }
 
 #[test]
+fn expose_service_integration_for_host_platform_skips_other_platform_sources() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("syncthing", "2.0.16");
+    fs::create_dir_all(package_dir.join("etc/linux-systemd/user"))
+        .expect("must create service dir");
+    fs::write(
+        package_dir.join("etc/linux-systemd/user/syncthing.service"),
+        b"[Service]\n",
+    )
+    .expect("must write service unit");
+
+    let integration = PackageIntegration::Service {
+        name: "syncthing".to_string(),
+        linux_systemd_user: Some("etc/linux-systemd/user/syncthing.service".to_string()),
+        macos_launch_agent: Some("etc/macos-launchd/user/syncthing.plist".to_string()),
+        windows_service: Some("etc/windows-service/syncthing.xml".to_string()),
+        enable: false,
+    };
+    let projected = expose_integrations_for_host_platform(
+        &layout,
+        &package_dir,
+        "syncthing",
+        &integration,
+        HostPlatform::Linux,
+    )
+    .expect("linux install must not preflight macos or windows service sources");
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].kind, "service");
+    assert_eq!(projected[0].key, "service:syncthing");
+    assert_eq!(
+        projected[0].rel_path,
+        "services/syncthing/syncthing.service"
+    );
+    assert!(layout
+        .integrations_dir()
+        .join("services/syncthing/syncthing.service")
+        .exists());
+    assert!(!layout
+        .integrations_dir()
+        .join("services/syncthing/syncthing.launchd.plist")
+        .exists());
+    assert!(!layout
+        .integrations_dir()
+        .join("services/syncthing/syncthing.windows-service.toml")
+        .exists());
+}
+
+#[test]
 fn expose_service_integration_preflights_all_platform_sources_before_copying() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
