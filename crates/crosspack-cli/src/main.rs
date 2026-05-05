@@ -51,9 +51,9 @@ use crosspack_installer::{
     read_active_transaction, set_active_transaction, write_transaction_metadata,
 };
 use crosspack_registry::{
-    ConfiguredRegistryIndex, RegistryIndex, RegistrySourceKind, RegistrySourceRecord,
-    RegistrySourceSnapshotState, RegistrySourceStore, RegistrySourceWithSnapshotState,
-    SourceUpdateResult, SourceUpdateStatus,
+    ConfiguredRegistryIndex, PackageSkipDiagnostic, RegistryIndex, RegistrySourceKind,
+    RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
+    RegistrySourceWithSnapshotState, SourceUpdateResult, SourceUpdateStatus,
 };
 use crosspack_resolver::{
     plan_from_resolved_graph_with_installed, resolve_dependency_graph_with_installed_manifests,

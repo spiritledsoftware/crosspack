@@ -658,6 +658,66 @@ fn update_filesystem_source_writes_ready_snapshot() {
 }
 
 #[test]
+fn update_filesystem_source_accepts_signed_package_poison() {
+    let root = test_registry_root();
+    let source_root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&source_root).expect("must create source root");
+    fs::write(
+        source_root.join("registry.pub"),
+        public_key_hex(&signing_key),
+    )
+    .expect("must write registry public key");
+
+    let good_dir = source_root.join("releases").join("good");
+    write_signed_package_template(
+        &source_root,
+        &signing_key,
+        "good",
+        &package_template_toml_with_license("good", "MIT"),
+    );
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let bad_dir = source_root.join("releases").join("bad");
+    write_signed_package_template(&source_root, &signing_key, "bad", "name = [\"bad\"\n");
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let store = RegistrySourceStore::new(&root);
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "official",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let updated = store
+        .update_sources(&["official".to_string()])
+        .expect("signed package poison must not block source readiness");
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].status, SourceUpdateStatus::Updated);
+    let cache_root = root.join("cache").join("official");
+    assert!(cache_root.join("snapshot.json").exists());
+    assert!(source_has_ready_snapshot(&cache_root).expect("must read snapshot"));
+
+    let index = RegistryIndex::open(&cache_root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("")
+        .expect("broad search must skip signed poison");
+    assert_eq!(names, vec!["good".to_string()]);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn update_filesystem_source_fails_on_fingerprint_mismatch() {
     let root = test_registry_root();
     let source_root = filesystem_source_fixture();
@@ -941,6 +1001,172 @@ fn update_filesystem_source_fails_when_orphaned_package_template_signature_is_mi
         rendered.contains("packages") && rendered.contains(".sig"),
         "expected package signature verification failure, got: {rendered}"
     );
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_package_template_signature_is_invalid() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    fs::write(source_root.join("packages").join("ripgrep.toml.sig"), "00")
+        .expect("must corrupt package template signature");
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    let rendered = results[0]
+        .error
+        .as_deref()
+        .expect("must include error message");
+    let rendered_path = rendered.replace('\\', "/");
+    assert!(rendered.contains("source-metadata-invalid"));
+    assert!(rendered.contains("metadata signature"));
+    assert!(rendered_path.contains("packages/ripgrep.toml"));
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_filesystem_source_fails_when_release_signature_is_invalid() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    fs::write(
+        source_root
+            .join("releases")
+            .join("ripgrep")
+            .join("14.1.0.toml.sig"),
+        "00",
+    )
+    .expect("must corrupt release signature");
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    let rendered = results[0]
+        .error
+        .as_deref()
+        .expect("must include error message");
+    let rendered_path = rendered.replace('\\', "/");
+    assert!(rendered.contains("source-metadata-invalid"));
+    assert!(rendered.contains("metadata signature"));
+    assert!(rendered_path.contains("releases/ripgrep/14.1.0.toml"));
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn source_metadata_policy_fails_when_package_signature_is_missing() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    fs::remove_file(source_root.join("packages").join("ripgrep.toml.sig"))
+        .expect("must remove package template signature");
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    let rendered = results[0]
+        .error
+        .as_deref()
+        .expect("must include error message");
+    assert!(rendered.contains("source-metadata-invalid"));
+    assert!(rendered.contains(".sig"));
+
+    let _ = fs::remove_dir_all(&source_root);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn source_metadata_policy_fails_when_release_signature_is_invalid() {
+    let root = test_registry_root();
+    let source_root = filesystem_source_fixture();
+    let store = RegistrySourceStore::new(&root);
+
+    fs::write(
+        source_root
+            .join("releases")
+            .join("ripgrep")
+            .join("14.1.0.toml.sig"),
+        "00",
+    )
+    .expect("must corrupt release signature");
+
+    let registry_pub = fs::read(source_root.join("registry.pub")).expect("must read registry pub");
+    store
+        .add_source(filesystem_source_record(
+            "local",
+            source_root
+                .to_str()
+                .expect("filesystem source path must be valid UTF-8"),
+            sha256_hex_bytes(&registry_pub),
+            0,
+        ))
+        .expect("must add source");
+
+    let results = store
+        .update_sources(&[])
+        .expect("update API must report per-source failure");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, SourceUpdateStatus::Failed);
+    let rendered = results[0]
+        .error
+        .as_deref()
+        .expect("must include error message");
+    let rendered_path = rendered.replace('\\', "/");
+    assert!(rendered.contains("source-metadata-invalid"));
+    assert!(rendered.contains("metadata signature"));
+    assert!(rendered_path.contains("releases/ripgrep/14.1.0.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1373,6 +1599,70 @@ fn configured_index_search_names_deduplicates_across_sources() {
 }
 
 #[test]
+fn configured_index_package_names_skips_poisoned_package_records_with_source_diagnostics() {
+    let state_root = test_registry_root();
+    let store = RegistrySourceStore::new(&state_root);
+
+    store
+        .add_source(source_record("official", 0))
+        .expect("must add source");
+
+    let signing_key = SigningKey::from_bytes(&[31u8; 32]);
+    write_ready_snapshot_cache(&state_root, "official", &signing_key, &["14.1.0"]);
+    let cache_root = state_root.join("cache").join("official");
+    let bad_dir = cache_root.join("releases").join("bad");
+    write_signed_package_template(&cache_root, &signing_key, "bad", "name = [\"bad\"\n");
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = ConfiguredRegistryIndex::open(&state_root).expect("must open configured index");
+    let (names, diagnostics) = index
+        .package_names_with_diagnostics()
+        .expect("must list configured package names");
+
+    assert_eq!(names, vec!["ripgrep".to_string()]);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
+    assert_eq!(diagnostics[0].source, "official");
+
+    let _ = fs::remove_dir_all(&state_root);
+}
+
+#[test]
+fn configured_index_provider_versions_retags_poison_diagnostics_to_source_name() {
+    let state_root = test_registry_root();
+    let store = RegistrySourceStore::new(&state_root);
+
+    store
+        .add_source(source_record("official", 0))
+        .expect("must add source");
+
+    let signing_key = SigningKey::from_bytes(&[37u8; 32]);
+    write_ready_snapshot_cache(&state_root, "official", &signing_key, &["14.1.0"]);
+    let cache_root = state_root.join("cache").join("official");
+    let bad_dir = cache_root.join("releases").join("bad-provider");
+    write_signed_package_template(
+        &cache_root,
+        &signing_key,
+        "bad-provider",
+        "name = \"bad-provider\"\nprovides = [\"rg\"\n",
+    );
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = ConfiguredRegistryIndex::open(&state_root).expect("must open configured index");
+    let (_providers, diagnostics) = index
+        .provider_versions_with_diagnostics("rg")
+        .expect("must skip malformed provider candidate");
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad-provider");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
+    assert_eq!(diagnostics[0].source, "official");
+
+    let _ = fs::remove_dir_all(&state_root);
+}
+
+#[test]
 fn configured_index_fails_when_no_ready_snapshot_exists() {
     let state_root = test_registry_root();
     let store = RegistrySourceStore::new(&state_root);
@@ -1681,6 +1971,355 @@ fn search_names_returns_matching_package_with_valid_signed_manifests() {
         .search_names("rip")
         .expect("must load matching package names");
     assert_eq!(names, vec!["ripgrep"]);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_skips_poisoned_package_records() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "good",
+        &package_template_toml_with_license("good", "MIT"),
+    );
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let bad_dir = root.join("releases").join("bad");
+    write_signed_package_template(&root, &signing_key, "bad", "name = [\"bad\"\n");
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("")
+        .expect("must search while skipping poisoned package");
+
+    assert_eq!(names, vec!["good".to_string()]);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
+    assert_eq!(diagnostics[0].source, root.display().to_string());
+
+    let (narrow_names, narrow_diagnostics) = index
+        .search_names_with_diagnostics("good")
+        .expect("narrow search must ignore unrelated poisoned package");
+    assert_eq!(narrow_names, vec!["good".to_string()]);
+    assert!(narrow_diagnostics.is_empty());
+
+    let direct_error = index
+        .package_versions("bad")
+        .expect_err("direct selected package load must remain strict");
+    assert!(direct_error
+        .to_string()
+        .contains("failed parsing package template"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_skips_signed_unreadable_package_template_with_diagnostics() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let bad_dir = root.join("releases").join("bad");
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("bad")
+        .expect("broad search must skip unreadable package-local metadata");
+
+    assert!(names.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert!(diagnostics[0]
+        .detail
+        .contains("failed reading package template"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_skips_orphaned_package_template_with_diagnostics() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "orphaned",
+        &package_template_toml("orphaned"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("orphaned")
+        .expect("broad search must skip orphaned package-local metadata");
+
+    assert!(names.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "orphaned");
+    assert!(diagnostics[0].detail.contains("orphaned package template"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_skips_unreadable_release_directory_with_diagnostics() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(root.join("releases")).expect("must create releases root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+    write_signed_package_template(&root, &signing_key, "bad", &package_template_toml("bad"));
+    fs::write(root.join("releases").join("bad"), "not a directory")
+        .expect("must create unreadable release directory fixture");
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("bad")
+        .expect("broad search must skip unreadable release directory");
+
+    assert!(names.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert!(diagnostics[0]
+        .detail
+        .contains("failed to read release directory"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_fails_when_matched_package_signature_is_missing() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let unrelated_dir = root.join("releases").join("unrelated");
+    fs::create_dir_all(&unrelated_dir).expect("must create unrelated release dir");
+    fs::create_dir_all(root.join("packages")).expect("must create packages dir");
+    fs::write(
+        root.join("packages").join("unrelated.toml"),
+        package_template_toml("unrelated"),
+    )
+    .expect("must write unsigned package template");
+    write_signed_release_manifest(
+        &unrelated_dir,
+        &signing_key,
+        "1.0.0",
+        &release_toml("1.0.0"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let err = index
+        .search_names_with_diagnostics("unrelated")
+        .expect_err("matched missing signature must remain fatal");
+    assert!(err.to_string().contains(".sig"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn provider_versions_fails_when_unrelated_package_signature_is_missing() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let provider_dir = root.join("releases").join("good-provider");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "good-provider",
+        "name = \"good-provider\"\nprovides = [\"rg\"]\n",
+    );
+    write_signed_release_manifest(&provider_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let unrelated_dir = root.join("releases").join("unrelated");
+    fs::create_dir_all(&unrelated_dir).expect("must create unrelated release dir");
+    fs::write(
+        root.join("packages").join("unrelated.toml"),
+        package_template_toml("unrelated"),
+    )
+    .expect("must write unsigned package template");
+    write_signed_release_manifest(
+        &unrelated_dir,
+        &signing_key,
+        "1.0.0",
+        &release_toml("1.0.0"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let err = index
+        .provider_versions_with_diagnostics("rg")
+        .expect_err("unrelated missing signature must remain fatal");
+    assert!(err.to_string().contains(".sig"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn package_names_skips_poisoned_package_records() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let bad_dir = root.join("releases").join("bad");
+    write_signed_package_template(&root, &signing_key, "bad", "name = [\"bad\"\n");
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .package_names_with_diagnostics()
+        .expect("must list while skipping poisoned package");
+
+    assert_eq!(names, vec!["good".to_string()]);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert_eq!(diagnostics[0].source, root.display().to_string());
+    assert_eq!(index.package_names().expect("must list names"), names);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn package_names_fails_when_package_signature_is_missing() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let package_dir = root.join("releases").join("ripgrep");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+    fs::create_dir_all(root.join("packages")).expect("must create packages dir");
+    fs::write(
+        root.join("packages").join("ripgrep.toml"),
+        package_template_toml("ripgrep"),
+    )
+    .expect("must write unsigned package template");
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "14.1.0",
+        &release_toml("14.1.0"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let err = index
+        .package_names_with_diagnostics()
+        .expect_err("missing package signature must remain fatal");
+    assert!(err.to_string().contains(".sig"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn provider_versions_skips_poisoned_package_records() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good-provider");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "good-provider",
+        "name = \"good-provider\"\nprovides = [\"rg\"]\n",
+    );
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let bad_dir = root.join("releases").join("bad-provider");
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "bad-provider",
+        "name = \"bad-provider\"\nprovides = [\"rg\"\n",
+    );
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = RegistryIndex::open(&root);
+    let (providers, diagnostics) = index
+        .provider_versions_with_diagnostics("rg")
+        .expect("must find providers while skipping poisoned package");
+
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].name, "good-provider");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad-provider");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
+    assert_eq!(diagnostics[0].source, root.display().to_string());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_remains_fail_closed_when_package_signature_is_missing() {
+    let root = test_registry_root();
+    let package_dir = root.join("releases").join("ripgrep");
+    fs::create_dir_all(&package_dir).expect("must create package dir");
+
+    let signing_key = signing_key();
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+    fs::create_dir_all(root.join("packages")).expect("must create packages dir");
+    fs::write(
+        root.join("packages").join("ripgrep.toml"),
+        package_template_toml("ripgrep"),
+    )
+    .expect("must write unsigned package template");
+    write_signed_release_manifest(
+        &package_dir,
+        &signing_key,
+        "14.1.0",
+        &release_toml("14.1.0"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let err = index
+        .search_names_with_diagnostics("rip")
+        .expect_err("missing package signature must remain fatal");
+    assert!(err.to_string().contains(".sig"));
 
     let _ = fs::remove_dir_all(&root);
 }

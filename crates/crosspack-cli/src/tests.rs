@@ -6676,7 +6676,7 @@ sha256 = "llvm"
 "#
             ),
         );
-        write_invalid_policy_manifest(
+        write_signed_policy_manifest(
             &layout,
             "official",
             "broken-unrelated",
@@ -7947,8 +7947,8 @@ old-cc = "<2.0.0"
         write_signed_test_manifest(&layout, "official", "roundrip", "0.9.0", None, None, &[]);
 
         let backend = select_metadata_backend(None, &layout).expect("configured backend must load");
-        let results = run_search_command(&backend, "rip").expect("search must succeed");
-        let lines = format_search_results(&results, "rip");
+        let outcome = run_search_command(&backend, "rip").expect("search must succeed");
+        let lines = format_search_results(&outcome.results, "rip");
 
         assert_eq!(
             lines,
@@ -7961,6 +7961,150 @@ old-cc = "<2.0.0"
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_search_command_returns_skipped_package_warnings() {
+        let layout = test_layout();
+        configure_ready_source(&layout, "official");
+        write_signed_test_manifest(
+            &layout,
+            "official",
+            "good",
+            "1.0.0",
+            Some("MIT"),
+            None,
+            &[],
+        );
+
+        let cache_root = registry_state_root(&layout).join("cache").join("official");
+        let signing_key = test_signing_key();
+        let package_template_path = cache_root.join("packages").join("bad.toml");
+        let bad_template = "name = [\"bad\"\n";
+        std::fs::write(&package_template_path, bad_template.as_bytes())
+            .expect("must write malformed package template");
+        let package_signature = signing_key.sign(bad_template.as_bytes());
+        std::fs::write(
+            package_template_path.with_extension("toml.sig"),
+            hex::encode(package_signature.to_bytes()),
+        )
+        .expect("must write malformed package signature");
+        let bad_dir = cache_root.join("releases").join("bad");
+        std::fs::create_dir_all(&bad_dir).expect("must create bad release dir");
+        let release = "version = \"1.0.0\"\n";
+        let release_path = bad_dir.join("1.0.0.toml");
+        std::fs::write(&release_path, release.as_bytes()).expect("must write bad release");
+        let release_signature = signing_key.sign(release.as_bytes());
+        std::fs::write(
+            release_path.with_extension("toml.sig"),
+            hex::encode(release_signature.to_bytes()),
+        )
+        .expect("must write bad release signature");
+
+        let backend = select_metadata_backend(None, &layout).expect("configured backend must load");
+        let outcome = run_search_command(&backend, "").expect("search must succeed");
+
+        assert_eq!(outcome.results.len(), 1);
+        assert_eq!(outcome.results[0].name, "good");
+        assert_eq!(outcome.skipped_packages.len(), 1);
+        assert_eq!(outcome.skipped_packages[0].package, "bad");
+        assert_eq!(
+            outcome.skipped_packages[0].reason_code,
+            "package-metadata-invalid"
+        );
+        assert_eq!(
+            format_package_skip_warning(&outcome.skipped_packages[0]),
+            format!(
+                "warning: registry_package_skipped package=\"bad\" reason=\"package-metadata-invalid\" source=\"official\" detail={:?}",
+                format!(
+                    "failed parsing package template: {}",
+                    package_template_path.display()
+                )
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn run_search_command_uses_lower_priority_valid_package_when_preferred_source_is_poisoned() {
+        let layout = test_layout();
+        let state_root = registry_state_root(&layout);
+        std::fs::create_dir_all(&state_root).expect("must create registry state root");
+        std::fs::write(
+            state_root.join("sources.toml"),
+            "version = 1\n\n[[sources]]\nname = \"preferred\"\nkind = \"filesystem\"\nlocation = \"/tmp/preferred\"\nfingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nenabled = true\npriority = 0\n\n[[sources]]\nname = \"fallback\"\nkind = \"filesystem\"\nlocation = \"/tmp/fallback\"\nfingerprint_sha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nenabled = true\npriority = 1\n",
+        )
+        .expect("must write sources state");
+        configure_ready_cache_source(&layout, "preferred");
+        configure_ready_cache_source(&layout, "fallback");
+
+        write_signed_test_manifest(
+            &layout,
+            "fallback",
+            "ripgrep",
+            "14.1.0",
+            Some("MIT"),
+            None,
+            &[],
+        );
+
+        let preferred_root = state_root.join("cache").join("preferred");
+        let signing_key = test_signing_key();
+        std::fs::write(preferred_root.join("registry.pub"), public_key_hex(&signing_key))
+            .expect("must write preferred registry key");
+        let package_template_path = preferred_root.join("packages").join("ripgrep.toml");
+        std::fs::create_dir_all(preferred_root.join("packages"))
+            .expect("must create preferred packages dir");
+        let bad_template = "name = [\"ripgrep\"\n";
+        std::fs::write(&package_template_path, bad_template.as_bytes())
+            .expect("must write malformed preferred template");
+        let package_signature = signing_key.sign(bad_template.as_bytes());
+        std::fs::write(
+            package_template_path.with_extension("toml.sig"),
+            hex::encode(package_signature.to_bytes()),
+        )
+        .expect("must write preferred package signature");
+        let release_dir = preferred_root.join("releases").join("ripgrep");
+        let release = "version = \"99.0.0\"\n";
+        let release_path = release_dir.join("99.0.0.toml");
+        std::fs::create_dir_all(&release_dir).expect("must create preferred release dir");
+        std::fs::write(&release_path, release.as_bytes())
+            .expect("must write preferred release");
+        let release_signature = signing_key.sign(release.as_bytes());
+        std::fs::write(
+            release_path.with_extension("toml.sig"),
+            hex::encode(release_signature.to_bytes()),
+        )
+        .expect("must write preferred release signature");
+
+        let backend = select_metadata_backend(None, &layout).expect("configured backend must load");
+        let outcome = run_search_command(&backend, "rip").expect("search must succeed");
+
+        assert_eq!(outcome.results.len(), 1);
+        assert_eq!(outcome.results[0].name, "ripgrep");
+        assert_eq!(outcome.results[0].source, "fallback");
+        assert_eq!(outcome.results[0].latest_version, "14.1.0");
+        assert_eq!(outcome.skipped_packages.len(), 1);
+        assert_eq!(outcome.skipped_packages[0].source, "preferred");
+        assert_eq!(outcome.skipped_packages[0].package, "ripgrep");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn format_package_skip_warning_debug_escapes_all_fields() {
+        let diagnostic = PackageSkipDiagnostic {
+            package: "bad\"pkg".to_string(),
+            reason_code: "package-metadata-invalid",
+            source: "official\nsource".to_string(),
+            detail: "line\n\"quoted\"".to_string(),
+        };
+
+        assert_eq!(
+            format_package_skip_warning(&diagnostic),
+            "warning: registry_package_skipped package=\"bad\\\"pkg\" reason=\"package-metadata-invalid\" source=\"official\\nsource\" detail=\"line\\n\\\"quoted\\\"\""
+        );
     }
 
     #[test]
@@ -10718,8 +10862,7 @@ sha256 = "abc"
 
     fn configure_ready_source(layout: &PrefixLayout, source_name: &str) {
         let state_root = registry_state_root(layout);
-        std::fs::create_dir_all(state_root.join("cache").join(source_name))
-            .expect("must create source cache root");
+        configure_ready_cache_source(layout, source_name);
         std::fs::write(
             state_root.join("sources.toml"),
             format!(
@@ -10727,6 +10870,12 @@ sha256 = "abc"
             ),
         )
         .expect("must write source state");
+    }
+
+    fn configure_ready_cache_source(layout: &PrefixLayout, source_name: &str) {
+        let state_root = registry_state_root(layout);
+        std::fs::create_dir_all(state_root.join("cache").join(source_name))
+            .expect("must create source cache root");
         std::fs::write(
             state_root.join("cache").join(source_name).join("snapshot.json"),
             format!(

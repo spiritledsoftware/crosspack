@@ -219,8 +219,17 @@ Crosspack verifies both metadata and artifacts:
 - Registry source trust is pinned by SHA-256 fingerprint of `registry.pub`.
 - Each manifest requires a detached signature sidecar (`<version>.toml.sig`).
 - Metadata-dependent commands fail closed on missing or invalid key or signature material.
+- Package-level malformed records are isolated where commands can proceed without selecting that package. Signed malformed package records do not prevent a source snapshot from becoming ready, but source-level trust failures still fail closed: missing or invalid registry keys, bad configured-source fingerprints, missing ready snapshots, and missing or invalid metadata signatures remain fatal.
 - Artifacts are verified with SHA-256 before extraction.
 - Install state is tracked via receipts and transaction metadata under the prefix state directory.
+
+Broad package discovery may emit additive plain stderr warnings when invalid package-level metadata is skipped:
+
+```text
+warning: registry_package_skipped package="<name>" reason="package-metadata-invalid" source="<source>" detail="<detail>"
+```
+
+These warnings do not change existing machine-oriented install, dry-run, or update line shapes.
 
 ### Trusted default source and fingerprint channel
 
@@ -296,6 +305,11 @@ Version bump rules:
 Dependency maintenance automation:
 - `.github/dependabot.yml` opens weekly grouped dependency update PRs (Cargo + GitHub Actions).
 - `.github/workflows/dependency-review.yml` checks pull requests for high-severity dependency risk deltas.
+
+Registry automation:
+- The registry submodule's upstream release bot runtime-normalizes `state/upstream-release-bot.json` to schema v2, including `sources`, `packages`, and `quarantine` maps; checked-in schema v1 state is migrated on read.
+- The bot maintains one rolling PR from `upstream-release/rolling`; package-level quarantine and per-package `backoff_until` isolate malformed metadata, rate limits, and transient upstream failures.
+- Bot logs include `registry_update_summary updated=<n> up_to_date=<n> quarantined=<n> transient_failed=<n> skipped=<n>`; operational details live in `registry/scripts/registry-update-runbook.md`.
 
 ## Documentation Map
 

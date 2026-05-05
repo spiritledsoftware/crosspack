@@ -49,6 +49,36 @@ When `--registry-root` is provided, the pointed registry root must expose the sa
 - Metadata-dependent operations fail closed on key or signature errors.
 - Optional community recipe metadata is signed and validated against the same source trust root.
 
+### Trust and Poison Taxonomy
+
+Fatal source-level trust failures always fail closed for the source: missing `registry.pub`, configured fingerprint mismatch, missing ready `snapshot.json`, unreadable source layout, invalid cache replacement, or missing/invalid signatures for source metadata that exists in the snapshot.
+
+Skippable package-level poison is limited to signed bytes whose provenance is trusted but whose package content cannot be used safely, such as TOML parse errors, manifest schema errors, missing required package fields, unsupported artifact structure, or a package already listed in durable quarantine state. Broad list/search/provider operations may skip these records and return diagnostics; direct selected package operations must fail when the selected package metadata is invalid.
+
+Crosspack CLI warnings for skipped package-level metadata are additive stderr lines with quoted fields:
+
+```text
+warning: registry_package_skipped package="<name>" reason="package-metadata-invalid" source="<source>" detail="<detail>"
+```
+
+These warnings must not change existing machine-oriented install/update contracts, including `transaction_preview`, `transaction_summary`, `risk_flags`, `change_*`, or `update summary: updated=<n> up-to-date=<n> failed=<n>`.
+
+### Automation Quarantine
+
+Automation quarantine is advisory registry state stored under `state/upstream-release-bot.json`. It prevents repeated generated poison from blocking unrelated package updates. Source sync may accept ready snapshots that contain signed malformed package-level records, because signatures prove provenance even when package content is unusable. Clients may skip quarantined or malformed package-level records during broad list/search/provider operations, but they must still fail selected package operations when the selected package metadata is invalid.
+
+The upstream release bot state uses schema v2 with top-level `schema_version`, `sources`, `packages`, and `quarantine` maps. `sources` records source cache/audit data by source identity; `packages` records package source identity/kind, latest seen version, last successful generated version, transient failure fields, and optional `backoff_until`; `quarantine` records `reason_code`, `detail`, first/last seen timestamps, attempted version, and optional last good version. Valid regenerated metadata plus package validation clears quarantine for that package.
+
+The scheduled bot maintains one rolling PR from `upstream-release/rolling`. Each write run starts from current `main`, regenerates valid package updates, writes bot state, force-updates only that branch with `--force-with-lease`, and enables automerge. Unsigned generated TOML may appear in bot PRs before merge; the merge-time signing workflow owns `.toml.sig` sidecars.
+
+Registry automation emits stable accounting lines for operators and CI logs:
+
+```text
+registry_update package=<name> status=quarantined reason=metadata-malformed attempted=<version>
+registry_update package=<name> status=skipped reason=<rate-limited|upstream-error|backoff-active> reset_at=<iso8601>
+registry_update_summary updated=<n> up_to_date=<n> quarantined=<n> transient_failed=<n> skipped=<n>
+```
+
 ## Optional Community Recipe Metadata
 
 - Source records may include an optional `community` block in `sources.toml`.
