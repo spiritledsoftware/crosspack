@@ -2018,6 +2018,67 @@ fn search_names_skips_poisoned_package_records() {
 }
 
 #[test]
+fn search_names_skips_signed_unreadable_package_template_with_diagnostics() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let bad_dir = root.join("releases").join("bad");
+    write_signed_release_manifest(&bad_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("good")
+        .expect("broad search must skip unreadable package-local metadata");
+
+    assert_eq!(names, vec!["good".to_string()]);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "bad");
+    assert!(diagnostics[0]
+        .detail
+        .contains("failed reading package template"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn search_names_skips_orphaned_package_template_with_diagnostics() {
+    let root = test_registry_root();
+    let signing_key = signing_key();
+    fs::create_dir_all(&root).expect("must create registry root");
+    fs::write(root.join("registry.pub"), public_key_hex(&signing_key))
+        .expect("must write registry public key");
+
+    let good_dir = root.join("releases").join("good");
+    write_signed_package_template(&root, &signing_key, "good", &package_template_toml("good"));
+    write_signed_release_manifest(&good_dir, &signing_key, "1.0.0", &release_toml("1.0.0"));
+    write_signed_package_template(
+        &root,
+        &signing_key,
+        "orphaned",
+        &package_template_toml("orphaned"),
+    );
+
+    let index = RegistryIndex::open(&root);
+    let (names, diagnostics) = index
+        .search_names_with_diagnostics("good")
+        .expect("broad search must skip orphaned package-local metadata");
+
+    assert_eq!(names, vec!["good".to_string()]);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].package, "orphaned");
+    assert!(diagnostics[0].detail.contains("orphaned package template"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn search_names_fails_when_unmatched_package_signature_is_missing() {
     let root = test_registry_root();
     let signing_key = signing_key();

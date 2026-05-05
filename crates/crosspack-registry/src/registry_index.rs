@@ -290,9 +290,12 @@ fn is_skippable_package_poison(error: &anyhow::Error) -> bool {
         return false;
     }
     rendered.contains("failed parsing package template")
+        || rendered.contains("failed reading package template")
         || rendered.contains("failed parsing release metadata")
+        || rendered.contains("failed reading release file")
         || rendered.contains("failed parsing merged manifest")
         || rendered.contains("failed serializing merged manifest")
+        || rendered.contains("orphaned package template")
         || rendered.contains("expected TOML table")
         || rendered.contains("not valid UTF-8")
 }
