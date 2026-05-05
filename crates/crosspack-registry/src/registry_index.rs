@@ -70,17 +70,29 @@ impl RegistryIndex {
     pub fn package_names_with_diagnostics(
         &self,
     ) -> Result<(Vec<String>, Vec<PackageSkipDiagnostic>)> {
-        let mut names = Vec::new();
+        let (packages, diagnostics) = self.package_manifests_with_diagnostics()?;
+        let mut names: Vec<String> = packages.into_iter().map(|(name, _)| name).collect();
+        names.sort();
+        Ok((names, diagnostics))
+    }
+
+    fn package_manifests_with_diagnostics(
+        &self,
+    ) -> Result<(
+        Vec<(String, Vec<PackageManifest>)>,
+        Vec<PackageSkipDiagnostic>,
+    )> {
+        let mut packages = Vec::new();
         let mut diagnostics = Vec::new();
         let source = self.root.display().to_string();
         for name in self.package_record_names()? {
             let manifests = self.package_versions_tolerant(&name, &source, &mut diagnostics)?;
             if !manifests.is_empty() {
-                names.push(name);
+                packages.push((name, manifests));
             }
         }
-        names.sort();
-        Ok((names, diagnostics))
+        packages.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok((packages, diagnostics))
     }
 
     fn package_record_names(&self) -> Result<Vec<String>> {
@@ -222,16 +234,14 @@ impl RegistryIndex {
         capability: &str,
     ) -> Result<(Vec<PackageManifest>, Vec<PackageSkipDiagnostic>)> {
         let mut providers = Vec::new();
-        let (package_names, diagnostics) = self.package_names_with_diagnostics()?;
-        for package_name in package_names {
-            providers.extend(self.package_versions(&package_name)?.into_iter().filter(
-                |manifest| {
-                    manifest
-                        .provides
-                        .iter()
-                        .any(|provided| provided == capability)
-                },
-            ));
+        let (packages, diagnostics) = self.package_manifests_with_diagnostics()?;
+        for (_, manifests) in packages {
+            providers.extend(manifests.into_iter().filter(|manifest| {
+                manifest
+                    .provides
+                    .iter()
+                    .any(|provided| provided == capability)
+            }));
         }
         Ok((providers, diagnostics))
     }

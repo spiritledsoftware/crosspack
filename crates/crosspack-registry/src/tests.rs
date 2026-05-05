@@ -711,6 +711,7 @@ fn update_filesystem_source_accepts_signed_package_poison() {
     assert_eq!(names, vec!["good".to_string()]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].package, "bad");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1035,10 +1036,9 @@ fn update_filesystem_source_fails_when_package_template_signature_is_invalid() {
         .error
         .as_deref()
         .expect("must include error message");
-    assert!(
-        rendered.contains("signature"),
-        "expected invalid signature failure, got: {rendered}"
-    );
+    assert!(rendered.contains("source-metadata-invalid"));
+    assert!(rendered.contains("metadata signature"));
+    assert!(rendered.contains("packages/ripgrep.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1080,10 +1080,9 @@ fn update_filesystem_source_fails_when_release_signature_is_invalid() {
         .error
         .as_deref()
         .expect("must include error message");
-    assert!(
-        rendered.contains("signature"),
-        "expected invalid signature failure, got: {rendered}"
-    );
+    assert!(rendered.contains("source-metadata-invalid"));
+    assert!(rendered.contains("metadata signature"));
+    assert!(rendered.contains("releases/ripgrep/14.1.0.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1163,7 +1162,8 @@ fn source_metadata_policy_fails_when_release_signature_is_invalid() {
         .as_deref()
         .expect("must include error message");
     assert!(rendered.contains("source-metadata-invalid"));
-    assert!(rendered.contains("signature"));
+    assert!(rendered.contains("metadata signature"));
+    assert!(rendered.contains("releases/ripgrep/14.1.0.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1619,6 +1619,7 @@ fn configured_index_package_names_skips_poisoned_package_records_with_source_dia
     assert_eq!(names, vec!["ripgrep".to_string()]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].package, "bad");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
     assert_eq!(diagnostics[0].source, "official");
 
     let _ = fs::remove_dir_all(&state_root);
@@ -1652,6 +1653,7 @@ fn configured_index_provider_versions_retags_poison_diagnostics_to_source_name()
 
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].package, "bad-provider");
+    assert_eq!(diagnostics[0].reason_code, "package-metadata-invalid");
     assert_eq!(diagnostics[0].source, "official");
 
     let _ = fs::remove_dir_all(&state_root);

@@ -8014,9 +8014,13 @@ old-cc = "<2.0.0"
         );
         assert_eq!(
             format_package_skip_warning(&outcome.skipped_packages[0]),
-            "warning: registry_package_skipped package=\"bad\" reason=\"package-metadata-invalid\" source=\"official\" detail=\"failed parsing package template: ".to_string()
-                + &package_template_path.display().to_string()
-                + "\""
+            format!(
+                "warning: registry_package_skipped package=\"bad\" reason=\"package-metadata-invalid\" source=\"official\" detail={:?}",
+                format!(
+                    "failed parsing package template: {}",
+                    package_template_path.display()
+                )
+            )
         );
 
         let _ = std::fs::remove_dir_all(layout.prefix());
