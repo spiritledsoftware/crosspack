@@ -9812,7 +9812,7 @@ old-cc = "<2.0.0"
         write_integration_state(&layout, "caddy", &projections)
             .expect("must seed projected integration state");
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let txid = "tx-service-activation-install";
         let seq = 7;
@@ -9876,7 +9876,7 @@ old-cc = "<2.0.0"
         )
         .expect("must seed existing activation state");
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let err = activate_enabled_services_for_install(
             &layout,
@@ -9911,7 +9911,7 @@ old-cc = "<2.0.0"
         write_integration_state(&layout, "caddy", &projections)
             .expect("must seed projected integration state");
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let mut txid = String::new();
 
@@ -10423,7 +10423,7 @@ old-cc = "<2.0.0"
         .expect("must seed integration state");
 
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
         let line = run_integration_activation_command_with_fs(
@@ -10437,7 +10437,7 @@ old-cc = "<2.0.0"
         .expect("path plugin enable should succeed through fake installer fs");
 
         assert!(line.contains("state=enabled adapter=path-plugin-bin reason=ok"));
-        assert!(line.contains(&format!("path={}/bin/kubectl-ctx", layout.prefix().display())));
+        assert!(line.contains("path=/prefix/bin/kubectl-ctx"));
     }
 
     #[test]
@@ -10476,7 +10476,7 @@ old-cc = "<2.0.0"
         .expect("must seed integration state");
 
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
         fs.write_file("/home/user/.docker/cli-plugins/docker-compose", b"host-owned");
@@ -10575,7 +10575,7 @@ old-cc = "<2.0.0"
         .expect("must seed integration state");
 
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
         let line = run_integration_activation_command_with_fs(
@@ -10643,7 +10643,7 @@ old-cc = "<2.0.0"
         .expect("must seed integration state");
 
         let host = HostActivationContext::linux()
-            .with_prefix(&layout.prefix().display().to_string())
+            .with_prefix("/prefix")
             .with_home("/home/user");
         let mut line = None;
         execute_with_transaction(&layout, "integrations", None, |tx| {

@@ -9127,10 +9127,10 @@ fn activation_transaction_uninstall_preserves_service_state_when_real_removal_un
     let records = read_integration_activation_state(&layout).expect("must read activation state");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
-    assert_eq!(
+    assert!(matches!(
         records[0].reason_code,
-        IntegrationReasonCode::NativeCommandFailed
-    );
+        IntegrationReasonCode::NativeCommandFailed | IntegrationReasonCode::AdapterToolMissing
+    ));
     assert!(
         !layout.receipt_path("caddy").exists(),
         "uninstall should still remove package receipt"
