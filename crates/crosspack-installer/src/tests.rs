@@ -38,7 +38,7 @@ use crate::native::{
     select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
 use crate::receipts::{parse_identity_receipt, parse_receipt};
-use crate::transactions::fail_next_active_transaction_after_write_for_test;
+use crate::transactions::fail_active_transaction_after_write_for_test;
 
 const TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-1\",\n  \"operation\": \"install\",\n  \"status\": \"applying\",\n  \"started_at_unix\": 1771001234,\n  \"snapshot_id\": \"git:abc123\"\n}\n";
 const TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-2\",\n  \"operation\": \"repair\",\n  \"status\": \"failed\",\n  \"started_at_unix\": 1771001235\n}\n";
@@ -5242,7 +5242,7 @@ fn set_active_transaction_cleans_marker_after_post_create_failure() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
 
-    fail_next_active_transaction_after_write_for_test();
+    fail_active_transaction_after_write_for_test(layout.transaction_active_path());
     let err = set_active_transaction(&layout, "tx-cleanup")
         .expect_err("post-create failure should abort active claim");
 
