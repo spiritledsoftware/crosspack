@@ -185,6 +185,10 @@ impl PrefixLayout {
             .join(format!("{}.integrations", identity.state_key()))
     }
 
+    pub fn integration_activation_state_path(&self) -> PathBuf {
+        self.installed_state_dir().join("integrations.activation")
+    }
+
     pub fn transactions_dir(&self) -> PathBuf {
         self.state_dir().join("transactions")
     }

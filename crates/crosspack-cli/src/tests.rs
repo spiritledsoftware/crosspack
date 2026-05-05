@@ -970,6 +970,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
+    fn test_installed_identity(package: &str) -> InstalledPackageIdentity {
+        InstalledPackageIdentity {
+            profile: "default".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            source_namespace: "core".to_string(),
+            source_provenance: Some("git:https://example.test/core".to_string()),
+            package: package.to_string(),
+        }
+    }
+
     #[test]
     fn uninstall_journals_rollback_payload_before_forward_mutation_task_8_inventory_gap() {
         let layout = test_layout();
@@ -1226,6 +1236,444 @@ mod tests {
             .expect("must read restored declared services sidecar");
         assert_eq!(restored_declared_services, old_declared_services);
 
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_replays_integration_enable_created_symlink_removal() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let txid = "tx-integration-enable-rollback";
+        write_transaction_metadata(
+            &layout,
+            &TransactionMetadata {
+                version: 1,
+                txid: txid.to_string(),
+                operation: "integrations".to_string(),
+                status: TransactionStatus::Failed,
+                started_at_unix: 1_771_001_266,
+                snapshot_id: None,
+            },
+        )
+        .expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let host_path = layout
+            .prefix()
+            .join("home")
+            .join("user")
+            .join(".docker")
+            .join("cli-plugins")
+            .join("docker-compose");
+        std::fs::create_dir_all(host_path.parent().expect("must resolve host parent"))
+            .expect("must create host parent");
+        let source_path = layout
+            .prefix()
+            .join("share")
+            .join("integrations")
+            .join("docker")
+            .join("cli-plugins")
+            .join("docker-compose");
+        std::os::unix::fs::symlink(&source_path, &host_path)
+            .expect("must create interrupted activation symlink");
+        assert!(
+            std::fs::symlink_metadata(&host_path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false),
+            "fixture should create a symlink before rollback"
+        );
+
+        let rollback = ActivationRollbackEntry {
+            operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+            path: host_path.display().to_string(),
+            previous_symlink_target: None,
+            previous_shim_target: None,
+            previous_owner: None,
+            created_symlink_target: Some(source_path.display().to_string()),
+            created_shim_target: None,
+            created_owner: None,
+            expected_current_symlink_target: None,
+            expected_current_shim_target: None,
+            expected_current_owner: None,
+            expected_current_absent: false,
+            created_parent_dirs: Vec::new(),
+        };
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "integration_activation_rollback".to_string(),
+                state: "planned".to_string(),
+                path: Some(serde_json::to_string(&rollback).expect("must serialize rollback")),
+            },
+        )
+        .expect("must append activation rollback payload");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback command should replay activation rollback");
+
+        assert!(
+            std::fs::symlink_metadata(&host_path).is_err(),
+            "rollback should remove symlink created by interrupted activation"
+        );
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should remain");
+        assert_eq!(updated.status, "rolled_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_replays_integration_enable_removes_created_activation_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let txid = "tx-integration-enable-state-rollback";
+        write_transaction_metadata(
+            &layout,
+            &TransactionMetadata {
+                version: 1,
+                txid: txid.to_string(),
+                operation: "integrations".to_string(),
+                status: TransactionStatus::Failed,
+                started_at_unix: 1_771_001_266,
+                snapshot_id: None,
+            },
+        )
+        .expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let owner = ActivationOwner {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+        };
+        let host_path = layout
+            .prefix()
+            .join("home")
+            .join("user")
+            .join(".docker")
+            .join("cli-plugins")
+            .join("docker-compose");
+        std::fs::create_dir_all(host_path.parent().expect("must resolve host parent"))
+            .expect("must create host parent");
+        let source_path = layout
+            .prefix()
+            .join("share")
+            .join("integrations")
+            .join("docker")
+            .join("cli-plugins")
+            .join("docker-compose");
+        std::os::unix::fs::symlink(&source_path, &host_path)
+            .expect("must create interrupted activation symlink");
+        write_integration_activation_state(
+            &layout,
+            &[IntegrationActivationRecord {
+                package_state_key: owner.package_state_key.clone(),
+                package: owner.package.clone(),
+                integration_key: owner.integration_key.clone(),
+                kind: "docker_cli_plugin".to_string(),
+                adapter: IntegrationAdapterKind::DockerCli,
+                scope: IntegrationActivationScope::None,
+                desired_state: IntegrationDesiredState::Enabled,
+                applied_state: IntegrationAppliedState::Enabled,
+                host_path: Some(host_path.display().to_string()),
+                reason_code: IntegrationReasonCode::Ok,
+            }],
+        )
+        .expect("must seed activation record created by failed transaction");
+
+        let rollback = ActivationRollbackEntry {
+            operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+            path: host_path.display().to_string(),
+            previous_symlink_target: None,
+            previous_shim_target: None,
+            previous_owner: None,
+            created_symlink_target: Some(source_path.display().to_string()),
+            created_shim_target: None,
+            created_owner: Some(owner),
+            expected_current_symlink_target: None,
+            expected_current_shim_target: None,
+            expected_current_owner: None,
+            expected_current_absent: false,
+            created_parent_dirs: Vec::new(),
+        };
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "integration_activation_rollback".to_string(),
+                state: "planned".to_string(),
+                path: Some(serde_json::to_string(&rollback).expect("must serialize rollback")),
+            },
+        )
+        .expect("must append activation rollback payload");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback command should replay activation rollback");
+
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty(),
+            "rollback should remove activation state created by failed enable"
+        );
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_replays_integration_disable_owned_symlink_restore() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let txid = "tx-integration-disable-rollback";
+        write_transaction_metadata(
+            &layout,
+            &TransactionMetadata {
+                version: 1,
+                txid: txid.to_string(),
+                operation: "integrations".to_string(),
+                status: TransactionStatus::Failed,
+                started_at_unix: 1_771_001_266,
+                snapshot_id: None,
+            },
+        )
+        .expect("must write metadata");
+        set_active_transaction(&layout, txid).expect("must write active marker");
+
+        let host_path = layout.prefix().join("bin").join("democtl");
+        let source_path = layout
+            .prefix()
+            .join("share")
+            .join("integrations")
+            .join("path")
+            .join("demo")
+            .join("democtl");
+        let owner = ActivationOwner {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--demo".to_string(),
+            package: "demo".to_string(),
+            integration_key: "path_plugin:demo:democtl".to_string(),
+        };
+        let rollback = ActivationRollbackEntry {
+            operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+            path: host_path.display().to_string(),
+            previous_symlink_target: Some(source_path.display().to_string()),
+            previous_shim_target: None,
+            previous_owner: Some(owner),
+            created_symlink_target: None,
+            created_shim_target: None,
+            created_owner: None,
+            expected_current_symlink_target: None,
+            expected_current_shim_target: None,
+            expected_current_owner: None,
+            expected_current_absent: true,
+            created_parent_dirs: Vec::new(),
+        };
+        append_transaction_journal_entry(
+            &layout,
+            txid,
+            &TransactionJournalEntry {
+                seq: 1,
+                step: "integration_activation_rollback".to_string(),
+                state: "planned".to_string(),
+                path: Some(serde_json::to_string(&rollback).expect("must serialize rollback")),
+            },
+        )
+        .expect("must append activation rollback payload");
+
+        run_rollback_command(&layout, Some(txid.to_string()))
+            .expect("rollback command should replay activation rollback");
+
+        assert_eq!(
+            std::fs::read_link(&host_path).expect("must restore owned symlink"),
+            source_path
+        );
+        let updated = read_transaction_metadata(&layout, txid)
+            .expect("must read updated metadata")
+            .expect("metadata should remain");
+        assert_eq!(updated.status, "rolled_back");
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn rollback_replays_integration_preview_replacement_payloads() {
+        let owner = ActivationOwner {
+            package_state_key: "default--host--core--demo".to_string(),
+            package: "demo".to_string(),
+            integration_key: "path_plugin:demo:tool".to_string(),
+        };
+        let linux_path_plan = IntegrationActivationPlan {
+            package_state_key: owner.package_state_key.clone(),
+            package: owner.package.clone(),
+            integration_key: owner.integration_key.clone(),
+            kind: "path_plugin".to_string(),
+            adapter: IntegrationAdapterKind::PathPluginBin,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Enabled,
+            host_path: "/prefix/bin/tool".to_string(),
+            source_path: "/prefix/share/integrations/path/demo/tool-v2".to_string(),
+        };
+        let mut linux_fs = MemoryActivationFs::new(HostPlatform::Linux);
+        linux_fs.write_owned_symlink_for(
+            &linux_path_plan.host_path,
+            "/prefix/share/integrations/path/demo/tool-v1",
+            &owner.package_state_key,
+            &owner.package,
+            &owner.integration_key,
+        );
+
+        let linux_payload = preview_integration_activation_rollback(&linux_fs, &linux_path_plan, true)
+            .expect("replacement should journal restore payload");
+        assert_eq!(
+            linux_payload.operation,
+            ActivationRollbackOperation::RestoreOwnedSymlink
+        );
+        assert_eq!(
+            linux_payload.previous_symlink_target.as_deref(),
+            Some("/prefix/share/integrations/path/demo/tool-v1")
+        );
+        assert_eq!(
+            linux_payload.expected_current_symlink_target.as_deref(),
+            Some("/prefix/share/integrations/path/demo/tool-v2")
+        );
+
+        let docker_owner = ActivationOwner {
+            package_state_key: "default--host--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+        };
+        let docker_plan = IntegrationActivationPlan {
+            package_state_key: docker_owner.package_state_key.clone(),
+            package: docker_owner.package.clone(),
+            integration_key: docker_owner.integration_key.clone(),
+            kind: "docker_cli_plugin".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            host_path: "/home/user/.docker/cli-plugins/docker-compose".to_string(),
+            source_path: "/prefix/share/integrations/docker/cli-plugins/docker-compose-v2"
+                .to_string(),
+        };
+        let mut docker_fs = MemoryActivationFs::new(HostPlatform::Linux);
+        docker_fs.write_owned_symlink_for(
+            &docker_plan.host_path,
+            "/prefix/share/integrations/docker/cli-plugins/docker-compose-v1",
+            &docker_owner.package_state_key,
+            &docker_owner.package,
+            &docker_owner.integration_key,
+        );
+
+        let docker_payload = preview_integration_activation_rollback(&docker_fs, &docker_plan, true)
+            .expect("docker replacement should journal restore payload");
+        assert_eq!(
+            docker_payload.operation,
+            ActivationRollbackOperation::RestoreOwnedSymlink
+        );
+        assert_eq!(
+            docker_payload.previous_symlink_target.as_deref(),
+            Some("/prefix/share/integrations/docker/cli-plugins/docker-compose-v1")
+        );
+        assert_eq!(
+            docker_payload.expected_current_symlink_target.as_deref(),
+            Some("/prefix/share/integrations/docker/cli-plugins/docker-compose-v2")
+        );
+
+        let windows_plan = IntegrationActivationPlan {
+            host_path: "C:\\Crosspack\\bin\\tool.cmd".to_string(),
+            source_path: "C:\\Crosspack\\share\\integrations\\path\\demo\\tool-v2.exe"
+                .to_string(),
+            ..linux_path_plan
+        };
+        let mut windows_fs = MemoryActivationFs::new(HostPlatform::Windows);
+        windows_fs.write_owned_shim_for(
+            &windows_plan.host_path,
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\tool-v1.exe",
+            &owner.package_state_key,
+            &owner.package,
+            &owner.integration_key,
+        );
+
+        let windows_payload =
+            preview_integration_activation_rollback(&windows_fs, &windows_plan, true)
+                .expect("windows shim replacement should journal restore payload");
+        assert_eq!(
+            windows_payload.operation,
+            ActivationRollbackOperation::RestoreOwnedWindowsShim
+        );
+        assert_eq!(
+            windows_payload.previous_shim_target.as_deref(),
+            Some("C:\\Crosspack\\share\\integrations\\path\\demo\\tool-v1.exe")
+        );
+        assert_eq!(
+            windows_payload.expected_current_shim_target.as_deref(),
+            Some("C:\\Crosspack\\share\\integrations\\path\\demo\\tool-v2.exe")
+        );
+    }
+
+    #[test]
+    fn rollback_restores_activation_state_snapshot_for_uninstall_cleanup() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let package_name = "docker-compose";
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: package_name.to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        let previous = IntegrationActivationRecord {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--docker-compose".to_string(),
+            package: package_name.to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+            kind: "docker_cli_plugin".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some("/home/user/.docker/cli-plugins/docker-compose".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        };
+        let other = IntegrationActivationRecord {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--kubectx".to_string(),
+            package: "kubectx".to_string(),
+            integration_key: "path_plugin:kubectl:ctx".to_string(),
+            kind: "path_plugin".to_string(),
+            adapter: IntegrationAdapterKind::PathPluginBin,
+            host_path: Some("/prefix/bin/kubectl-ctx".to_string()),
+            ..previous.clone()
+        };
+        write_integration_activation_state(&layout, &[previous.clone(), other.clone()])
+            .expect("must seed activation state");
+
+        let snapshot_root = capture_package_state_snapshot(&layout, "tx-activation", package_name)
+            .expect("must capture activation state");
+        write_integration_activation_state(&layout, std::slice::from_ref(&other))
+            .expect("must simulate uninstall activation cleanup");
+        restore_package_state_snapshot(&layout, package_name, Some(&snapshot_root))
+            .expect("must restore activation state snapshot");
+
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert!(records.contains(&previous));
+        assert!(records.contains(&other));
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
@@ -5143,39 +5591,96 @@ ripgrep-legacy = "*"
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let status = Cli::try_parse_from(["crosspack", "services", "status", "demo"])
+        let status = Cli::try_parse_from(["crosspack", "services", "status", "demo", "web"])
             .expect("status parses");
         match status.command {
             Commands::Services {
-                command: ServicesCommands::Status { name },
-            } => assert_eq!(name, "demo"),
+                command: ServicesCommands::Status { package, service },
+            } => {
+                assert_eq!(package, "demo");
+                assert_eq!(service, "web");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let start =
-            Cli::try_parse_from(["crosspack", "services", "start", "demo"]).expect("start parses");
+        let start = Cli::try_parse_from(["crosspack", "services", "start", "demo", "web"])
+            .expect("start parses");
         match start.command {
             Commands::Services {
-                command: ServicesCommands::Start { name },
-            } => assert_eq!(name, "demo"),
+                command: ServicesCommands::Start { package, service },
+            } => {
+                assert_eq!(package, "demo");
+                assert_eq!(service, "web");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let stop =
-            Cli::try_parse_from(["crosspack", "services", "stop", "demo"]).expect("stop parses");
+        let stop = Cli::try_parse_from(["crosspack", "services", "stop", "demo", "web"])
+            .expect("stop parses");
         match stop.command {
             Commands::Services {
-                command: ServicesCommands::Stop { name },
-            } => assert_eq!(name, "demo"),
+                command: ServicesCommands::Stop { package, service },
+            } => {
+                assert_eq!(package, "demo");
+                assert_eq!(service, "web");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let restart = Cli::try_parse_from(["crosspack", "services", "restart", "demo"])
+        let restart = Cli::try_parse_from(["crosspack", "services", "restart", "demo", "web"])
             .expect("restart parses");
         match restart.command {
             Commands::Services {
-                command: ServicesCommands::Restart { name },
-            } => assert_eq!(name, "demo"),
+                command: ServicesCommands::Restart { package, service },
+            } => {
+                assert_eq!(package, "demo");
+                assert_eq!(service, "web");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_integrations_enable_disable_subcommands() {
+        let enable = Cli::try_parse_from([
+            "crosspack",
+            "integrations",
+            "enable",
+            "docker-compose",
+            "compose",
+        ])
+        .expect("enable parses");
+        match enable.command {
+            Commands::Integrations {
+                command: IntegrationsCommands::Enable {
+                    package,
+                    integration,
+                },
+            } => {
+                assert_eq!(package, "docker-compose");
+                assert_eq!(integration, "compose");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let disable = Cli::try_parse_from([
+            "crosspack",
+            "integrations",
+            "disable",
+            "docker-compose",
+            "docker_cli_plugin:compose",
+        ])
+        .expect("disable parses");
+        match disable.command {
+            Commands::Integrations {
+                command: IntegrationsCommands::Disable {
+                    package,
+                    integration,
+                },
+            } => {
+                assert_eq!(package, "docker-compose");
+                assert_eq!(integration, "docker_cli_plugin:compose");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -5472,6 +5977,75 @@ ripgrep-legacy = "*"
             .map(|row| format!("{} {}", row.name, row.state.as_str()))
             .collect::<Vec<_>>();
         assert_eq!(rendered, vec!["alpha stopped", "charlie running"]);
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn managed_services_list_reports_applied_false_for_ok_but_stopped_activation() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let receipt = InstallReceipt {
+            name: "caddy".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: Vec::new(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            artifact_url: None,
+            artifact_sha256: None,
+            cache_path: None,
+            exposed_bins: Vec::new(),
+            exposed_completions: Vec::new(),
+            snapshot_id: None,
+            install_mode: InstallMode::Managed,
+            install_reason: InstallReason::Root,
+            install_status: "installed".to_string(),
+            installed_at_unix: 1,
+        };
+        let package_state_key = InstalledPackageIdentity::from_legacy_receipt(&receipt).state_key();
+        write_install_receipt(&layout, &receipt)
+        .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "caddy",
+            &[crosspack_core::ServiceDeclaration {
+                name: "caddy".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write declared services");
+        write_integration_activation_state(
+            &layout,
+            &[
+                IntegrationActivationRecord {
+                    package_state_key: "stale--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+                    package: "caddy".to_string(),
+                    integration_key: "service:caddy".to_string(),
+                    kind: "service".to_string(),
+                    adapter: IntegrationAdapterKind::SystemdUser,
+                    scope: IntegrationActivationScope::User,
+                    desired_state: IntegrationDesiredState::Running,
+                    applied_state: IntegrationAppliedState::Running,
+                    host_path: Some("systemd-user:caddy.service".to_string()),
+                    reason_code: IntegrationReasonCode::Ok,
+                },
+                IntegrationActivationRecord {
+                    package_state_key,
+                    package: "caddy".to_string(),
+                    integration_key: "service:caddy".to_string(),
+                    kind: "service".to_string(),
+                    adapter: IntegrationAdapterKind::SystemdUser,
+                    scope: IntegrationActivationScope::User,
+                    desired_state: IntegrationDesiredState::Projected,
+                    applied_state: IntegrationAppliedState::Stopped,
+                    host_path: Some("systemd-user:caddy.service".to_string()),
+                    reason_code: IntegrationReasonCode::Ok,
+                },
+            ],
+        )
+        .expect("must seed activation state");
+
+        let rows = collect_managed_service_rows(&layout).expect("must collect service rows");
+        assert_eq!(format_managed_service_row(&rows[0]), "service package=caddy name=caddy state=stopped adapter=systemd-user scope=user applied=false reason=ok");
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -9380,6 +9954,219 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn service_activation_transaction_install_fails_closed_before_host_mutation() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: Some("services/caddy.service".to_string()),
+            macos_launch_agent: None,
+            windows_service: None,
+            enable: true,
+        };
+        let projections = projected_integrations("caddy", &integration)
+            .expect("must project service integration");
+        write_integration_state(&layout, "caddy", &projections)
+            .expect("must seed projected integration state");
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let err = activate_enabled_services_for_install(
+            &layout,
+            "caddy",
+            "default--x86_64-unknown-linux-gnu--core--caddy",
+            &host,
+            std::slice::from_ref(&integration),
+            &projections,
+        )
+        .expect_err("production install-time service activation should fail closed");
+
+        assert!(
+            err.to_string().contains("service activation failed"),
+            "unexpected error: {err}"
+        );
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert!(
+            records.is_empty(),
+            "fail-closed service enable must not persist applied activation state"
+        );
+        assert!(
+            std::fs::read_dir(layout.transactions_dir())
+                .map(|entries| {
+                    entries.filter_map(|entry| entry.ok()).all(|entry| {
+                        entry.path().extension().and_then(|ext| ext.to_str()) != Some("journal")
+                    })
+                })
+                .unwrap_or(true),
+            "fail-closed service enable must not journal synthetic metadata rollback"
+        );
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn service_activation_transaction_install_rejects_existing_service_state_before_apply() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: Some("services/caddy.service".to_string()),
+            macos_launch_agent: None,
+            windows_service: None,
+            enable: true,
+        };
+        let projections = projected_integrations("caddy", &integration)
+            .expect("must project service integration");
+        write_integration_state(&layout, "caddy", &projections)
+            .expect("must seed projected integration state");
+        write_integration_activation_state(
+            &layout,
+            &[IntegrationActivationRecord {
+                package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+                package: "caddy".to_string(),
+                integration_key: "service:caddy".to_string(),
+                kind: "service".to_string(),
+                adapter: IntegrationAdapterKind::SystemdUser,
+                scope: IntegrationActivationScope::User,
+                desired_state: IntegrationDesiredState::Running,
+                applied_state: IntegrationAppliedState::Running,
+                host_path: Some("systemd-user:caddy.service".to_string()),
+                reason_code: IntegrationReasonCode::Ok,
+            }],
+        )
+        .expect("must seed existing activation state");
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let err = activate_enabled_services_for_install(
+            &layout,
+            "caddy",
+            "default--x86_64-unknown-linux-gnu--core--caddy",
+            &host,
+            std::slice::from_ref(&integration),
+            &projections,
+        )
+        .expect_err("existing service activation should be rejected before replacement");
+
+        assert!(
+            err.to_string().contains("host-path-conflict"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn service_activation_transaction_failure_leaves_no_activation_journal_or_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: Some("services/caddy.service".to_string()),
+            macos_launch_agent: None,
+            windows_service: None,
+            enable: true,
+        };
+        let projections = projected_integrations("caddy", &integration)
+            .expect("must project service integration");
+        write_integration_state(&layout, "caddy", &projections)
+            .expect("must seed projected integration state");
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut txid = String::new();
+
+        let err = execute_with_transaction(&layout, "install", None, |tx| {
+            txid = tx.txid.clone();
+            activate_enabled_services_for_install(
+                &layout,
+                "caddy",
+                "default--x86_64-unknown-linux-gnu--core--caddy",
+                &host,
+                std::slice::from_ref(&integration),
+                &projections,
+            )
+        })
+        .expect_err("service enable should fail closed inside transaction");
+
+        assert!(
+            err.to_string().contains("service activation failed"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty()
+        );
+        let journal_path = layout.transaction_journal_path(&txid);
+        let journal = std::fs::read_to_string(&journal_path).unwrap_or_default();
+        assert!(
+            !journal.contains("RemoveCreatedServiceMetadata"),
+            "synthetic service rollback must not be journaled: {journal}"
+        );
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn service_activation_transaction_failure_removes_copied_launch_agent() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let prefix = layout.prefix().to_path_buf();
+        let source_path = prefix
+            .join("share")
+            .join("integrations")
+            .join("agents")
+            .join("caddy.plist");
+        std::fs::create_dir_all(source_path.parent().expect("source must have parent"))
+            .expect("must create source parent");
+        std::fs::write(&source_path, b"<plist><dict/></plist>").expect("must write source plist");
+        let home = prefix.join("home").join("user");
+        let launch_agent = home
+            .join("Library")
+            .join("LaunchAgents")
+            .join("caddy.plist");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: None,
+            macos_launch_agent: Some("agents/caddy.plist".to_string()),
+            windows_service: None,
+            enable: true,
+        };
+        let projections = projected_integrations("caddy", &integration)
+            .expect("must project service integration");
+        write_integration_state(&layout, "caddy", &projections)
+            .expect("must seed projected integration state");
+        let host = HostActivationContext::macos()
+            .with_prefix(prefix.to_str().expect("prefix must be utf-8"))
+            .with_home(home.to_str().expect("home must be utf-8"));
+
+        let err = activate_enabled_services_for_install(
+            &layout,
+            "caddy",
+            "default--aarch64-apple-darwin--core--caddy",
+            &host,
+            std::slice::from_ref(&integration),
+            &projections,
+        )
+        .expect_err("launchctl failure should fail closed");
+
+        assert!(
+            err.to_string().contains("service activation failed"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !launch_agent.exists(),
+            "failed install-time activation must remove copied launch agent"
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn ambiguous_installed_package_name_blocks_uninstall_with_identity_guidance() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -9550,7 +10337,8 @@ old-cc = "<2.0.0"
             .expect("must create stale integration dir");
         fs::write(layout.integrations_dir().join(&stale.rel_path), b"stale")
             .expect("must write stale integration");
-        write_integration_state(&layout, "kubectx", std::slice::from_ref(&stale))
+        let identity = test_installed_identity("kubectx");
+        write_identity_integration_state(&layout, &identity, std::slice::from_ref(&stale))
             .expect("must seed stale integration state");
 
         let integration = PackageIntegration::PathPlugin {
@@ -9561,6 +10349,7 @@ old-cc = "<2.0.0"
         let projected = sync_integration_projection_state(
             &layout,
             "kubectx",
+            &identity,
             &install_root,
             std::slice::from_ref(&integration),
         )
@@ -9571,7 +10360,11 @@ old-cc = "<2.0.0"
         assert!(layout.integrations_dir().join(&projected[0].rel_path).exists());
         assert!(!layout.integrations_dir().join(&stale.rel_path).exists());
         assert_eq!(
-            read_integration_state(&layout, "kubectx").expect("must read state"),
+            read_identity_integration_state(&layout, &identity).expect("must read identity state"),
+            projected
+        );
+        assert_eq!(
+            read_integration_state(&layout, "kubectx").expect("must read legacy mirror state"),
             projected
         );
     }
@@ -9599,12 +10392,890 @@ old-cc = "<2.0.0"
         let err = sync_integration_projection_state(
             &layout,
             "other-compose",
+            &test_installed_identity("other-compose"),
             &install_root,
             std::slice::from_ref(&integration),
         )
         .expect_err("other package ownership should block projection");
 
         assert!(err.to_string().contains("already owned by package 'docker-compose'"));
+    }
+
+    #[test]
+    fn integration_list_lines_report_projected_state_from_sidecars() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_integration_state(
+            &layout,
+            "kubectx",
+            &[IntegrationProjection {
+                kind: "path_plugin".to_string(),
+                key: "path_plugin:kubectl:ctx".to_string(),
+                rel_path: "path-plugins/kubectl/kubectl-ctx".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let rows = collect_projected_integration_rows(&layout).expect("must collect integrations");
+        let lines = format_projected_integration_lines(&rows);
+
+        assert_eq!(
+            lines,
+            vec!["integration package=kubectx name=ctx key=path_plugin:kubectl:ctx kind=path_plugin state=projected adapter=none reason=not-enabled path=path-plugins/kubectl/kubectl-ctx"],
+        );
+    }
+
+    #[test]
+    fn integrations_projected_line_percent_encodes_rel_path_with_spaces_without_activation() {
+        let row = ProjectedIntegrationRow {
+            package: "demo".to_string(),
+            name: "tool".to_string(),
+            key: "path_plugin:demo:tool".to_string(),
+            kind: "path_plugin".to_string(),
+            rel_path: "path-plugins/demo/my tool".to_string(),
+            activation: None,
+        };
+
+        let line = format_projected_integration_lines(&[row])
+            .into_iter()
+            .next()
+            .expect("must format projected row");
+        let fields = line
+            .split_whitespace()
+            .filter_map(|field| field.split_once('='))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(fields.get("state"), Some(&"projected"));
+        assert_eq!(fields.get("adapter"), Some(&"none"));
+        assert_eq!(fields.get("path"), Some(&"path-plugins/demo/my%20tool"));
+    }
+
+    #[test]
+    fn integration_status_line_accepts_full_key_or_short_name() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_integration_state(
+            &layout,
+            "docker-compose",
+            &[IntegrationProjection {
+                kind: "docker_cli_plugin".to_string(),
+                key: "docker_cli_plugin:compose".to_string(),
+                rel_path: "docker/cli-plugins/docker-compose".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let short = integration_status_line(&layout, "docker-compose", "compose")
+            .expect("must resolve short integration name");
+        let full = integration_status_line(&layout, "docker-compose", "docker_cli_plugin:compose")
+            .expect("must resolve full integration key");
+
+        assert_eq!(short, full);
+        assert_eq!(
+            short,
+            "integration package=docker-compose name=compose key=docker_cli_plugin:compose kind=docker_cli_plugin state=projected adapter=none reason=not-enabled path=docker/cli-plugins/docker-compose",
+        );
+    }
+
+    #[test]
+    fn integrations_enable_disable_lines_use_activation_state_key_order() {
+        let projection = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: "docker/cli-plugins/docker-compose".to_string(),
+        };
+        let enabled = IntegrationActivationRecord {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+            kind: "docker_cli_plugin".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some("/home/user/.docker/cli-plugins/docker-compose".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        };
+        let disabled = IntegrationActivationRecord {
+            desired_state: IntegrationDesiredState::Projected,
+            applied_state: IntegrationAppliedState::Projected,
+            ..enabled.clone()
+        };
+
+        assert_eq!(
+            format_integration_activation_line("docker-compose", &projection, Some(&enabled)),
+            "integration package=docker-compose name=compose key=docker_cli_plugin:compose kind=docker_cli_plugin state=enabled adapter=docker-cli reason=ok path=/home/user/.docker/cli-plugins/docker-compose"
+        );
+        assert_eq!(
+            format_integration_activation_line("docker-compose", &projection, Some(&disabled)),
+            "integration package=docker-compose name=compose key=docker_cli_plugin:compose kind=docker_cli_plugin state=projected adapter=docker-cli reason=ok path=/home/user/.docker/cli-plugins/docker-compose"
+        );
+    }
+
+    #[test]
+    fn integrations_windows_path_output_stays_key_value_parseable() {
+        let projection = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: "docker/cli-plugins/docker-compose".to_string(),
+        };
+        let activation = IntegrationActivationRecord {
+            package_state_key: "default--x86_64-pc-windows-msvc--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+            kind: "docker_cli_plugin".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some("C:\\Users\\Ada\\.docker\\cli-plugins\\docker-compose".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        };
+
+        let line = format_integration_activation_line("docker-compose", &projection, Some(&activation));
+        let fields = line
+            .split_whitespace()
+            .filter_map(|field| field.split_once('='))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(fields.get("state"), Some(&"enabled"));
+        assert_eq!(fields.get("adapter"), Some(&"docker-cli"));
+        assert_eq!(fields.get("reason"), Some(&"ok"));
+        assert_eq!(
+            fields.get("path"),
+            Some(&"C:%5CUsers%5CAda%5C.docker%5Ccli-plugins%5Cdocker-compose")
+        );
+    }
+
+    #[test]
+    fn integrations_path_with_spaces_is_percent_encoded_for_key_value_output() {
+        let projection = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: "docker/cli-plugins/docker-compose".to_string(),
+        };
+        let activation = IntegrationActivationRecord {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+            kind: "docker_cli_plugin".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some("/home/ada/Docker Plugins/docker-compose".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        };
+
+        let line = format_integration_activation_line("docker-compose", &projection, Some(&activation));
+        let fields = line
+            .split_whitespace()
+            .filter_map(|field| field.split_once('='))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            fields.get("path"),
+            Some(&"/home/ada/Docker%20Plugins/docker-compose")
+        );
+    }
+
+    #[test]
+    fn integrations_short_name_ambiguity_requires_full_keys_for_enable() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_integration_state(
+            &layout,
+            "demo",
+            &[
+                IntegrationProjection {
+                    kind: "docker_cli_plugin".to_string(),
+                    key: "docker_cli_plugin:compose".to_string(),
+                    rel_path: "docker/cli-plugins/docker-compose".to_string(),
+                },
+                IntegrationProjection {
+                    kind: "path_plugin".to_string(),
+                    key: "path_plugin:docker:compose".to_string(),
+                    rel_path: "path-plugins/docker/docker-compose".to_string(),
+                },
+            ],
+        )
+        .expect("must seed integration state");
+
+        let err = resolve_projected_integration(&layout, "demo", "compose")
+            .expect_err("ambiguous short name should fail");
+
+        assert!(err.to_string().contains("use full integration key"));
+    }
+
+    #[test]
+    fn integrations_path_plugin_enable_derives_host_binary_name_from_full_key() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "kubectx".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "kubectx",
+            &[IntegrationProjection {
+                kind: "path_plugin".to_string(),
+                key: "path_plugin:kubectl:ctx".to_string(),
+                rel_path: "path-plugins/kubectl/kubectl-ctx".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+        let line = run_integration_activation_command_with_fs(
+            &layout,
+            &host,
+            &mut fs,
+            "kubectx",
+            "ctx",
+            true,
+        )
+        .expect("path plugin enable should succeed through fake installer fs");
+
+        assert!(line.contains("state=enabled adapter=path-plugin-bin reason=ok"));
+        assert!(line.contains("path=/prefix/bin/kubectl-ctx"));
+    }
+
+    #[test]
+    fn integrations_activation_failure_persists_status_record_without_false_ok() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "docker-compose".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "docker-compose",
+            &[IntegrationProjection {
+                kind: "docker_cli_plugin".to_string(),
+                key: "docker_cli_plugin:compose".to_string(),
+                rel_path: "docker/cli-plugins/docker-compose".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+        fs.write_file("/home/user/.docker/cli-plugins/docker-compose", b"host-owned");
+
+        let line = run_integration_activation_command_with_fs(
+            &layout,
+            &host,
+            &mut fs,
+            "docker-compose",
+            "compose",
+            true,
+        )
+        .expect("conflict should render deterministic line");
+
+        assert!(line.contains("state=projected adapter=docker-cli reason=host-path-conflict"));
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records.len(), 1, "failed activation should persist status record");
+        assert_eq!(records[0].reason_code, IntegrationReasonCode::HostPathConflict);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
+    }
+
+    #[test]
+    fn integrations_disable_failure_preserves_failure_applied_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let projection = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: "docker/cli-plugins/docker-compose".to_string(),
+        };
+        let plan = IntegrationActivationPlan {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: projection.key.clone(),
+            kind: projection.kind.clone(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Projected,
+            host_path: "/home/user/.docker/cli-plugins/docker-compose".to_string(),
+            source_path: "/prefix/share/integrations/docker/cli-plugins/docker-compose".to_string(),
+        };
+
+        let line = finish_integration_activation_command(
+            &layout,
+            "docker-compose",
+            &projection,
+            &plan,
+            ActivationAdapterOutcome {
+                reason_code: IntegrationReasonCode::HostPathConflict,
+                applied_state: IntegrationAppliedState::Failed,
+                rollback: Vec::new(),
+            },
+            false,
+        )
+        .expect("disable failure should render deterministic line");
+
+        assert!(line.contains("state=projected adapter=docker-cli reason=host-path-conflict"));
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records[0].desired_state, IntegrationDesiredState::Projected);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
+    }
+
+    #[test]
+    fn integrations_activation_success_persists_activation_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "docker-compose".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "docker-compose",
+            &[IntegrationProjection {
+                kind: "docker_cli_plugin".to_string(),
+                key: "docker_cli_plugin:compose".to_string(),
+                rel_path: "docker/cli-plugins/docker-compose".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+        let line = run_integration_activation_command_with_fs(
+            &layout,
+            &host,
+            &mut fs,
+            "docker-compose",
+            "compose",
+            true,
+        )
+        .expect("fake activation should succeed");
+
+        assert!(line.contains("state=enabled adapter=docker-cli reason=ok"));
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].integration_key, "docker_cli_plugin:compose");
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Enabled);
+    }
+
+    #[test]
+    fn integrations_enable_rejects_active_transaction_before_mutation() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        set_active_transaction(&layout, "tx-existing").expect("must seed active transaction");
+
+        let err = run_integration_activation_command(&layout, "docker-compose", "compose", true)
+            .expect_err("active transaction should block explicit activation");
+
+        assert!(err.to_string().contains("active_transaction"));
+    }
+
+    #[test]
+    fn integrations_enable_journals_rollback_intent_before_success() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "docker-compose".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "docker-compose",
+            &[IntegrationProjection {
+                kind: "docker_cli_plugin".to_string(),
+                key: "docker_cli_plugin:compose".to_string(),
+                rel_path: "docker/cli-plugins/docker-compose".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut line = None;
+        execute_with_transaction(&layout, "integrations", None, |tx| {
+            let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+            line = Some(run_integration_activation_command_with_fs_and_tx(
+                &layout,
+                Some(tx),
+                &host,
+                &mut fs,
+                "docker-compose",
+                "compose",
+                true,
+            )?);
+            Ok(())
+        })
+        .expect("transactional activation should succeed");
+
+        assert!(line.expect("must render line").contains("reason=ok"));
+        let journals = std::fs::read_dir(layout.transactions_dir())
+            .expect("must read transaction dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("journal"))
+            .map(|entry| std::fs::read_to_string(entry.path()).expect("must read journal"))
+            .collect::<Vec<_>>();
+        assert!(
+            journals
+                .iter()
+                .any(|journal| journal.contains("integration_activation_rollback")),
+            "activation transaction should journal rollback intent"
+        );
+    }
+
+    #[test]
+    fn service_status_lines_use_package_service_activation_state_key_order() {
+        let activation = IntegrationActivationRecord {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+            package: "caddy".to_string(),
+            integration_key: "service:caddy".to_string(),
+            kind: "service".to_string(),
+            adapter: IntegrationAdapterKind::SystemdUser,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Running,
+            applied_state: IntegrationAppliedState::Running,
+            host_path: Some("systemd-user:caddy.service".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        };
+
+        assert_eq!(
+            format_service_activation_line("caddy", "caddy", &activation, true),
+            "service package=caddy name=caddy state=running adapter=systemd-user scope=user applied=true reason=ok"
+        );
+
+        let failed = IntegrationActivationRecord {
+            adapter: IntegrationAdapterKind::LaunchdUser,
+            applied_state: IntegrationAppliedState::Unsupported,
+            reason_code: IntegrationReasonCode::AdapterToolMissing,
+            ..activation
+        };
+        assert_eq!(
+            format_service_activation_line("caddy", "caddy", &failed, false),
+            "service package=caddy name=caddy state=unsupported adapter=launchd-user scope=user applied=false reason=adapter-tool-missing"
+        );
+    }
+
+    #[test]
+    fn service_status_line_for_running_activation_reports_applied_true() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "caddy".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "caddy",
+            &[ServiceDeclaration {
+                name: "caddy".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write service declaration");
+        write_integration_activation_state(
+            &layout,
+            &[IntegrationActivationRecord {
+                package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+                package: "caddy".to_string(),
+                integration_key: "service:caddy".to_string(),
+                kind: "service".to_string(),
+                adapter: IntegrationAdapterKind::SystemdUser,
+                scope: IntegrationActivationScope::User,
+                desired_state: IntegrationDesiredState::Running,
+                applied_state: IntegrationAppliedState::Running,
+                host_path: Some("systemd-user:caddy.service".to_string()),
+                reason_code: IntegrationReasonCode::Ok,
+            }],
+        )
+        .expect("must seed activation state");
+
+        let line = service_status_line_for_package_from_state(&layout, "caddy", "caddy")
+            .expect("status should render activation state");
+
+        assert_eq!(
+            line,
+            "service package=caddy name=caddy state=running adapter=systemd-user scope=user applied=true reason=ok"
+        );
+    }
+
+    #[test]
+    fn service_start_without_activation_record_reports_non_ok_and_does_not_noop() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "caddy".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "caddy",
+            &[ServiceDeclaration {
+                name: "caddy".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write service declaration");
+
+        let line = service_action_line_for_package(
+            &layout,
+            "caddy",
+            "caddy",
+            NativeServiceAction::Start,
+            |_| ActivationAdapterOutcome {
+                reason_code: IntegrationReasonCode::StateMissing,
+                applied_state: IntegrationAppliedState::Unsupported,
+                rollback: Vec::new(),
+            },
+        )
+        .expect("service action should render deterministic non-ok line");
+
+        assert_eq!(
+            line,
+            "service package=caddy name=caddy state=unsupported adapter=none scope=user applied=false reason=state-missing"
+        );
+    }
+
+    #[test]
+    fn service_start_updates_activation_state_after_adapter_success() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "caddy".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "caddy",
+            &[ServiceDeclaration {
+                name: "caddy".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write service declaration");
+        write_integration_activation_state(
+            &layout,
+            &[IntegrationActivationRecord {
+                package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+                package: "caddy".to_string(),
+                integration_key: "service:caddy".to_string(),
+                kind: "service".to_string(),
+                adapter: IntegrationAdapterKind::SystemdUser,
+                scope: IntegrationActivationScope::User,
+                desired_state: IntegrationDesiredState::Projected,
+                applied_state: IntegrationAppliedState::Stopped,
+                host_path: Some("systemd-user:caddy.service".to_string()),
+                reason_code: IntegrationReasonCode::Ok,
+            }],
+        )
+        .expect("must seed activation state");
+
+        let line = service_action_line_for_package(
+            &layout,
+            "caddy",
+            "caddy",
+            NativeServiceAction::Start,
+            |_| ActivationAdapterOutcome {
+                reason_code: IntegrationReasonCode::Ok,
+                applied_state: IntegrationAppliedState::Running,
+                rollback: Vec::new(),
+            },
+        )
+        .expect("service start should render updated line");
+
+        assert_eq!(
+            line,
+            "service package=caddy name=caddy state=running adapter=systemd-user scope=user applied=true reason=ok"
+        );
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
+        assert_eq!(records[0].desired_state, IntegrationDesiredState::Running);
+    }
+
+    #[test]
+    fn service_action_command_rejects_active_transaction_before_state_write() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        set_active_transaction(&layout, "tx-service-active").expect("must write active marker");
+
+        let err = run_service_action_for_package_command(
+            &layout,
+            "caddy",
+            "caddy",
+            NativeServiceAction::Start,
+        )
+        .expect_err("active transaction should block service mutation");
+
+        assert!(
+            err.to_string().contains("cannot services")
+                && err.to_string().contains("active_transaction"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty(),
+            "blocked service action must not write activation state"
+        );
+    }
+
+    #[test]
+    fn service_projection_status_treats_duplicate_platform_files_as_one_integration() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_integration_state(
+            &layout,
+            "caddy",
+            &[
+                IntegrationProjection {
+                    kind: "service".to_string(),
+                    key: "service:caddy".to_string(),
+                    rel_path: "services/caddy/caddy.service".to_string(),
+                },
+                IntegrationProjection {
+                    kind: "service".to_string(),
+                    key: "service:caddy".to_string(),
+                    rel_path: "services/caddy/caddy.launchd.plist".to_string(),
+                },
+            ],
+        )
+        .expect("must seed multi-platform service projections");
+
+        let projection = resolve_projected_integration(&layout, "caddy", "service:caddy")
+            .expect("duplicate platform files should resolve as one logical service integration");
+
+        assert_eq!(projection.key, "service:caddy");
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn integration_activation_test_helper_dispatches_service_runner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("caddy", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: Some("services/caddy.service".to_string()),
+            macos_launch_agent: None,
+            windows_service: None,
+            enable: false,
+        };
+        write_integration_state(
+            &layout,
+            "caddy",
+            &projected_integrations("caddy", &integration).expect("must project service"),
+        )
+        .expect("must seed integration state");
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+        let mut called = false;
+
+        let line = run_integration_activation_command_with_fs_tx_and_service_runner(
+            &layout,
+            None,
+            &host,
+            &mut fs,
+            "caddy",
+            "service:caddy",
+            true,
+            |plan, enable| {
+                called = true;
+                assert_eq!(plan.kind, "service");
+                assert!(enable);
+                ActivationAdapterOutcome {
+                    reason_code: IntegrationReasonCode::Ok,
+                    applied_state: IntegrationAppliedState::Running,
+                    rollback: Vec::new(),
+                }
+            },
+        )
+        .expect("service integration activation should use injected service runner");
+
+        assert!(called, "service activation should call injected runner");
+        assert!(line.contains("state=running adapter=systemd-user reason=ok"));
+        let records = read_integration_activation_state(&layout).expect("must read state");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
+        assert_eq!(records[0].reason_code, IntegrationReasonCode::Ok);
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
+    fn integration_status_line_reports_ambiguous_short_names_with_full_key_guidance() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_integration_state(
+            &layout,
+            "kubectl-plugins",
+            &[
+                IntegrationProjection {
+                    kind: "path_plugin".to_string(),
+                    key: "path_plugin:kubectl:ctx".to_string(),
+                    rel_path: "path-plugins/kubectl/kubectl-ctx".to_string(),
+                },
+                IntegrationProjection {
+                    kind: "path_plugin".to_string(),
+                    key: "path_plugin:helm:ctx".to_string(),
+                    rel_path: "path-plugins/helm/helm-ctx".to_string(),
+                },
+            ],
+        )
+        .expect("must seed integration state");
+
+        let rows = collect_projected_integration_rows(&layout).expect("must collect integrations");
+        let lines = format_projected_integration_lines(&rows);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("key=path_plugin:kubectl:ctx")),
+            "list output should expose the kubectl full key"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("key=path_plugin:helm:ctx")),
+            "list output should expose the helm full key"
+        );
+
+        let err = integration_status_line(&layout, "kubectl-plugins", "ctx")
+            .expect_err("short name should be ambiguous");
+        assert!(
+            err.to_string().contains("use full integration key"),
+            "unexpected error: {err}"
+        );
+
+        let full = integration_status_line(&layout, "kubectl-plugins", "path_plugin:helm:ctx")
+            .expect("full key should resolve ambiguous short name");
+        assert_eq!(
+            full,
+            "integration package=kubectl-plugins name=ctx key=path_plugin:helm:ctx kind=path_plugin state=projected adapter=none reason=not-enabled path=path-plugins/helm/helm-ctx",
+        );
     }
 
     #[test]

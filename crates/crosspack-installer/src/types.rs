@@ -39,6 +39,222 @@ pub struct IntegrationProjection {
     pub rel_path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostPlatform {
+    Linux,
+    Macos,
+    Windows,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationAdapterKind {
+    None,
+    DockerCli,
+    PathPluginBin,
+    SystemdUser,
+    LaunchdUser,
+    WindowsServiceUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationActivationScope {
+    None,
+    User,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationDesiredState {
+    Projected,
+    Enabled,
+    Running,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationAppliedState {
+    Projected,
+    Installed,
+    Enabled,
+    Running,
+    Stopped,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationReasonCode {
+    Ok,
+    NotEnabled,
+    UnsupportedHost,
+    AdapterToolMissing,
+    HostPathConflict,
+    EscalationRequired,
+    NativeCommandFailed,
+    InvalidServiceMetadata,
+    StateMissing,
+    StateAmbiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationActivationRecord {
+    pub package_state_key: String,
+    pub package: String,
+    pub integration_key: String,
+    pub kind: String,
+    pub adapter: IntegrationAdapterKind,
+    pub scope: IntegrationActivationScope,
+    pub desired_state: IntegrationDesiredState,
+    pub applied_state: IntegrationAppliedState,
+    pub host_path: Option<String>,
+    pub reason_code: IntegrationReasonCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationActivationPlan {
+    pub package_state_key: String,
+    pub package: String,
+    pub integration_key: String,
+    pub kind: String,
+    pub adapter: IntegrationAdapterKind,
+    pub scope: IntegrationActivationScope,
+    pub desired_state: IntegrationDesiredState,
+    pub host_path: String,
+    pub source_path: String,
+}
+
+impl IntegrationActivationPlan {
+    pub fn with_package_state_key(mut self, package_state_key: impl Into<String>) -> Self {
+        self.package_state_key = package_state_key.into();
+        self
+    }
+}
+
+impl IntegrationAdapterKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DockerCli => "docker-cli",
+            Self::PathPluginBin => "path-plugin-bin",
+            Self::SystemdUser => "systemd-user",
+            Self::LaunchdUser => "launchd-user",
+            Self::WindowsServiceUser => "windows-service-user",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "docker-cli" => Ok(Self::DockerCli),
+            "path-plugin-bin" => Ok(Self::PathPluginBin),
+            "systemd-user" => Ok(Self::SystemdUser),
+            "launchd-user" => Ok(Self::LaunchdUser),
+            "windows-service-user" => Ok(Self::WindowsServiceUser),
+            _ => Err(anyhow!("invalid integration adapter kind: {value}")),
+        }
+    }
+}
+
+impl IntegrationActivationScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::User => "user",
+            Self::System => "system",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "user" => Ok(Self::User),
+            "system" => Ok(Self::System),
+            _ => Err(anyhow!("invalid integration activation scope: {value}")),
+        }
+    }
+}
+
+impl IntegrationDesiredState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Projected => "projected",
+            Self::Enabled => "enabled",
+            Self::Running => "running",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "projected" => Ok(Self::Projected),
+            "enabled" => Ok(Self::Enabled),
+            "running" => Ok(Self::Running),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(anyhow!("invalid integration desired state: {value}")),
+        }
+    }
+}
+
+impl IntegrationAppliedState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Projected => "projected",
+            Self::Installed => "installed",
+            Self::Enabled => "enabled",
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "projected" => Ok(Self::Projected),
+            "installed" => Ok(Self::Installed),
+            "enabled" => Ok(Self::Enabled),
+            "running" => Ok(Self::Running),
+            "stopped" => Ok(Self::Stopped),
+            "failed" => Ok(Self::Failed),
+            "unsupported" => Ok(Self::Unsupported),
+            _ => Err(anyhow!("invalid integration applied state: {value}")),
+        }
+    }
+}
+
+impl IntegrationReasonCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NotEnabled => "not-enabled",
+            Self::UnsupportedHost => "unsupported-host",
+            Self::AdapterToolMissing => "adapter-tool-missing",
+            Self::HostPathConflict => "host-path-conflict",
+            Self::EscalationRequired => "escalation-required",
+            Self::NativeCommandFailed => "native-command-failed",
+            Self::InvalidServiceMetadata => "invalid-service-metadata",
+            Self::StateMissing => "state-missing",
+            Self::StateAmbiguous => "state-ambiguous",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "ok" => Ok(Self::Ok),
+            "not-enabled" => Ok(Self::NotEnabled),
+            "unsupported-host" => Ok(Self::UnsupportedHost),
+            "adapter-tool-missing" => Ok(Self::AdapterToolMissing),
+            "host-path-conflict" => Ok(Self::HostPathConflict),
+            "escalation-required" => Ok(Self::EscalationRequired),
+            "native-command-failed" => Ok(Self::NativeCommandFailed),
+            "invalid-service-metadata" => Ok(Self::InvalidServiceMetadata),
+            "state-missing" => Ok(Self::StateMissing),
+            "state-ambiguous" => Ok(Self::StateAmbiguous),
+            _ => Err(anyhow!("invalid integration reason code: {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeUninstallAction {
     pub key: String,

@@ -5,18 +5,20 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::durable;
 use crate::{PrefixLayout, TransactionJournalEntry, TransactionMetadata, TransactionStatus};
 
 #[cfg(test)]
-static FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST: AtomicBool = AtomicBool::new(false);
+static FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(test)]
-pub(crate) fn fail_next_active_transaction_after_write_for_test() {
-    FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST.store(true, Ordering::SeqCst);
+pub(crate) fn fail_active_transaction_after_write_for_test(path: PathBuf) {
+    *FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST
+        .lock()
+        .expect("failure injection lock poisoned") = Some(path);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,8 +67,14 @@ pub fn set_active_transaction(layout: &PrefixLayout, txid: &str) -> Result<PathB
                 )
             })?;
         #[cfg(test)]
-        if FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST.swap(false, Ordering::SeqCst) {
-            anyhow::bail!("test active transaction failure after write");
+        {
+            let mut fail_path = FAIL_ACTIVE_TRANSACTION_AFTER_WRITE_FOR_TEST
+                .lock()
+                .expect("failure injection lock poisoned");
+            if fail_path.as_ref() == Some(&path) {
+                *fail_path = None;
+                anyhow::bail!("test active transaction failure after write");
+            }
         }
         file.sync_all().with_context(|| {
             format!(

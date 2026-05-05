@@ -1798,18 +1798,22 @@ fn sync_native_gui_registration_state_best_effort(
 fn sync_integration_projection_state(
     layout: &PrefixLayout,
     package_name: &str,
+    identity: &InstalledPackageIdentity,
     install_root: &Path,
     integrations: &[PackageIntegration],
 ) -> Result<Vec<IntegrationProjection>> {
-    let previous_projections = read_integration_state(layout, package_name)?;
+    let previous_projections = read_identity_integration_state(layout, identity)?;
     let desired_projections = integrations
         .iter()
-        .map(|integration| projected_integration(package_name, integration))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|integration| projected_integrations(package_name, integration))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let all_projection_states = read_all_integration_states(layout)?;
     for desired in &desired_projections {
         for (owner, projections) in &all_projection_states {
-            if owner == package_name {
+            if owner == &identity.state_key() || owner == package_name {
                 continue;
             }
             if projections
@@ -1827,7 +1831,7 @@ fn sync_integration_projection_state(
 
     let mut current_projections = Vec::new();
     for integration in integrations {
-        current_projections.push(expose_integration(
+        current_projections.extend(expose_integrations(
             layout,
             install_root,
             package_name,
@@ -1842,8 +1846,136 @@ fn sync_integration_projection_state(
     }) {
         remove_exposed_integration(layout, stale_projection)?;
     }
+    write_identity_integration_state(layout, identity, &current_projections)?;
     write_integration_state(layout, package_name, &current_projections)?;
     Ok(current_projections)
+}
+
+fn activate_enabled_services_for_install(
+    layout: &PrefixLayout,
+    package_name: &str,
+    package_state_key: &str,
+    host: &HostActivationContext,
+    integrations: &[PackageIntegration],
+    projections: &[IntegrationProjection],
+) -> Result<()> {
+    for integration in integrations {
+        let PackageIntegration::Service {
+            name,
+            linux_systemd_user,
+            macos_launch_agent,
+            windows_service,
+            enable,
+        } = integration
+        else {
+            continue;
+        };
+        if !enable {
+            continue;
+        }
+
+        let integration_key = format!("service:{name}");
+        if !projections
+            .iter()
+            .any(|projection| projection.key == integration_key)
+        {
+            return Err(anyhow!(
+                "enabled service integration '{integration_key}' was not projected"
+            ));
+        }
+
+        let metadata = ServiceActivationMetadata {
+            name: name.clone(),
+            source: linux_systemd_user.clone(),
+            macos_launch_agent: macos_launch_agent.clone(),
+            windows_service: windows_service.clone(),
+        };
+        let mut plan = plan_service_activation(host, package_name, &metadata)
+            .map_err(|err| anyhow!(err))?;
+        plan.package_state_key = package_state_key.to_string();
+        if read_integration_activation_state(layout)?.iter().any(|record| {
+            record.package_state_key == package_state_key
+                && record.package == package_name
+                && record.integration_key == plan.integration_key
+        }) {
+            return Err(anyhow!(
+                "service activation failed package={} service={} reason={}",
+                package_name,
+                name,
+                IntegrationReasonCode::HostPathConflict.as_str()
+            ));
+        }
+        let mut executor = SystemActivationCommandExecutor;
+        let outcome = apply_service_plan(&mut executor, &plan);
+        if outcome.reason_code != IntegrationReasonCode::Ok {
+            if let Err(rollback_err) = replay_failed_service_activation_rollback(
+                host,
+                &outcome.rollback,
+            ) {
+                return Err(anyhow!(
+                    "service activation failed package={} service={} reason={} rollback_failed={}",
+                    package_name,
+                    name,
+                    outcome.reason_code.as_str(),
+                    rollback_err
+                ));
+            }
+            return Err(anyhow!(
+                "service activation failed package={} service={} reason={}",
+                package_name,
+                name,
+                outcome.reason_code.as_str()
+            ));
+        }
+        let mut records = read_integration_activation_state(layout)?;
+        records.push(IntegrationActivationRecord {
+            package_state_key: package_state_key.to_string(),
+            package: package_name.to_string(),
+            integration_key: plan.integration_key,
+            kind: plan.kind,
+            adapter: plan.adapter,
+            scope: plan.scope,
+            desired_state: IntegrationDesiredState::Running,
+            applied_state: outcome.applied_state,
+            host_path: Some(plan.host_path),
+            reason_code: outcome.reason_code,
+        });
+        write_integration_activation_state(layout, &records).map(|_| ())?;
+    }
+    Ok(())
+}
+
+fn replay_failed_service_activation_rollback(
+    host: &HostActivationContext,
+    rollback: &[ActivationRollbackEntry],
+) -> Result<()> {
+    if rollback.is_empty() {
+        return Ok(());
+    }
+
+    let owners = rollback.iter().filter_map(|entry| {
+        let owner = match entry.operation {
+            ActivationRollbackOperation::RemoveCreatedSymlink
+            | ActivationRollbackOperation::RemoveCreatedWindowsShim
+            | ActivationRollbackOperation::RemoveCreatedServiceMetadata => entry.created_owner.clone(),
+            ActivationRollbackOperation::RestoreOwnedSymlink
+            | ActivationRollbackOperation::RestoreOwnedWindowsShim
+            | ActivationRollbackOperation::RestoreOwnedServiceMetadata => entry.expected_current_owner.clone(),
+        }?;
+        Some((entry.path.clone(), owner))
+    });
+    let mut fs = RealActivationFs::new(host.platform, owners);
+    for entry in rollback.iter().rev() {
+        let outcome = replay_activation_rollback_entry_with_fs(&mut fs, entry);
+        if outcome.reason_code != IntegrationReasonCode::Ok {
+            return Err(anyhow!(
+                "path={} reason={}",
+                entry.path,
+                outcome.reason_code.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct InstallResolvedOptions<'a> {
@@ -2062,7 +2194,7 @@ fn install_resolved(
             &source_build.build_commands,
             &source_build.install_commands,
         )?;
-        if let Some(journal) = source_build_journal {
+        if let Some(journal) = source_build_journal.as_mut() {
             append_source_build_journal_entry(
                 layout,
                 journal,
@@ -2168,8 +2300,18 @@ fn install_resolved(
     let exposed_integrations = sync_integration_projection_state(
         layout,
         &resolved.manifest.name,
+        &identity,
         &install_root,
         &resolved.manifest.integrations,
+    )?;
+    let host = current_host_activation_context(layout)?;
+    activate_enabled_services_for_install(
+        layout,
+        &resolved.manifest.name,
+        &identity.state_key(),
+        &host,
+        &resolved.manifest.integrations,
+        &exposed_integrations,
     )?;
 
     let (native_gui_records, native_gui_warnings) = sync_native_gui_registration_state_best_effort(

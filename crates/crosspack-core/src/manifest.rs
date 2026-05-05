@@ -113,7 +113,12 @@ pub enum PackageIntegration {
     },
     Service {
         name: String,
-        source: String,
+        #[serde(default, alias = "source")]
+        linux_systemd_user: Option<String>,
+        #[serde(default)]
+        macos_launch_agent: Option<String>,
+        #[serde(default)]
+        windows_service: Option<String>,
         #[serde(default)]
         enable: bool,
     },
@@ -130,9 +135,10 @@ impl PackageIntegration {
 
     pub fn source(&self) -> &str {
         match self {
-            Self::DockerCliPlugin { source, .. }
-            | Self::PathPlugin { source, .. }
-            | Self::Service { source, .. } => source,
+            Self::DockerCliPlugin { source, .. } | Self::PathPlugin { source, .. } => source,
+            Self::Service {
+                linux_systemd_user, ..
+            } => linux_systemd_user.as_deref().unwrap_or(""),
         }
     }
 
@@ -145,12 +151,40 @@ impl PackageIntegration {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        validate_integration_source_path(self.source())?;
         match self {
-            Self::DockerCliPlugin { name, .. } | Self::Service { name, .. } => {
+            Self::DockerCliPlugin { name, source } => {
+                validate_integration_source_path(source)?;
                 validate_service_token("integration name", name, false)
             }
-            Self::PathPlugin { host, name, .. } => {
+            Self::Service {
+                name,
+                linux_systemd_user,
+                macos_launch_agent,
+                windows_service,
+                ..
+            } => {
+                if linux_systemd_user.is_none()
+                    && macos_launch_agent.is_none()
+                    && windows_service.is_none()
+                {
+                    return Err(anyhow!(
+                        "service integration '{name}' must declare at least one source"
+                    ));
+                }
+                for (field, source) in [
+                    ("linux_systemd_user", linux_systemd_user),
+                    ("macos_launch_agent", macos_launch_agent),
+                    ("windows_service", windows_service),
+                ] {
+                    if let Some(source) = source {
+                        validate_integration_source_path(source)
+                            .with_context(|| format!("invalid service {field} source"))?;
+                    }
+                }
+                validate_service_token("integration name", name, false)
+            }
+            Self::PathPlugin { host, name, source } => {
+                validate_integration_source_path(source)?;
                 validate_service_token("integration host", host, false)?;
                 validate_service_token("integration name", name, false)
             }
@@ -255,6 +289,34 @@ fn validate_integration_source_path(value: &str) -> anyhow::Result<()> {
     if relative.as_os_str().is_empty() {
         return Err(anyhow!("integration source path must not be empty"));
     }
+    if value == "." {
+        return Err(anyhow!(
+            "integration source path must not be current dir: {value}"
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(anyhow!(
+            "integration source path must not include control characters: {value:?}"
+        ));
+    }
+    if value.contains('\\') {
+        return Err(anyhow!(
+            "integration source path must not include backslashes: {value}"
+        ));
+    }
+    if value
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(anyhow!(
+            "integration source path must not include empty, '.', or '..' components: {value}"
+        ));
+    }
+    if looks_like_windows_drive_path(value) {
+        return Err(anyhow!(
+            "integration source path must not include Windows drive prefixes: {value}"
+        ));
+    }
     if relative
         .components()
         .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
@@ -264,6 +326,11 @@ fn validate_integration_source_path(value: &str) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn looks_like_windows_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 fn validate_service_name_token(value: &str) -> anyhow::Result<()> {

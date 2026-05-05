@@ -26,6 +26,8 @@ use crate::artifact::{
     stage_exe_payload_with_runner, stage_msix_payload_with_runner, stage_pkg_payload_with_hooks,
     strip_rel_components,
 };
+#[cfg(target_os = "linux")]
+use crate::native::run_native_service_action_with_activation_executor;
 use crate::native::{
     macos_registration_destination_candidates, macos_registration_source_path,
     parse_native_sidecar_state, project_linux_user_applications_dir,
@@ -36,7 +38,7 @@ use crate::native::{
     select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
 use crate::receipts::{parse_identity_receipt, parse_receipt};
-use crate::transactions::fail_next_active_transaction_after_write_for_test;
+use crate::transactions::fail_active_transaction_after_write_for_test;
 
 const TRANSACTION_METADATA_FIXTURE_WITH_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-1\",\n  \"operation\": \"install\",\n  \"status\": \"applying\",\n  \"started_at_unix\": 1771001234,\n  \"snapshot_id\": \"git:abc123\"\n}\n";
 const TRANSACTION_METADATA_FIXTURE_WITHOUT_SNAPSHOT: &str = "{\n  \"version\": 1,\n  \"txid\": \"tx-fixture-2\",\n  \"operation\": \"repair\",\n  \"status\": \"failed\",\n  \"started_at_unix\": 1771001235\n}\n";
@@ -257,6 +259,3092 @@ fn legacy_installed_state_fixture_readers_load_all_sidecars() {
     );
 
     let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_round_trips_multiple_platform_records() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let linux_identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "core".to_string(),
+        source_provenance: Some("git:test".to_string()),
+        package: "docker-compose".to_string(),
+    };
+    let macos_identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("aarch64-apple-darwin".to_string()),
+        source_namespace: "core".to_string(),
+        source_provenance: None,
+        package: "caddy".to_string(),
+    };
+
+    let records = vec![
+        IntegrationActivationRecord {
+            package_state_key: linux_identity.state_key(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+            kind: "docker_cli_plugin".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some("/home/test/.docker/cli-plugins/docker-compose".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        },
+        IntegrationActivationRecord {
+            package_state_key: macos_identity.state_key(),
+            package: "caddy".to_string(),
+            integration_key: "service:caddy".to_string(),
+            kind: "service".to_string(),
+            adapter: IntegrationAdapterKind::LaunchdUser,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Running,
+            applied_state: IntegrationAppliedState::Unsupported,
+            host_path: Some("/Users/test/Library/LaunchAgents/com.example.caddy.plist".to_string()),
+            reason_code: IntegrationReasonCode::InvalidServiceMetadata,
+        },
+    ];
+
+    write_integration_activation_state(&layout, &records).expect("must write activation state");
+
+    assert_eq!(
+        read_integration_activation_state(&layout).expect("must read activation state"),
+        records
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_writes_spec_activation_row_order() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "core".to_string(),
+        source_provenance: Some("git:test".to_string()),
+        package: "docker-compose".to_string(),
+    };
+    let records = vec![IntegrationActivationRecord {
+        package_state_key: identity.state_key(),
+        package: "docker-compose".to_string(),
+        integration_key: "docker_cli_plugin:compose".to_string(),
+        kind: "docker_cli_plugin".to_string(),
+        adapter: IntegrationAdapterKind::DockerCli,
+        scope: IntegrationActivationScope::None,
+        desired_state: IntegrationDesiredState::Enabled,
+        applied_state: IntegrationAppliedState::Enabled,
+        host_path: Some("/home/test/.docker/cli-plugins/docker-compose".to_string()),
+        reason_code: IntegrationReasonCode::Ok,
+    }];
+
+    write_integration_activation_state(&layout, &records).expect("must write activation state");
+
+    assert_eq!(
+        fs::read_to_string(layout.integration_activation_state_path()).expect("must read state"),
+        "version=1\nactivation=default--x86_64-unknown-linux-gnu--core--docker-compose\tdocker-compose\tdocker_cli_plugin:compose\tdocker_cli_plugin\tdocker-cli\tnone\tenabled\tenabled\t/home/test/.docker/cli-plugins/docker-compose\tok\n"
+    );
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_reads_package_from_serialized_column() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "core".to_string(),
+        source_provenance: Some("git:test".to_string()),
+        package: "docker-compose".to_string(),
+    };
+    fs::write(
+        layout.integration_activation_state_path(),
+        format!(
+            "version=1\nactivation={}\tdocker-compose\tdocker_cli_plugin:compose\tdocker_cli_plugin\tdocker-cli\tnone\tenabled\tenabled\t/home/test/.docker/cli-plugins/docker-compose\tok\n",
+            identity.state_key()
+        ),
+    )
+    .expect("must write fixture");
+
+    let records = read_integration_activation_state(&layout).expect("must read activation state");
+
+    assert_eq!(records[0].package, "docker-compose");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_reads_package_with_double_dash_from_serialized_column() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "core".to_string(),
+        source_provenance: Some("git:test".to_string()),
+        package: "foo--bar".to_string(),
+    };
+    fs::write(
+        layout.integration_activation_state_path(),
+        format!(
+            "version=1\nactivation={}\tfoo--bar\tpath_plugin:foo\tpath_plugin\tpath-plugin-bin\tnone\tenabled\tenabled\t/home/test/bin/foo\tok\n",
+            identity.state_key()
+        ),
+    )
+    .expect("must write fixture");
+
+    let records = read_integration_activation_state(&layout).expect("must read activation state");
+
+    assert_eq!(records[0].package, "foo--bar");
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_rejects_unsupported_version() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(layout.integration_activation_state_path(), "version=2\n")
+        .expect("must write fixture");
+
+    assert!(read_integration_activation_state(&layout).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_rejects_missing_version() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(
+        layout.integration_activation_state_path(),
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tok\n",
+    )
+    .expect("must write fixture");
+
+    assert!(read_integration_activation_state(&layout).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_empty_records_propagate_clear_errors() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::create_dir(layout.integration_activation_state_path()).expect("must create bad fixture");
+
+    assert!(write_integration_activation_state(&layout, &[]).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_rejects_invalid_enum_values() {
+    for (index, row) in [
+        "activation=key\tpkg\tintegration\tkind\tnot-adapter\tnone\tenabled\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnot-scope\tenabled\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tnot-desired\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tnot-applied\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tnot-reason\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        fs::write(
+            layout.integration_activation_state_path(),
+            format!("version=1\n{row}"),
+        )
+        .expect("must write fixture");
+
+        assert!(
+            read_integration_activation_state(&layout).is_err(),
+            "invalid enum fixture {index} should fail"
+        );
+
+        let _ = fs::remove_dir_all(layout.prefix());
+    }
+}
+
+#[test]
+fn activation_state_rejects_duplicate_activation_rows_on_read() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(
+        layout.integration_activation_state_path(),
+        "version=1\nactivation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tok\nactivation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\trunning\trunning\t/path\tok\n",
+    )
+    .expect("must write fixture");
+
+    assert!(read_integration_activation_state(&layout).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_rejects_duplicate_activation_rows_on_write() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let records = vec![
+        IntegrationActivationRecord {
+            package_state_key: "key".to_string(),
+            package: "pkg".to_string(),
+            integration_key: "integration".to_string(),
+            kind: "kind".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some("/path".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        },
+        IntegrationActivationRecord {
+            package_state_key: "key".to_string(),
+            package: "pkg".to_string(),
+            integration_key: "integration".to_string(),
+            kind: "kind".to_string(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Running,
+            applied_state: IntegrationAppliedState::Running,
+            host_path: Some("/path".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        },
+    ];
+
+    assert!(write_integration_activation_state(&layout, &records).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_rejects_missing_columns() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    fs::write(
+        layout.integration_activation_state_path(),
+        "version=1\nactivation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\n",
+    )
+    .expect("must write fixture");
+
+    assert!(read_integration_activation_state(&layout).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_rejects_tabs_and_newlines_on_write() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let mut record = IntegrationActivationRecord {
+        package_state_key: "key".to_string(),
+        package: "pkg".to_string(),
+        integration_key: "integration".to_string(),
+        kind: "kind".to_string(),
+        adapter: IntegrationAdapterKind::DockerCli,
+        scope: IntegrationActivationScope::None,
+        desired_state: IntegrationDesiredState::Enabled,
+        applied_state: IntegrationAppliedState::Enabled,
+        host_path: Some("/path".to_string()),
+        reason_code: IntegrationReasonCode::Ok,
+    };
+
+    record.package = "bad\tpackage".to_string();
+    assert!(write_integration_activation_state(&layout, &[record.clone()]).is_err());
+
+    record.package = "pkg".to_string();
+    record.host_path = Some("bad\npath".to_string());
+    assert!(write_integration_activation_state(&layout, &[record]).is_err());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_state_empty_records_remove_state_file() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let records = vec![IntegrationActivationRecord {
+        package_state_key: "key".to_string(),
+        package: "pkg".to_string(),
+        integration_key: "integration".to_string(),
+        kind: "kind".to_string(),
+        adapter: IntegrationAdapterKind::DockerCli,
+        scope: IntegrationActivationScope::None,
+        desired_state: IntegrationDesiredState::Enabled,
+        applied_state: IntegrationAppliedState::Enabled,
+        host_path: None,
+        reason_code: IntegrationReasonCode::Ok,
+    }];
+    write_integration_activation_state(&layout, &records).expect("must write activation state");
+    assert!(layout.integration_activation_state_path().exists());
+
+    write_integration_activation_state(&layout, &[]).expect("must clear activation state");
+
+    assert!(!layout.integration_activation_state_path().exists());
+    assert!(read_integration_activation_state(&layout)
+        .expect("must read absent activation state")
+        .is_empty());
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn docker_cli_plugin_plan_uses_platform_docker_config_precedence() {
+    let projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+
+    let linux = HostActivationContext::linux()
+        .with_home("/home/test")
+        .with_env("DOCKER_CONFIG", "/tmp/docker-config");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&linux, "docker-compose", &projection)
+            .expect("must plan linux docker plugin")
+            .host_path,
+        "/tmp/docker-config/cli-plugins/docker-compose"
+    );
+
+    let macos = HostActivationContext::macos()
+        .with_home("/Users/test")
+        .with_env("DOCKER_CONFIG", "/tmp/macos-docker-config");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&macos, "docker-compose", &projection)
+            .expect("must plan macos docker plugin")
+            .host_path,
+        "/tmp/macos-docker-config/cli-plugins/docker-compose"
+    );
+
+    let windows = HostActivationContext::windows()
+        .with_user_profile("C:\\Users\\test")
+        .with_env("DOCKER_CONFIG", "D:\\DockerConfig");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&windows, "docker-compose", &projection)
+            .expect("must plan windows docker plugin")
+            .host_path,
+        "D:\\DockerConfig\\cli-plugins\\docker-compose"
+    );
+
+    let windows_with_forward_slashes = HostActivationContext::windows()
+        .with_user_profile("C:\\Users\\test")
+        .with_env("DOCKER_CONFIG", "D:/DockerConfig");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(
+            &windows_with_forward_slashes,
+            "docker-compose",
+            &projection,
+        )
+        .expect("must normalize windows docker config spelling")
+        .host_path,
+        "D:\\DockerConfig\\cli-plugins\\docker-compose"
+    );
+
+    let linux_without_config = HostActivationContext::linux().with_home("/home/test");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&linux_without_config, "docker-compose", &projection)
+            .expect("must plan linux docker plugin fallback")
+            .host_path,
+        "/home/test/.docker/cli-plugins/docker-compose"
+    );
+
+    let macos_without_config = HostActivationContext::macos().with_home("/Users/test");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&macos_without_config, "docker-compose", &projection)
+            .expect("must plan macos docker plugin fallback")
+            .host_path,
+        "/Users/test/.docker/cli-plugins/docker-compose"
+    );
+
+    let windows_without_config =
+        HostActivationContext::windows().with_user_profile("C:\\Users\\test");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&windows_without_config, "docker-compose", &projection)
+            .expect("must plan windows docker plugin fallback")
+            .host_path,
+        "C:\\Users\\test\\.docker\\cli-plugins\\docker-compose"
+    );
+}
+
+#[test]
+fn activation_plan_docker_cli_plugin_rejects_relative_docker_config_and_missing_home() {
+    let projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+
+    let relative_config = HostActivationContext::linux()
+        .with_home("/home/test")
+        .with_env("DOCKER_CONFIG", "relative/docker-config");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&relative_config, "docker-compose", &projection)
+            .expect_err("relative docker config must fail")
+            .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+
+    let relative_windows_config = HostActivationContext::windows()
+        .with_user_profile("C:\\Users\\test")
+        .with_env("DOCKER_CONFIG", "DockerConfig");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&relative_windows_config, "docker-compose", &projection)
+            .expect_err("relative windows docker config must fail")
+            .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+
+    let unc_windows_config = HostActivationContext::windows()
+        .with_user_profile("C:\\Users\\test")
+        .with_env("DOCKER_CONFIG", "\\\\server\\share\\DockerConfig");
+    assert_eq!(
+        plan_docker_cli_plugin_activation(&unc_windows_config, "docker-compose", &projection)
+            .expect_err("UNC docker config roots are unsupported in this phase")
+            .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+
+    assert_eq!(
+        plan_docker_cli_plugin_activation(
+            &HostActivationContext::macos(),
+            "docker-compose",
+            &projection,
+        )
+        .expect_err("missing home must fail")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+
+    assert_eq!(
+        plan_docker_cli_plugin_activation(
+            &HostActivationContext::windows(),
+            "docker-compose",
+            &projection,
+        )
+        .expect_err("missing user profile must fail")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+}
+
+#[test]
+fn activation_plan_path_plugin_uses_crosspack_owned_host_exposure() {
+    let projection = IntegrationProjection {
+        kind: "path_plugin".to_string(),
+        key: "path_plugin:demo:democtl".to_string(),
+        rel_path: "path-plugins/demo/demo-democtl".to_string(),
+    };
+
+    let linux = plan_path_plugin_activation(
+        &HostActivationContext::linux().with_home("/home/test"),
+        "demo",
+        "demo-democtl",
+        &projection,
+    )
+    .expect("must plan linux path plugin");
+    assert_eq!(linux.adapter, IntegrationAdapterKind::PathPluginBin);
+    assert_eq!(linux.host_path, "/prefix/bin/demo-democtl");
+    assert_eq!(
+        linux.source_path,
+        "/prefix/share/integrations/path-plugins/demo/demo-democtl"
+    );
+
+    let macos = plan_path_plugin_activation(
+        &HostActivationContext::macos().with_home("/Users/test"),
+        "demo",
+        "demo-democtl",
+        &projection,
+    )
+    .expect("must plan macos path plugin");
+    assert_eq!(macos.host_path, "/prefix/bin/demo-democtl");
+
+    let windows = plan_path_plugin_activation(
+        &HostActivationContext::windows().with_user_profile("C:\\Users\\test"),
+        "demo",
+        "demo-democtl",
+        &projection,
+    )
+    .expect("must plan windows path plugin");
+    assert_eq!(windows.host_path, "C:\\Crosspack\\bin\\demo-democtl.cmd");
+    assert_eq!(
+        windows.source_path,
+        "C:\\Crosspack\\share\\integrations\\path-plugins\\demo\\demo-democtl"
+    );
+}
+
+#[test]
+fn activation_plan_path_plugin_rejects_host_name_that_does_not_match_key() {
+    let projection = IntegrationProjection {
+        kind: "path_plugin".to_string(),
+        key: "path_plugin:demo:democtl".to_string(),
+        rel_path: "path-plugins/demo/demo-democtl".to_string(),
+    };
+
+    assert_eq!(
+        plan_path_plugin_activation(
+            &HostActivationContext::linux().with_home("/home/test"),
+            "demo",
+            "democtl",
+            &projection,
+        )
+        .expect_err("host_name must match path_plugin:<host>:<name>")
+        .reason_code,
+        IntegrationReasonCode::InvalidServiceMetadata
+    );
+
+    let malformed_key = IntegrationProjection {
+        key: "path_plugin:demo".to_string(),
+        ..projection
+    };
+    assert_eq!(
+        plan_path_plugin_activation(
+            &HostActivationContext::linux().with_home("/home/test"),
+            "demo",
+            "demo-democtl",
+            &malformed_key,
+        )
+        .expect_err("malformed path plugin key must fail")
+        .reason_code,
+        IntegrationReasonCode::InvalidServiceMetadata
+    );
+}
+
+#[test]
+fn activation_plan_service_selects_platform_user_adapter_when_metadata_is_valid() {
+    let linux = plan_service_activation(
+        &HostActivationContext::linux().with_home("/home/test"),
+        "caddy",
+        &ServiceActivationMetadata::new("caddy").with_source("services/caddy.service"),
+    )
+    .expect("must plan linux service");
+    assert_eq!(linux.adapter, IntegrationAdapterKind::SystemdUser);
+    assert_eq!(linux.host_path, "systemd-user:caddy.service");
+    assert_eq!(
+        linux.source_path,
+        "/prefix/share/integrations/services/caddy.service"
+    );
+
+    let macos = plan_service_activation(
+        &HostActivationContext::macos().with_home("/Users/test"),
+        "caddy",
+        &ServiceActivationMetadata::new("caddy")
+            .with_macos_launch_agent("services/com.example.caddy.plist"),
+    )
+    .expect("must plan macos service");
+    assert_eq!(macos.adapter, IntegrationAdapterKind::LaunchdUser);
+    assert_eq!(
+        macos.host_path,
+        "/Users/test/Library/LaunchAgents/com.example.caddy.plist"
+    );
+
+    let windows = plan_service_activation(
+        &HostActivationContext::windows()
+            .with_user_profile("C:\\Users\\test")
+            .with_windows_user_services_supported(true),
+        "caddy",
+        &ServiceActivationMetadata::new("caddy")
+            .with_windows_service("services/caddy-service.json"),
+    )
+    .expect("must plan windows service");
+    assert_eq!(windows.adapter, IntegrationAdapterKind::WindowsServiceUser);
+    assert_eq!(windows.host_path, "windows-service-user:caddy");
+}
+
+#[test]
+fn activation_plan_service_reports_invalid_metadata_or_escalation_deterministically() {
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::linux().with_home("/home/test"),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy"),
+        )
+        .expect_err("missing linux service source must fail")
+        .reason_code,
+        IntegrationReasonCode::InvalidServiceMetadata
+    );
+
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::linux().with_home("/home/test"),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy").with_source("services/caddy.txt"),
+        )
+        .expect_err("wrong linux service extension must fail")
+        .reason_code,
+        IntegrationReasonCode::InvalidServiceMetadata
+    );
+
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::macos().with_home("/Users/test"),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy"),
+        )
+        .expect_err("missing macos plist must fail")
+        .reason_code,
+        IntegrationReasonCode::InvalidServiceMetadata
+    );
+
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::windows()
+                .with_user_profile("C:\\Users\\test")
+                .with_windows_user_services_supported(true),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy"),
+        )
+        .expect_err("missing windows descriptor must fail")
+        .reason_code,
+        IntegrationReasonCode::InvalidServiceMetadata
+    );
+
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::windows()
+                .with_user_profile("C:\\Users\\test")
+                .with_windows_user_services_supported(false),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy")
+                .with_windows_service("services/caddy-service.json"),
+        )
+        .expect_err("admin-required windows service must fail")
+        .reason_code,
+        IntegrationReasonCode::EscalationRequired
+    );
+
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::windows()
+                .with_user_profile("C:\\Users\\test")
+                .with_windows_user_services_supported(true)
+                .with_service_requires_admin(true),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy")
+                .with_windows_service("services/caddy-service.json"),
+        )
+        .expect_err("explicit admin-required windows service must fail")
+        .reason_code,
+        IntegrationReasonCode::EscalationRequired
+    );
+}
+
+#[test]
+fn activation_plan_rejects_unsafe_projection_and_service_source_paths() {
+    for rel_path in [
+        "",
+        "../escape",
+        "/absolute",
+        ".",
+        "safe/../escape",
+        "..\\escape",
+    ] {
+        let projection = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: rel_path.to_string(),
+        };
+
+        assert_eq!(
+            plan_docker_cli_plugin_activation(
+                &HostActivationContext::linux().with_home("/home/test"),
+                "docker-compose",
+                &projection,
+            )
+            .expect_err("unsafe docker source path must fail")
+            .reason_code,
+            IntegrationReasonCode::InvalidServiceMetadata,
+            "rel_path={rel_path:?}"
+        );
+    }
+
+    for source in [
+        "",
+        "../escape.service",
+        "/tmp/caddy.service",
+        ".",
+        "services/../caddy.service",
+        "..\\escape.service",
+        "services/caddy\t.service",
+        "services/caddy\n.service",
+        "services/caddy\u{1f}.service",
+    ] {
+        assert_eq!(
+            plan_service_activation(
+                &HostActivationContext::linux().with_home("/home/test"),
+                "caddy",
+                &ServiceActivationMetadata::new("caddy").with_source(source),
+            )
+            .expect_err("unsafe service source path must fail")
+            .reason_code,
+            IntegrationReasonCode::InvalidServiceMetadata,
+            "source={source:?}"
+        );
+    }
+}
+
+#[test]
+fn activation_plan_rejects_unsafe_host_path_leaf_names() {
+    let docker_projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+    for package in [
+        "",
+        "../evil",
+        "foo/../bar",
+        "C:evil",
+        "..\\evil",
+        ".",
+        "has\nnewline",
+    ] {
+        assert_eq!(
+            plan_docker_cli_plugin_activation(
+                &HostActivationContext::linux().with_home("/home/test"),
+                package,
+                &docker_projection,
+            )
+            .expect_err("unsafe docker package leaf must fail")
+            .reason_code,
+            IntegrationReasonCode::InvalidServiceMetadata,
+            "package={package:?}"
+        );
+    }
+
+    let path_projection = IntegrationProjection {
+        kind: "path_plugin".to_string(),
+        key: "path_plugin:demo:democtl".to_string(),
+        rel_path: "path/demo/democtl".to_string(),
+    };
+    for host_name in [
+        "",
+        "../evil",
+        "foo/../bar",
+        "C:evil",
+        "..\\evil",
+        ".",
+        "has\u{7f}control",
+    ] {
+        assert_eq!(
+            plan_path_plugin_activation(
+                &HostActivationContext::linux().with_home("/home/test"),
+                "demo",
+                host_name,
+                &path_projection,
+            )
+            .expect_err("unsafe path plugin host leaf must fail")
+            .reason_code,
+            IntegrationReasonCode::InvalidServiceMetadata,
+            "host_name={host_name:?}"
+        );
+    }
+}
+
+#[test]
+fn activation_plan_rejects_relative_host_roots() {
+    let docker_projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+    assert_eq!(
+        plan_docker_cli_plugin_activation(
+            &HostActivationContext::linux().with_home("relative-home"),
+            "docker-compose",
+            &docker_projection,
+        )
+        .expect_err("relative home must fail")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+    assert_eq!(
+        plan_docker_cli_plugin_activation(
+            &HostActivationContext::windows().with_user_profile("Users\\test"),
+            "docker-compose",
+            &docker_projection,
+        )
+        .expect_err("relative user profile must fail")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+    assert_eq!(
+        plan_docker_cli_plugin_activation(
+            &HostActivationContext::windows().with_user_profile("\\\\server\\share\\Users\\test"),
+            "docker-compose",
+            &docker_projection,
+        )
+        .expect_err("windows UNC roots are unsupported in this phase")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+
+    let path_projection = IntegrationProjection {
+        kind: "path_plugin".to_string(),
+        key: "path_plugin:demo:democtl".to_string(),
+        rel_path: "path/demo/democtl".to_string(),
+    };
+    assert_eq!(
+        plan_path_plugin_activation(
+            &HostActivationContext::linux().with_prefix("relative-prefix"),
+            "demo",
+            "democtl",
+            &path_projection,
+        )
+        .expect_err("relative prefix must fail")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+
+    assert_eq!(
+        plan_service_activation(
+            &HostActivationContext::macos().with_home("Users/test"),
+            "caddy",
+            &ServiceActivationMetadata::new("caddy")
+                .with_macos_launch_agent("services/com.example.caddy.plist"),
+        )
+        .expect_err("relative macos home must fail")
+        .reason_code,
+        IntegrationReasonCode::UnsupportedHost
+    );
+}
+
+fn docker_adapter_plan(
+    platform: HostPlatform,
+    host_path: &str,
+    source_path: &str,
+) -> IntegrationActivationPlan {
+    let package = match platform {
+        HostPlatform::Windows => "docker-compose.exe",
+        HostPlatform::Linux | HostPlatform::Macos => "docker-compose",
+    };
+    IntegrationActivationPlan {
+        package_state_key: "default--host--core--docker-compose".to_string(),
+        package: package.to_string(),
+        integration_key: "docker_cli_plugin:compose".to_string(),
+        kind: "docker_cli_plugin".to_string(),
+        adapter: IntegrationAdapterKind::DockerCli,
+        scope: IntegrationActivationScope::None,
+        desired_state: IntegrationDesiredState::Enabled,
+        host_path: host_path.to_string(),
+        source_path: source_path.to_string(),
+    }
+}
+
+fn path_plugin_adapter_plan(
+    platform: HostPlatform,
+    host_path: &str,
+    source_path: &str,
+) -> IntegrationActivationPlan {
+    let package = match platform {
+        HostPlatform::Windows => "demo.exe",
+        HostPlatform::Linux | HostPlatform::Macos => "demo",
+    };
+    IntegrationActivationPlan {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: package.to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+        kind: "path_plugin".to_string(),
+        adapter: IntegrationAdapterKind::PathPluginBin,
+        scope: IntegrationActivationScope::None,
+        desired_state: IntegrationDesiredState::Enabled,
+        host_path: host_path.to_string(),
+        source_path: source_path.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedActivationCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct FakeActivationCommandExecutor {
+    commands: Vec<RecordedActivationCommand>,
+    results: Vec<NativeCommandResult>,
+}
+
+impl FakeActivationCommandExecutor {
+    fn with_results(results: Vec<NativeCommandResult>) -> Self {
+        Self {
+            commands: Vec::new(),
+            results,
+        }
+    }
+
+    fn commands(&self) -> Vec<(String, Vec<String>)> {
+        self.commands
+            .iter()
+            .map(|command| (command.program.clone(), command.args.clone()))
+            .collect()
+    }
+}
+
+impl ActivationCommandExecutor for FakeActivationCommandExecutor {
+    fn run(&mut self, program: &str, args: &[String]) -> NativeCommandResult {
+        self.commands.push(RecordedActivationCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+        });
+        if self.results.is_empty() {
+            NativeCommandResult::success("", "")
+        } else {
+            self.results.remove(0)
+        }
+    }
+}
+
+fn service_adapter_plan(
+    _platform: HostPlatform,
+    adapter: IntegrationAdapterKind,
+    host_path: &str,
+    source_path: &str,
+) -> IntegrationActivationPlan {
+    IntegrationActivationPlan {
+        package_state_key: "default--host--core--caddy".to_string(),
+        package: "caddy".to_string(),
+        integration_key: "service:caddy".to_string(),
+        kind: "service".to_string(),
+        adapter,
+        scope: IntegrationActivationScope::User,
+        desired_state: IntegrationDesiredState::Running,
+        host_path: host_path.to_string(),
+        source_path: source_path.to_string(),
+    }
+}
+
+#[test]
+fn service_adapter_linux_systemd_user_install_enable_start_status_sequence() {
+    let plan = service_adapter_plan(
+        HostPlatform::Linux,
+        IntegrationAdapterKind::SystemdUser,
+        "systemd-user:caddy.service",
+        "/prefix/share/integrations/services/caddy.service",
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("Active: active (running)", ""),
+    ]);
+
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+    let outcome = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.applied_state, IntegrationAppliedState::Running);
+    assert_eq!(
+        executor.commands(),
+        vec![
+            (
+                "systemctl".to_string(),
+                vec![
+                    "--user",
+                    "link",
+                    "/prefix/share/integrations/services/caddy.service"
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            ),
+            (
+                "systemctl".to_string(),
+                vec!["--user", "daemon-reload"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "systemctl".to_string(),
+                vec!["--user", "enable", "caddy.service"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "systemctl".to_string(),
+                vec!["--user", "start", "caddy.service"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "systemctl".to_string(),
+                vec!["--user", "status", "caddy.service"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn service_adapter_macos_launchd_user_bootstrap_enable_kickstart_print_sequence() {
+    let plan = service_adapter_plan(
+        HostPlatform::Macos,
+        IntegrationAdapterKind::LaunchdUser,
+        "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+        "/prefix/share/integrations/services/com.example.caddy.plist",
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("state = running", ""),
+    ]);
+
+    let mut fs = MemoryActivationFs::new(HostPlatform::Macos);
+    let outcome = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.applied_state, IntegrationAppliedState::Running);
+    assert_eq!(
+        executor.commands(),
+        vec![
+            (
+                "launchctl".to_string(),
+                vec![
+                    "bootstrap",
+                    "gui/current",
+                    "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            ),
+            (
+                "launchctl".to_string(),
+                vec!["enable", "gui/current/com.example.caddy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "launchctl".to_string(),
+                vec!["kickstart", "-k", "gui/current/com.example.caddy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "launchctl".to_string(),
+                vec!["print", "gui/current/com.example.caddy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn service_adapter_systemd_metadata_install_and_remove_use_typed_fs_with_rollback() {
+    let plan = service_adapter_plan(
+        HostPlatform::Linux,
+        IntegrationAdapterKind::SystemdUser,
+        "systemd-user:caddy.service",
+        "/prefix/share/integrations/services/caddy.service",
+    );
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("Active: active (running)", ""),
+    ]);
+
+    let apply = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
+
+    assert_eq!(apply.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        fs.service_metadata_source(&plan.host_path).as_deref(),
+        Some(plan.source_path.as_str())
+    );
+    assert_eq!(apply.rollback.len(), 1);
+    assert_eq!(
+        apply.rollback[0].operation,
+        ActivationRollbackOperation::RemoveCreatedServiceMetadata
+    );
+
+    let mut executor = FakeActivationCommandExecutor::default();
+    let disable = disable_service_plan_with_fs(&mut fs, &mut executor, &plan);
+
+    assert_eq!(disable.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(fs.service_metadata_source(&plan.host_path), None);
+    assert_eq!(disable.rollback.len(), 1);
+    assert_eq!(
+        disable.rollback[0].operation,
+        ActivationRollbackOperation::RestoreOwnedServiceMetadata
+    );
+}
+
+struct DestructiveFailingReplacementFs {
+    inner: MemoryActivationFs,
+    fail_symlink: bool,
+    fail_shim: bool,
+}
+
+impl DestructiveFailingReplacementFs {
+    fn new(platform: HostPlatform) -> Self {
+        Self {
+            inner: MemoryActivationFs::new(platform).with_symlink_support(true),
+            fail_symlink: false,
+            fail_shim: false,
+        }
+    }
+
+    fn fail_next_symlink_write(mut self) -> Self {
+        self.fail_symlink = true;
+        self
+    }
+
+    fn fail_next_shim_write(mut self) -> Self {
+        self.fail_shim = true;
+        self
+    }
+
+    fn symlink_target(&self, path: &str) -> Option<String> {
+        self.inner.symlink_target(path)
+    }
+
+    fn shim_target(&self, path: &str) -> Option<String> {
+        self.inner.shim_target(path)
+    }
+}
+
+impl ActivationFilesystem for DestructiveFailingReplacementFs {
+    fn platform(&self) -> HostPlatform {
+        self.inner.platform()
+    }
+
+    fn symlink_supported(&self) -> bool {
+        self.inner.symlink_supported()
+    }
+
+    fn entry(&self, path: &str) -> Option<ActivationFsEntry> {
+        self.inner.entry(path)
+    }
+
+    fn create_parent_dirs_after_preflight(&mut self, path: &str) -> Option<Vec<String>> {
+        self.inner.create_parent_dirs_after_preflight(path)
+    }
+
+    fn write_owned_symlink_for(
+        &mut self,
+        path: &str,
+        target: &str,
+        package_state_key: &str,
+        package: &str,
+        integration_key: &str,
+    ) -> bool {
+        if self.fail_symlink {
+            self.fail_symlink = false;
+            self.inner.remove_entry(path);
+            return false;
+        }
+        ActivationFilesystem::write_owned_symlink_for(
+            &mut self.inner,
+            path,
+            target,
+            package_state_key,
+            package,
+            integration_key,
+        )
+    }
+
+    fn write_owned_shim_for(
+        &mut self,
+        path: &str,
+        target: &str,
+        package_state_key: &str,
+        package: &str,
+        integration_key: &str,
+    ) -> bool {
+        if self.fail_shim {
+            self.fail_shim = false;
+            self.inner.remove_entry(path);
+            return false;
+        }
+        ActivationFilesystem::write_owned_shim_for(
+            &mut self.inner,
+            path,
+            target,
+            package_state_key,
+            package,
+            integration_key,
+        )
+    }
+
+    fn write_owned_service_metadata_for(
+        &mut self,
+        path: &str,
+        source: &str,
+        package_state_key: &str,
+        package: &str,
+        integration_key: &str,
+    ) -> bool {
+        ActivationFilesystem::write_owned_service_metadata_for(
+            &mut self.inner,
+            path,
+            source,
+            package_state_key,
+            package,
+            integration_key,
+        )
+    }
+
+    fn remove_entry(&mut self, path: &str) -> bool {
+        self.inner.remove_entry(path)
+    }
+}
+
+#[test]
+fn service_adapter_macos_plist_install_and_remove_use_typed_fs_with_rollback() {
+    let plan = service_adapter_plan(
+        HostPlatform::Macos,
+        IntegrationAdapterKind::LaunchdUser,
+        "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+        "/prefix/share/integrations/services/com.example.caddy.plist",
+    );
+    let mut fs = MemoryActivationFs::new(HostPlatform::Macos);
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("state = running", ""),
+    ]);
+
+    let apply = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
+
+    assert_eq!(apply.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        fs.service_metadata_source(&plan.host_path).as_deref(),
+        Some(plan.source_path.as_str())
+    );
+    assert_eq!(apply.rollback.len(), 1);
+    assert_eq!(
+        apply.rollback[0].operation,
+        ActivationRollbackOperation::RemoveCreatedServiceMetadata
+    );
+
+    let mut executor = FakeActivationCommandExecutor::default();
+    let disable = disable_service_plan_with_fs(&mut fs, &mut executor, &plan);
+
+    assert_eq!(disable.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(fs.service_metadata_source(&plan.host_path), None);
+    assert_eq!(disable.rollback.len(), 1);
+    assert_eq!(
+        disable.rollback[0].operation,
+        ActivationRollbackOperation::RestoreOwnedServiceMetadata
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn service_adapter_macos_real_fs_copies_and_removes_launch_agent() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let source = layout
+        .prefix()
+        .join("share")
+        .join("integrations")
+        .join("services")
+        .join("com.example.caddy.plist");
+    fs::create_dir_all(source.parent().expect("source must have parent"))
+        .expect("must create source parent");
+    fs::write(&source, b"<plist><dict/></plist>").expect("must write source plist");
+    let host_path = layout
+        .prefix()
+        .join("home")
+        .join("test")
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.example.caddy.plist");
+    let plan = service_adapter_plan(
+        HostPlatform::Macos,
+        IntegrationAdapterKind::LaunchdUser,
+        host_path.to_str().expect("host path must be utf-8"),
+        source.to_str().expect("source path must be utf-8"),
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("state = running", ""),
+    ]);
+
+    let apply = apply_service_plan(&mut executor, &plan);
+
+    assert_eq!(apply.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        fs::read(&host_path).expect("must read launch agent"),
+        fs::read(&source).expect("must read source")
+    );
+
+    let mut executor = FakeActivationCommandExecutor::default();
+    let disable = disable_service_plan(&mut executor, &plan);
+
+    assert_eq!(disable.reason_code, IntegrationReasonCode::Ok);
+    assert!(
+        !host_path.exists(),
+        "disable must remove copied launch agent"
+    );
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn service_adapter_windows_user_service_sequence_when_no_admin_required() {
+    let plan = service_adapter_plan(
+        HostPlatform::Windows,
+        IntegrationAdapterKind::WindowsServiceUser,
+        "windows-service-user:caddy",
+        "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("state=running", ""),
+    ]);
+
+    let outcome = apply_service_plan(&mut executor, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.applied_state, IntegrationAppliedState::Running);
+    assert_eq!(
+        executor.commands(),
+        vec![
+            (
+                "crosspack-service-user".to_string(),
+                vec![
+                    "install",
+                    "caddy",
+                    "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            ),
+            (
+                "crosspack-service-user".to_string(),
+                vec!["enable", "caddy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "crosspack-service-user".to_string(),
+                vec!["start", "caddy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            (
+                "crosspack-service-user".to_string(),
+                vec!["status", "caddy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn service_adapter_windows_scm_admin_required_returns_escalation_without_mutation() {
+    let mut plan = service_adapter_plan(
+        HostPlatform::Windows,
+        IntegrationAdapterKind::WindowsServiceUser,
+        "windows-service-user:caddy",
+        "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+    );
+    plan.scope = IntegrationActivationScope::System;
+    let mut executor = FakeActivationCommandExecutor::default();
+
+    let outcome = apply_service_plan(&mut executor, &plan);
+
+    assert_eq!(
+        outcome.reason_code,
+        IntegrationReasonCode::EscalationRequired
+    );
+    assert_eq!(outcome.applied_state, IntegrationAppliedState::Unsupported);
+    assert!(executor.commands().is_empty());
+}
+
+#[test]
+fn service_adapter_stop_disable_remove_command_sequences() {
+    for (platform, adapter, host_path, source_path, expected) in [
+        (
+            HostPlatform::Linux,
+            IntegrationAdapterKind::SystemdUser,
+            "systemd-user:caddy.service",
+            "/prefix/share/integrations/services/caddy.service",
+            vec![
+                ("systemctl", vec!["--user", "stop", "caddy.service"]),
+                ("systemctl", vec!["--user", "disable", "caddy.service"]),
+                ("systemctl", vec!["--user", "reset-failed", "caddy.service"]),
+                ("systemctl", vec!["--user", "daemon-reload"]),
+            ],
+        ),
+        (
+            HostPlatform::Macos,
+            IntegrationAdapterKind::LaunchdUser,
+            "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+            "/prefix/share/integrations/services/com.example.caddy.plist",
+            vec![
+                (
+                    "launchctl",
+                    vec!["bootout", "gui/current/com.example.caddy"],
+                ),
+                (
+                    "launchctl",
+                    vec!["disable", "gui/current/com.example.caddy"],
+                ),
+            ],
+        ),
+        (
+            HostPlatform::Windows,
+            IntegrationAdapterKind::WindowsServiceUser,
+            "windows-service-user:caddy",
+            "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+            vec![
+                ("crosspack-service-user", vec!["stop", "caddy"]),
+                ("crosspack-service-user", vec!["disable", "caddy"]),
+                ("crosspack-service-user", vec!["remove", "caddy"]),
+            ],
+        ),
+    ] {
+        let plan = service_adapter_plan(platform, adapter, host_path, source_path);
+        let mut executor = FakeActivationCommandExecutor::default();
+
+        let outcome = disable_service_plan(&mut executor, &plan);
+
+        assert_eq!(
+            outcome.reason_code,
+            IntegrationReasonCode::Ok,
+            "platform={platform:?}"
+        );
+        assert_eq!(outcome.applied_state, IntegrationAppliedState::Stopped);
+        assert_eq!(
+            executor.commands(),
+            expected
+                .into_iter()
+                .map(|(program, args)| {
+                    (
+                        program.to_string(),
+                        args.into_iter().map(str::to_string).collect(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            "platform={platform:?}"
+        );
+    }
+}
+
+#[test]
+fn service_adapter_status_parses_running_stopped_failed_and_unsupported() {
+    for (platform, adapter, host_path, source_path, status, stdout, stderr, state) in [
+        (
+            HostPlatform::Linux,
+            IntegrationAdapterKind::SystemdUser,
+            "systemd-user:caddy.service",
+            "/prefix/share/integrations/services/caddy.service",
+            0,
+            "Active: active (running)",
+            "",
+            IntegrationAppliedState::Running,
+        ),
+        (
+            HostPlatform::Linux,
+            IntegrationAdapterKind::SystemdUser,
+            "systemd-user:caddy.service",
+            "/prefix/share/integrations/services/caddy.service",
+            3,
+            "Active: inactive (dead)",
+            "",
+            IntegrationAppliedState::Stopped,
+        ),
+        (
+            HostPlatform::Linux,
+            IntegrationAdapterKind::SystemdUser,
+            "systemd-user:caddy.service",
+            "/prefix/share/integrations/services/caddy.service",
+            3,
+            "Active: failed (Result: exit-code)",
+            "",
+            IntegrationAppliedState::Failed,
+        ),
+        (
+            HostPlatform::Linux,
+            IntegrationAdapterKind::SystemdUser,
+            "systemd-user:caddy.service",
+            "/prefix/share/integrations/services/caddy.service",
+            4,
+            "Loaded: not-found (Reason: No such file or directory)\nActive: inactive (dead)",
+            "",
+            IntegrationAppliedState::Unsupported,
+        ),
+        (
+            HostPlatform::Macos,
+            IntegrationAdapterKind::LaunchdUser,
+            "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+            "/prefix/share/integrations/services/com.example.caddy.plist",
+            0,
+            "state = running",
+            "",
+            IntegrationAppliedState::Running,
+        ),
+        (
+            HostPlatform::Macos,
+            IntegrationAdapterKind::LaunchdUser,
+            "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+            "/prefix/share/integrations/services/com.example.caddy.plist",
+            113,
+            "Could not find service \"com.example.caddy\" in domain for user gui/current",
+            "",
+            IntegrationAppliedState::Stopped,
+        ),
+        (
+            HostPlatform::Macos,
+            IntegrationAdapterKind::LaunchdUser,
+            "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+            "/prefix/share/integrations/services/com.example.caddy.plist",
+            0,
+            "last exit code = 1",
+            "",
+            IntegrationAppliedState::Failed,
+        ),
+        (
+            HostPlatform::Macos,
+            IntegrationAdapterKind::LaunchdUser,
+            "/Users/test/Library/LaunchAgents/com.example.caddy.plist",
+            "/prefix/share/integrations/services/com.example.caddy.plist",
+            113,
+            "",
+            "Bootstrap failed: 5: Input/output error",
+            IntegrationAppliedState::Unsupported,
+        ),
+        (
+            HostPlatform::Windows,
+            IntegrationAdapterKind::WindowsServiceUser,
+            "windows-service-user:caddy",
+            "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+            0,
+            "state=running",
+            "",
+            IntegrationAppliedState::Running,
+        ),
+        (
+            HostPlatform::Windows,
+            IntegrationAdapterKind::WindowsServiceUser,
+            "windows-service-user:caddy",
+            "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+            3,
+            "STATE              : 1  STOPPED",
+            "",
+            IntegrationAppliedState::Stopped,
+        ),
+        (
+            HostPlatform::Windows,
+            IntegrationAdapterKind::WindowsServiceUser,
+            "windows-service-user:caddy",
+            "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+            1,
+            "state=failed",
+            "",
+            IntegrationAppliedState::Failed,
+        ),
+        (
+            HostPlatform::Windows,
+            IntegrationAdapterKind::WindowsServiceUser,
+            "windows-service-user:caddy",
+            "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+            1060,
+            "[SC] OpenService FAILED 1060:\nThe specified service does not exist as an installed service.",
+            "",
+            IntegrationAppliedState::Unsupported,
+        ),
+        (
+            HostPlatform::Windows,
+            IntegrationAdapterKind::WindowsServiceUser,
+            "windows-service-user:caddy",
+            "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+            3,
+            "state=not running",
+            "",
+            IntegrationAppliedState::Stopped,
+        ),
+    ] {
+        let plan = service_adapter_plan(platform, adapter, host_path, source_path);
+        let mut executor = FakeActivationCommandExecutor::with_results(vec![NativeCommandResult {
+            status,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }]);
+
+        let outcome = status_service_plan(&mut executor, &plan);
+
+        assert_eq!(
+            outcome.reason_code,
+            IntegrationReasonCode::Ok,
+            "platform={platform:?} stdout={stdout:?} stderr={stderr:?} status={status}"
+        );
+        assert_eq!(outcome.applied_state, state, "platform={platform:?}");
+    }
+}
+
+#[test]
+fn service_adapter_successful_unparseable_status_is_not_ok() {
+    let plan = service_adapter_plan(
+        HostPlatform::Windows,
+        IntegrationAdapterKind::WindowsServiceUser,
+        "windows-service-user:caddy",
+        "C:\\Crosspack\\share\\integrations\\services\\caddy-service.json",
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![NativeCommandResult {
+        status: 0,
+        stdout: "service exists but status payload is malformed".to_string(),
+        stderr: String::new(),
+    }]);
+
+    let outcome = status_service_plan(&mut executor, &plan);
+
+    assert_eq!(
+        outcome.reason_code,
+        IntegrationReasonCode::NativeCommandFailed
+    );
+    assert_eq!(outcome.applied_state, IntegrationAppliedState::Failed);
+}
+
+#[test]
+fn service_adapter_stops_command_sequence_after_partial_failure() {
+    let plan = service_adapter_plan(
+        HostPlatform::Linux,
+        IntegrationAdapterKind::SystemdUser,
+        "systemd-user:caddy.service",
+        "/prefix/share/integrations/services/caddy.service",
+    );
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult {
+            status: 1,
+            stdout: String::new(),
+            stderr: "daemon reload failed".to_string(),
+        },
+        NativeCommandResult::success("", ""),
+    ]);
+
+    let outcome = apply_service_plan(&mut executor, &plan);
+
+    assert_eq!(
+        outcome.reason_code,
+        IntegrationReasonCode::NativeCommandFailed
+    );
+    assert_eq!(
+        executor.commands(),
+        vec![
+            (
+                "systemctl".to_string(),
+                vec![
+                    "--user".to_string(),
+                    "link".to_string(),
+                    plan.source_path.clone()
+                ]
+            ),
+            (
+                "systemctl".to_string(),
+                vec!["--user".to_string(), "daemon-reload".to_string()]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn path_plugin_adapter_creates_idempotent_owned_symlink_on_linux_and_macos() {
+    for (platform, host_path, source_path) in [
+        (
+            HostPlatform::Linux,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Macos,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = path_plugin_adapter_plan(platform, host_path, source_path);
+
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::Ok
+        );
+        assert_eq!(fs.symlink_target(host_path).as_deref(), Some(source_path));
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::Ok
+        );
+        assert_eq!(fs.symlink_target(host_path).as_deref(), Some(source_path));
+    }
+}
+
+#[test]
+fn path_plugin_adapter_preserves_previous_owned_symlink_when_replacement_write_fails() {
+    let mut plan = path_plugin_adapter_plan(
+        HostPlatform::Linux,
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl-v1",
+    );
+    let mut fs = DestructiveFailingReplacementFs::new(HostPlatform::Linux);
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    plan.source_path = "/prefix/share/integrations/path/demo/democtl-v2".to_string();
+    fs = fs.fail_next_symlink_write();
+
+    let outcome = apply_path_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some("/prefix/share/integrations/path/demo/democtl-v1")
+    );
+}
+
+#[test]
+fn path_plugin_adapter_preserves_previous_owned_windows_shim_when_replacement_write_fails() {
+    let mut plan = path_plugin_adapter_plan(
+        HostPlatform::Windows,
+        "C:\\Crosspack\\bin\\democtl.cmd",
+        "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v1.exe",
+    );
+    let mut fs = DestructiveFailingReplacementFs::new(HostPlatform::Windows);
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    plan.source_path = "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v2.exe".to_string();
+    fs = fs.fail_next_shim_write();
+
+    let outcome = apply_path_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.shim_target(&plan.host_path).as_deref(),
+        Some("C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v1.exe")
+    );
+}
+
+#[test]
+fn path_plugin_adapter_rejects_foreign_file_and_outside_prefix_destination() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = path_plugin_adapter_plan(
+        HostPlatform::Linux,
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl",
+    );
+    fs.write_file(&plan.host_path, b"foreign");
+
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert!(fs.is_file(&plan.host_path));
+
+    let mut outside_prefix = plan.clone();
+    outside_prefix.host_path = "/usr/local/bin/democtl".to_string();
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &outside_prefix).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert!(!fs.exists("/usr/local/bin/democtl"));
+
+    let mut malformed_source = plan.clone();
+    malformed_source.source_path = "/prefix/pkgs/demo/1.0.0/democtl".to_string();
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &malformed_source).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+}
+
+#[test]
+fn path_plugin_adapter_requires_destination_under_prefix_bin_leaf() {
+    for (platform, host_path, source_path) in [
+        (
+            HostPlatform::Linux,
+            "/prefix",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Linux,
+            "/prefix/share/integrations/path/demo/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Linux,
+            "/prefix/bin",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\bin",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\bin\\democtl.exe",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = path_plugin_adapter_plan(platform, host_path, source_path);
+
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::HostPathConflict,
+            "platform={platform:?} host_path={host_path}"
+        );
+        assert_eq!(
+            disable_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::HostPathConflict,
+            "platform={platform:?} host_path={host_path}"
+        );
+    }
+}
+
+#[test]
+fn path_plugin_adapter_rejects_same_target_foreign_owner() {
+    for (platform, host_path, source_path) in [
+        (
+            HostPlatform::Linux,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\bin\\democtl.cmd",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = path_plugin_adapter_plan(platform, host_path, source_path);
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::Ok
+        );
+        let other_owner = plan
+            .clone()
+            .with_package_state_key("other--host--core--demo");
+
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &other_owner).reason_code,
+            IntegrationReasonCode::HostPathConflict,
+            "platform={platform:?}"
+        );
+        assert_eq!(
+            disable_path_plugin_plan(&mut fs, &other_owner).reason_code,
+            IntegrationReasonCode::HostPathConflict,
+            "platform={platform:?}"
+        );
+        assert!(fs.exists(host_path), "platform={platform:?}");
+    }
+}
+
+#[test]
+fn path_plugin_adapter_rejects_other_crosspack_owned_exposure_and_disable_preserves_it() {
+    for (platform, host_path, source_path, other_source_path) in [
+        (
+            HostPlatform::Linux,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+            "/prefix/share/integrations/path/other/democtl",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\bin\\democtl.cmd",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+            "C:\\Crosspack\\share\\integrations\\path\\other\\democtl.exe",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = path_plugin_adapter_plan(platform, host_path, source_path);
+        let mut other_owned = path_plugin_adapter_plan(platform, host_path, other_source_path)
+            .with_package_state_key("other--host--core--demo");
+        other_owned.integration_key = "path_plugin:other:democtl".to_string();
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &other_owned).reason_code,
+            IntegrationReasonCode::Ok
+        );
+
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::HostPathConflict,
+            "platform={platform:?}"
+        );
+        assert_eq!(
+            disable_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::HostPathConflict,
+            "platform={platform:?}"
+        );
+        match platform {
+            HostPlatform::Linux | HostPlatform::Macos => {
+                assert_eq!(
+                    fs.symlink_target(host_path).as_deref(),
+                    Some(other_source_path)
+                );
+            }
+            HostPlatform::Windows => {
+                assert_eq!(
+                    fs.shim_target(host_path).as_deref(),
+                    Some(other_source_path)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn path_plugin_adapter_refuses_foreign_files_on_macos_and_windows() {
+    for (platform, host_path, source_path) in [
+        (
+            HostPlatform::Macos,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\bin\\democtl.cmd",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = path_plugin_adapter_plan(platform, host_path, source_path);
+        fs.write_file(host_path, b"foreign");
+
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::HostPathConflict
+        );
+        assert_eq!(
+            disable_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::HostPathConflict
+        );
+        assert!(fs.is_file(host_path), "platform={platform:?}");
+    }
+}
+
+#[test]
+fn path_plugin_adapter_windows_creates_owned_shim_not_symlink() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(false);
+    let plan = path_plugin_adapter_plan(
+        HostPlatform::Windows,
+        "C:\\Crosspack\\bin\\democtl.cmd",
+        "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+    );
+
+    let outcome = apply_path_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.rollback.len(), 1);
+    assert_eq!(
+        outcome.rollback[0].operation,
+        ActivationRollbackOperation::RemoveCreatedWindowsShim
+    );
+    assert_eq!(
+        fs.shim_target(&plan.host_path).as_deref(),
+        Some(plan.source_path.as_str())
+    );
+    assert_eq!(fs.symlink_target(&plan.host_path), None);
+    assert!(!fs.exists("C:\\Crosspack\\share\\integrations\\path\\demo"));
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+}
+
+#[test]
+fn path_plugin_adapter_windows_replace_and_disable_return_shim_rollback_metadata() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(false);
+    let mut plan = path_plugin_adapter_plan(
+        HostPlatform::Windows,
+        "C:\\Crosspack\\bin\\democtl.cmd",
+        "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v1.exe",
+    );
+
+    assert_eq!(
+        apply_path_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    plan.source_path = "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v2.exe".to_string();
+
+    let replace = apply_path_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(replace.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(replace.rollback.len(), 1);
+    assert_eq!(
+        replace.rollback[0].operation,
+        ActivationRollbackOperation::RestoreOwnedWindowsShim
+    );
+    assert_eq!(
+        replace.rollback[0].previous_shim_target.as_deref(),
+        Some("C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v1.exe")
+    );
+    assert_eq!(
+        fs.shim_target(&plan.host_path).as_deref(),
+        Some("C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v2.exe")
+    );
+
+    let disable = disable_path_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(disable.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(disable.rollback.len(), 1);
+    assert_eq!(
+        disable.rollback[0].operation,
+        ActivationRollbackOperation::RestoreOwnedWindowsShim
+    );
+    assert_eq!(
+        disable.rollback[0].previous_shim_target.as_deref(),
+        Some("C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v2.exe")
+    );
+    assert!(!fs.exists(&plan.host_path));
+}
+
+#[test]
+fn path_plugin_adapter_disable_removes_owned_symlink_or_shim_on_all_platforms() {
+    for (platform, host_path, source_path) in [
+        (
+            HostPlatform::Linux,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Macos,
+            "/prefix/bin/democtl",
+            "/prefix/share/integrations/path/demo/democtl",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Crosspack\\bin\\democtl.cmd",
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = path_plugin_adapter_plan(platform, host_path, source_path);
+        assert_eq!(
+            apply_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::Ok
+        );
+
+        let outcome = disable_path_plugin_plan(&mut fs, &plan);
+
+        assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+        assert_eq!(outcome.rollback.len(), 1);
+        assert!(!fs.exists(host_path), "platform={platform:?}");
+        assert_eq!(
+            disable_path_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::Ok
+        );
+    }
+}
+
+#[test]
+fn path_plugin_adapter_disable_conflicts_on_stale_owned_target() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = path_plugin_adapter_plan(
+        HostPlatform::Linux,
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl",
+    );
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        "/prefix/share/integrations/path/demo/democtl-v1",
+        &plan.package_state_key,
+        &plan.package,
+        &plan.integration_key,
+    );
+
+    let outcome = disable_path_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some("/prefix/share/integrations/path/demo/democtl-v1")
+    );
+}
+
+#[test]
+fn path_plugin_adapter_disable_refuses_foreign_file() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = path_plugin_adapter_plan(
+        HostPlatform::Linux,
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl",
+    );
+    fs.write_file(&plan.host_path, b"foreign");
+
+    assert_eq!(
+        disable_path_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert!(fs.is_file(&plan.host_path));
+}
+
+#[test]
+fn docker_adapter_planner_output_can_carry_real_package_identity_state_key() {
+    let identity = InstalledPackageIdentity {
+        profile: "default".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        source_namespace: "core".to_string(),
+        source_provenance: Some("registry".to_string()),
+        package: "docker-compose".to_string(),
+    };
+    let projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+    let plan = plan_docker_cli_plugin_activation(
+        &HostActivationContext::linux().with_home("/home/test"),
+        &identity.package,
+        &projection,
+    )
+    .expect("must plan docker activation")
+    .with_package_state_key(identity.state_key());
+
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose-v1",
+        &plan.package_state_key,
+        &plan.package,
+        &plan.integration_key,
+    );
+
+    let outcome = apply_docker_cli_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        outcome.rollback[0].previous_owner.as_ref(),
+        Some(&ActivationOwner {
+            package_state_key: identity.state_key(),
+            package: "docker-compose".to_string(),
+            integration_key: "docker_cli_plugin:compose".to_string(),
+        })
+    );
+}
+
+#[test]
+fn docker_adapter_applies_planned_windows_docker_plugin_path_directly() {
+    let projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+    let plan = plan_docker_cli_plugin_activation(
+        &HostActivationContext::windows().with_user_profile("C:\\Users\\test"),
+        "docker-compose",
+        &projection,
+    )
+    .expect("must plan windows docker activation")
+    .with_package_state_key("default--host--core--docker-compose");
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(true);
+    fs.write_file(&plan.source_path, b"plugin");
+
+    let outcome = apply_docker_cli_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        plan.host_path,
+        "C:\\Users\\test\\.docker\\cli-plugins\\docker-compose"
+    );
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some(plan.source_path.as_str())
+    );
+}
+
+#[test]
+fn docker_adapter_creates_idempotent_owned_symlink_and_rejects_conflicts_on_linux() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_file(
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+        b"plugin",
+    );
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    assert!(fs.is_dir("/home/test/.docker"));
+    assert!(fs.is_dir("/home/test/.docker/cli-plugins"));
+    assert_eq!(
+        fs.symlink_target("/home/test/.docker/cli-plugins/docker-compose")
+            .as_deref(),
+        Some("/prefix/share/integrations/docker/cli-plugins/docker-compose")
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+
+    fs.write_file("/home/test/.docker/cli-plugins/docker-buildx", b"foreign");
+    let mut conflicting = plan.clone();
+    conflicting.host_path = "/home/test/.docker/cli-plugins/docker-buildx".to_string();
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &conflicting).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert!(fs.is_file("/home/test/.docker/cli-plugins/docker-buildx"));
+}
+
+#[test]
+fn docker_adapter_creates_idempotent_owned_symlink_and_rejects_conflicts_on_macos() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Macos).with_symlink_support(true);
+    fs.write_file(
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+        b"plugin",
+    );
+    let plan = docker_adapter_plan(
+        HostPlatform::Macos,
+        "/Users/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+
+    fs.write_symlink(
+        "/Users/test/.docker/cli-plugins/docker-buildx",
+        "/other/buildx",
+    );
+    let mut conflicting = plan.clone();
+    conflicting.host_path = "/Users/test/.docker/cli-plugins/docker-buildx".to_string();
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &conflicting).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert_eq!(
+        fs.symlink_target("/Users/test/.docker/cli-plugins/docker-buildx")
+            .as_deref(),
+        Some("/other/buildx")
+    );
+}
+
+#[test]
+fn docker_adapter_creates_idempotent_owned_symlink_and_rejects_conflicts_on_windows() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(true);
+    fs.write_file(
+        "C:\\Crosspack\\share\\integrations\\docker\\cli-plugins\\docker-compose.exe",
+        b"plugin",
+    );
+    let plan = docker_adapter_plan(
+        HostPlatform::Windows,
+        "C:\\Users\\test\\.docker\\cli-plugins\\docker-compose.exe",
+        "C:\\Crosspack\\share\\integrations\\docker\\cli-plugins\\docker-compose.exe",
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+    assert!(fs.is_dir("C:\\Users\\test\\.docker\\cli-plugins"));
+
+    fs.write_file(
+        "C:\\Users\\test\\.docker\\cli-plugins\\docker-buildx.exe",
+        b"foreign",
+    );
+    let mut conflicting = plan.clone();
+    conflicting.host_path = "C:\\Users\\test\\.docker\\cli-plugins\\docker-buildx.exe".to_string();
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &conflicting).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+}
+
+#[test]
+fn docker_adapter_windows_without_symlink_support_returns_escalation_before_mutation() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(false);
+    fs.write_file(
+        "C:\\Crosspack\\share\\integrations\\docker\\cli-plugins\\docker-compose.exe",
+        b"plugin",
+    );
+    let plan = docker_adapter_plan(
+        HostPlatform::Windows,
+        "C:\\Users\\test\\.docker\\cli-plugins\\docker-compose.exe",
+        "C:\\Crosspack\\share\\integrations\\docker\\cli-plugins\\docker-compose.exe",
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::EscalationRequired
+    );
+    assert!(!fs.exists("C:\\Users\\test\\.docker"));
+    assert!(!fs.exists("C:\\Users\\test\\.docker\\cli-plugins\\docker-compose.exe"));
+}
+
+#[test]
+fn docker_adapter_apply_parent_path_conflict_creates_no_new_dirs() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_file("/home/test/.docker", b"not-a-dir");
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert!(!fs.exists("/home"));
+    assert!(!fs.exists("/home/test"));
+    assert!(!fs.exists("/home/test/.docker/cli-plugins"));
+    assert!(fs.is_file("/home/test/.docker"));
+}
+
+#[test]
+fn docker_adapter_disable_removes_owned_symlink_on_linux_macos_windows() {
+    for (platform, host_path, source_path) in [
+        (
+            HostPlatform::Linux,
+            "/home/test/.docker/cli-plugins/docker-compose",
+            "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+        ),
+        (
+            HostPlatform::Macos,
+            "/Users/test/.docker/cli-plugins/docker-compose",
+            "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+        ),
+        (
+            HostPlatform::Windows,
+            "C:\\Users\\test\\.docker\\cli-plugins\\docker-compose.exe",
+            "C:\\Crosspack\\share\\integrations\\docker\\cli-plugins\\docker-compose.exe",
+        ),
+    ] {
+        let mut fs = MemoryActivationFs::new(platform).with_symlink_support(true);
+        let plan = docker_adapter_plan(platform, host_path, source_path);
+        fs.write_owned_symlink_for(
+            host_path,
+            source_path,
+            &plan.package_state_key,
+            &plan.package,
+            &plan.integration_key,
+        );
+
+        assert_eq!(
+            disable_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+            IntegrationReasonCode::Ok
+        );
+        assert!(!fs.exists(host_path), "platform={platform:?}");
+    }
+}
+
+#[test]
+fn docker_adapter_disable_leaves_foreign_file_and_returns_host_path_conflict() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_file("/home/test/.docker/cli-plugins/docker-compose", b"foreign");
+
+    assert_eq!(
+        disable_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert!(fs.is_file("/home/test/.docker/cli-plugins/docker-compose"));
+}
+
+#[test]
+fn docker_adapter_disable_owned_symlink_returns_restore_rollback() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        &plan.source_path,
+        &plan.package_state_key,
+        &plan.package,
+        &plan.integration_key,
+    );
+
+    let outcome = disable_docker_cli_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.rollback.len(), 1);
+    assert_eq!(
+        outcome.rollback[0].operation,
+        ActivationRollbackOperation::RestoreOwnedSymlink
+    );
+    assert_eq!(outcome.rollback[0].path, plan.host_path);
+    assert_eq!(
+        outcome.rollback[0].previous_symlink_target.as_deref(),
+        Some(plan.source_path.as_str())
+    );
+    assert_eq!(
+        outcome.rollback[0]
+            .previous_owner
+            .as_ref()
+            .map(|owner| owner.package_state_key.as_str()),
+        Some(plan.package_state_key.as_str())
+    );
+    assert!(!fs.exists(&plan.host_path));
+}
+
+#[test]
+fn docker_adapter_disable_conflicts_on_stale_owned_symlink_target() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose-v1",
+        &plan.package_state_key,
+        &plan.package,
+        &plan.integration_key,
+    );
+
+    let outcome = disable_docker_cli_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some("/prefix/share/integrations/docker/cli-plugins/docker-compose-v1")
+    );
+}
+
+#[test]
+fn docker_adapter_disable_is_idempotent_when_destination_missing() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+
+    assert_eq!(
+        disable_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::Ok
+    );
+}
+
+#[test]
+fn docker_adapter_apply_rejects_foreign_same_target_symlink() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_symlink(&plan.host_path, &plan.source_path);
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some(plan.source_path.as_str())
+    );
+}
+
+#[test]
+fn docker_adapter_apply_rejects_other_owned_crosspack_symlink() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        "/prefix/share/integrations/docker/cli-plugins/other-compose",
+        "default--host--core--other-package",
+        "other-package",
+        "docker_cli_plugin:other",
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some("/prefix/share/integrations/docker/cli-plugins/other-compose")
+    );
+}
+
+#[test]
+fn docker_adapter_disable_leaves_other_owned_symlink_and_returns_host_path_conflict() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        "/prefix/share/integrations/docker/cli-plugins/other-compose",
+        "default--host--core--other-package",
+        "other-package",
+        "docker_cli_plugin:other",
+    );
+
+    assert_eq!(
+        disable_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert_eq!(
+        fs.symlink_target(&plan.host_path).as_deref(),
+        Some("/prefix/share/integrations/docker/cli-plugins/other-compose")
+    );
+}
+
+#[test]
+fn docker_adapter_apply_new_symlink_records_rollback_absence() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+
+    let outcome = apply_docker_cli_plugin_plan(&mut fs, &plan);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.rollback.len(), 1);
+    assert_eq!(
+        outcome.rollback[0].operation,
+        ActivationRollbackOperation::RemoveCreatedSymlink
+    );
+    assert_eq!(outcome.rollback[0].path, plan.host_path);
+    assert_eq!(outcome.rollback[0].previous_symlink_target, None);
+    assert_eq!(outcome.rollback[0].previous_owner, None);
+    assert_eq!(
+        outcome.rollback[0].created_symlink_target.as_deref(),
+        Some(plan.source_path.as_str())
+    );
+    assert_eq!(
+        outcome.rollback[0].created_owner.as_ref(),
+        Some(&ActivationOwner {
+            package_state_key: plan.package_state_key.clone(),
+            package: plan.package.clone(),
+            integration_key: plan.integration_key.clone(),
+        })
+    );
+    assert_eq!(
+        outcome.rollback[0].created_parent_dirs,
+        vec![
+            "/home".to_string(),
+            "/home/test".to_string(),
+            "/home/test/.docker".to_string(),
+            "/home/test/.docker/cli-plugins".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn activation_replay_remove_created_symlink_verifies_target_before_delete() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_owned_symlink_for(
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/replacement",
+        "default--host--core--demo",
+        "demo",
+        "path_plugin:demo:democtl",
+    );
+    let rollback = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+        path: "/prefix/bin/democtl".to_string(),
+        previous_symlink_target: None,
+        previous_shim_target: None,
+        previous_owner: None,
+        created_symlink_target: Some("/prefix/share/integrations/path/demo/democtl".to_string()),
+        created_shim_target: None,
+        created_owner: Some(ActivationOwner {
+            package_state_key: "default--host--core--demo".to_string(),
+            package: "demo".to_string(),
+            integration_key: "path_plugin:demo:democtl".to_string(),
+        }),
+        expected_current_symlink_target: None,
+        expected_current_shim_target: None,
+        expected_current_owner: None,
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &rollback);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target("/prefix/bin/democtl").as_deref(),
+        Some("/prefix/share/integrations/path/demo/replacement")
+    );
+}
+
+#[test]
+fn activation_replay_remove_created_symlink_requires_expected_owner() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_symlink(
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl",
+    );
+    let rollback = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+        path: "/prefix/bin/democtl".to_string(),
+        previous_symlink_target: None,
+        previous_shim_target: None,
+        previous_owner: None,
+        created_symlink_target: Some("/prefix/share/integrations/path/demo/democtl".to_string()),
+        created_shim_target: None,
+        created_owner: Some(ActivationOwner {
+            package_state_key: "default--host--core--demo".to_string(),
+            package: "demo".to_string(),
+            integration_key: "path_plugin:demo:democtl".to_string(),
+        }),
+        expected_current_symlink_target: None,
+        expected_current_shim_target: None,
+        expected_current_owner: None,
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &rollback);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target("/prefix/bin/democtl").as_deref(),
+        Some("/prefix/share/integrations/path/demo/democtl")
+    );
+}
+
+#[test]
+fn activation_replay_windows_shim_remove_and_restore_are_verified() {
+    let owner = ActivationOwner {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: "demo".to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+    };
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(false);
+    fs.write_owned_shim_for(
+        "C:\\Crosspack\\bin\\democtl.cmd",
+        "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe",
+        &owner.package_state_key,
+        &owner.package,
+        &owner.integration_key,
+    );
+    let remove = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RemoveCreatedWindowsShim,
+        path: "C:\\Crosspack\\bin\\democtl.cmd".to_string(),
+        previous_symlink_target: None,
+        previous_shim_target: None,
+        previous_owner: None,
+        created_symlink_target: None,
+        created_shim_target: Some(
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe".to_string(),
+        ),
+        created_owner: Some(owner.clone()),
+        expected_current_symlink_target: None,
+        expected_current_shim_target: None,
+        expected_current_owner: None,
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let removed = replay_activation_rollback_entry_with_fs(&mut fs, &remove);
+
+    assert_eq!(removed.reason_code, IntegrationReasonCode::Ok);
+    assert!(!fs.exists("C:\\Crosspack\\bin\\democtl.cmd"));
+
+    let restore = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RestoreOwnedWindowsShim,
+        path: "C:\\Crosspack\\bin\\democtl.cmd".to_string(),
+        previous_symlink_target: None,
+        previous_shim_target: Some(
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe".to_string(),
+        ),
+        previous_owner: Some(owner),
+        created_symlink_target: None,
+        created_shim_target: None,
+        created_owner: None,
+        expected_current_symlink_target: None,
+        expected_current_shim_target: None,
+        expected_current_owner: None,
+        expected_current_absent: true,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let restored = replay_activation_rollback_entry_with_fs(&mut fs, &restore);
+
+    assert_eq!(restored.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        fs.shim_target("C:\\Crosspack\\bin\\democtl.cmd").as_deref(),
+        Some("C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe")
+    );
+}
+
+#[test]
+fn activation_replay_replacement_rollback_restores_previous_targets() {
+    let owner = ActivationOwner {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: "demo".to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+    };
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_owned_symlink_for(
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl-v2",
+        &owner.package_state_key,
+        &owner.package,
+        &owner.integration_key,
+    );
+    let restore = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+        path: "/prefix/bin/democtl".to_string(),
+        previous_symlink_target: Some(
+            "/prefix/share/integrations/path/demo/democtl-v1".to_string(),
+        ),
+        previous_shim_target: None,
+        previous_owner: Some(owner),
+        created_symlink_target: None,
+        created_shim_target: None,
+        created_owner: None,
+        expected_current_symlink_target: Some(
+            "/prefix/share/integrations/path/demo/democtl-v2".to_string(),
+        ),
+        expected_current_shim_target: None,
+        expected_current_owner: Some(ActivationOwner {
+            package_state_key: "default--host--core--demo".to_string(),
+            package: "demo".to_string(),
+            integration_key: "path_plugin:demo:democtl".to_string(),
+        }),
+        created_parent_dirs: Vec::new(),
+        expected_current_absent: false,
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &restore);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(
+        fs.symlink_target("/prefix/bin/democtl").as_deref(),
+        Some("/prefix/share/integrations/path/demo/democtl-v1")
+    );
+}
+
+#[test]
+fn activation_replay_restore_symlink_mismatch_leaves_current_entry_untouched() {
+    let owner = ActivationOwner {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: "demo".to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+    };
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_owned_symlink_for(
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl-v3",
+        &owner.package_state_key,
+        &owner.package,
+        &owner.integration_key,
+    );
+    let restore = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+        path: "/prefix/bin/democtl".to_string(),
+        previous_symlink_target: Some(
+            "/prefix/share/integrations/path/demo/democtl-v1".to_string(),
+        ),
+        previous_shim_target: None,
+        previous_owner: Some(owner.clone()),
+        created_symlink_target: None,
+        created_shim_target: None,
+        created_owner: None,
+        expected_current_symlink_target: Some(
+            "/prefix/share/integrations/path/demo/democtl-v2".to_string(),
+        ),
+        expected_current_shim_target: None,
+        expected_current_owner: Some(owner),
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &restore);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target("/prefix/bin/democtl").as_deref(),
+        Some("/prefix/share/integrations/path/demo/democtl-v3")
+    );
+}
+
+#[test]
+fn activation_replay_restore_file_mismatch_leaves_current_file_untouched() {
+    let owner = ActivationOwner {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: "demo".to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+    };
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_file("/prefix/bin/democtl", b"foreign");
+    let restore = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+        path: "/prefix/bin/democtl".to_string(),
+        previous_symlink_target: Some(
+            "/prefix/share/integrations/path/demo/democtl-v1".to_string(),
+        ),
+        previous_shim_target: None,
+        previous_owner: Some(owner.clone()),
+        created_symlink_target: None,
+        created_shim_target: None,
+        created_owner: None,
+        expected_current_symlink_target: Some(
+            "/prefix/share/integrations/path/demo/democtl-v2".to_string(),
+        ),
+        expected_current_shim_target: None,
+        expected_current_owner: Some(owner),
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &restore);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert!(fs.is_file("/prefix/bin/democtl"));
+}
+
+#[test]
+fn activation_replay_restore_windows_shim_mismatch_leaves_current_shim_untouched() {
+    let owner = ActivationOwner {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: "demo".to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+    };
+    let mut fs = MemoryActivationFs::new(HostPlatform::Windows).with_symlink_support(false);
+    fs.write_owned_shim_for(
+        "C:\\Crosspack\\bin\\democtl.cmd",
+        "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v3.exe",
+        &owner.package_state_key,
+        &owner.package,
+        &owner.integration_key,
+    );
+    let restore = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RestoreOwnedWindowsShim,
+        path: "C:\\Crosspack\\bin\\democtl.cmd".to_string(),
+        previous_symlink_target: None,
+        previous_shim_target: Some(
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v1.exe".to_string(),
+        ),
+        previous_owner: Some(owner.clone()),
+        created_symlink_target: None,
+        created_shim_target: None,
+        created_owner: None,
+        expected_current_symlink_target: None,
+        expected_current_shim_target: Some(
+            "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v2.exe".to_string(),
+        ),
+        expected_current_owner: Some(owner),
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &restore);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.shim_target("C:\\Crosspack\\bin\\democtl.cmd").as_deref(),
+        Some("C:\\Crosspack\\share\\integrations\\path\\demo\\democtl-v3.exe")
+    );
+}
+
+#[test]
+fn activation_replay_remove_created_service_metadata_deletes_owned_metadata() {
+    let plan = service_adapter_plan(
+        HostPlatform::Linux,
+        IntegrationAdapterKind::SystemdUser,
+        "systemd-user:caddy.service",
+        "/prefix/share/integrations/services/caddy.service",
+    );
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("Active: active (running)", ""),
+    ]);
+    let apply = apply_service_plan_with_fs(&mut fs, &mut executor, &plan);
+    let rollback = apply
+        .rollback
+        .into_iter()
+        .find(|entry| entry.operation == ActivationRollbackOperation::RemoveCreatedServiceMetadata)
+        .expect("service metadata creation should produce remove rollback");
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &rollback);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(fs.service_metadata_source(&plan.host_path), None);
+}
+
+#[test]
+fn activation_replay_restore_owned_service_metadata_restores_previous_source() {
+    let old_plan = service_adapter_plan(
+        HostPlatform::Linux,
+        IntegrationAdapterKind::SystemdUser,
+        "systemd-user:caddy.service",
+        "/prefix/share/integrations/services/caddy-old.service",
+    );
+    let new_plan = service_adapter_plan(
+        HostPlatform::Linux,
+        IntegrationAdapterKind::SystemdUser,
+        "systemd-user:caddy.service",
+        "/prefix/share/integrations/services/caddy-new.service",
+    );
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("Active: active (running)", ""),
+    ]);
+    apply_service_plan_with_fs(&mut fs, &mut executor, &old_plan);
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("", ""),
+        NativeCommandResult::success("Active: active (running)", ""),
+    ]);
+    let apply = apply_service_plan_with_fs(&mut fs, &mut executor, &new_plan);
+    let rollback = apply
+        .rollback
+        .into_iter()
+        .find(|entry| entry.operation == ActivationRollbackOperation::RestoreOwnedServiceMetadata)
+        .expect("service metadata replacement should produce restore rollback");
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &rollback);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::Ok);
+    assert_eq!(outcome.applied_state, IntegrationAppliedState::Stopped);
+    assert_eq!(
+        fs.service_metadata_source(&old_plan.host_path).as_deref(),
+        Some(old_plan.source_path.as_str())
+    );
+}
+
+#[test]
+fn activation_replay_real_fs_recognizes_owned_crosspack_windows_shim_file() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let shim_path = layout.prefix().join("bin").join("democtl.cmd");
+    std::fs::create_dir_all(shim_path.parent().expect("must resolve shim parent"))
+        .expect("must create shim parent");
+    std::fs::write(
+        &shim_path,
+        "@echo off\r\n\"C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe\" %*\r\n",
+    )
+    .expect("must write shim fixture");
+    let owner = ActivationOwner {
+        package_state_key: "default--host--core--demo".to_string(),
+        package: "demo".to_string(),
+        integration_key: "path_plugin:demo:democtl".to_string(),
+    };
+    let fs = RealActivationFs::new(
+        HostPlatform::Windows,
+        [(shim_path.display().to_string(), owner.clone())],
+    );
+
+    assert_eq!(
+        fs.entry(&shim_path.display().to_string()),
+        Some(ActivationFsEntry::WindowsShim {
+            target: "C:\\Crosspack\\share\\integrations\\path\\demo\\democtl.exe".to_string(),
+            owner: Some(owner),
+        })
+    );
+
+    let foreign_path = layout.prefix().join("bin").join("foreign.cmd");
+    std::fs::write(&foreign_path, "not a crosspack shim").expect("must write foreign file");
+    let fs = RealActivationFs::new(
+        HostPlatform::Windows,
+        [(
+            foreign_path.display().to_string(),
+            ActivationOwner {
+                package_state_key: "default--host--core--demo".to_string(),
+                package: "demo".to_string(),
+                integration_key: "path_plugin:demo:foreign".to_string(),
+            },
+        )],
+    );
+    assert_eq!(
+        fs.entry(&foreign_path.display().to_string()),
+        Some(ActivationFsEntry::File)
+    );
+
+    let _ = std::fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn docker_adapter_apply_same_package_and_integration_but_different_identity_conflicts() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    let plan = docker_adapter_plan(
+        HostPlatform::Linux,
+        "/home/test/.docker/cli-plugins/docker-compose",
+        "/prefix/share/integrations/docker/cli-plugins/docker-compose",
+    );
+    fs.write_owned_symlink_for(
+        &plan.host_path,
+        &plan.source_path,
+        "alternate--host--core--docker-compose",
+        &plan.package,
+        &plan.integration_key,
+    );
+
+    assert_eq!(
+        apply_docker_cli_plugin_plan(&mut fs, &plan).reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
 }
 
 #[test]
@@ -972,6 +4060,103 @@ fn native_service_adapter_returns_reason_coded_fallback_on_command_failure() {
         "failed native command should report deterministic fallback"
     );
     assert_eq!(outcome.reason_code, "native-command-failed");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_service_adapter_routes_linux_actions_through_user_adapter() {
+    let mut captured = Vec::new();
+    let outcome = run_native_service_action_with_executor(
+        NativeServiceAction::Start,
+        "demo",
+        "demo.service",
+        |command, _context| {
+            captured.push(command_debug_args(command));
+            Ok(())
+        },
+    );
+
+    assert!(outcome.applied);
+    assert_eq!(outcome.adapter, "systemd-user");
+    assert_eq!(outcome.reason_code, "ok");
+    assert_eq!(
+        captured,
+        vec![vec![
+            "systemctl".to_string(),
+            "--user".to_string(),
+            "start".to_string(),
+            "demo.service".to_string(),
+        ]]
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_service_status_malformed_successful_output_returns_non_ok_reason() {
+    let mut executor =
+        FakeActivationCommandExecutor::with_results(vec![NativeCommandResult::success("", "")]);
+
+    let outcome = run_native_service_action_with_activation_executor(
+        NativeServiceAction::Status,
+        "demo",
+        "demo.service",
+        &mut executor,
+    );
+
+    assert!(!outcome.applied);
+    assert_eq!(outcome.reason_code, "native-command-failed");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_service_status_stopped_output_maps_ok() {
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![NativeCommandResult {
+        status: 3,
+        stdout: "Active: inactive (dead)".to_string(),
+        stderr: String::new(),
+    }]);
+
+    let outcome = run_native_service_action_with_activation_executor(
+        NativeServiceAction::Status,
+        "demo",
+        "demo.service",
+        &mut executor,
+    );
+
+    assert!(outcome.applied);
+    assert_eq!(outcome.reason_code, "ok");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_service_status_not_found_output_maps_non_ok_unsupported() {
+    let mut executor = FakeActivationCommandExecutor::with_results(vec![NativeCommandResult {
+        status: 4,
+        stdout: "Loaded: not-found (Reason: No such file or directory)\nActive: inactive (dead)"
+            .to_string(),
+        stderr: String::new(),
+    }]);
+
+    let outcome = run_native_service_action_with_activation_executor(
+        NativeServiceAction::Status,
+        "demo",
+        "demo.service",
+        &mut executor,
+    );
+
+    assert!(!outcome.applied);
+    assert_eq!(outcome.reason_code, "unsupported-host");
+}
+
+#[cfg(target_os = "linux")]
+fn command_debug_args(command: &Command) -> Vec<String> {
+    std::iter::once(command.get_program().to_string_lossy().into_owned())
+        .chain(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        )
+        .collect()
 }
 
 #[test]
@@ -2112,7 +5297,7 @@ fn set_active_transaction_cleans_marker_after_post_create_failure() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
 
-    fail_next_active_transaction_after_write_for_test();
+    fail_active_transaction_after_write_for_test(layout.transaction_active_path());
     let err = set_active_transaction(&layout, "tx-cleanup")
         .expect_err("post-create failure should abort active claim");
 
@@ -2506,7 +5691,9 @@ fn expose_service_integration_state_round_trip() {
 
     let integration = PackageIntegration::Service {
         name: "caddy".to_string(),
-        source: "services/caddy.service".to_string(),
+        linux_systemd_user: Some("services/caddy.service".to_string()),
+        macos_launch_agent: None,
+        windows_service: None,
         enable: false,
     };
     let projected = expose_integration(&layout, &package_dir, "caddy", &integration)
@@ -2518,6 +5705,81 @@ fn expose_service_integration_state_round_trip() {
         .expect("must write integration state");
     let loaded = read_integration_state(&layout, "caddy").expect("must read integration state");
     assert_eq!(loaded, vec![projected]);
+}
+
+#[test]
+fn expose_service_integration_projects_platform_sources() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("caddy", "2.10.2");
+    fs::create_dir_all(package_dir.join("services")).expect("must create service dir");
+    fs::create_dir_all(package_dir.join("launchd")).expect("must create launchd dir");
+    fs::create_dir_all(package_dir.join("windows")).expect("must create windows dir");
+    fs::write(package_dir.join("services/caddy.service"), b"[Service]\n")
+        .expect("must write service unit");
+    fs::write(
+        package_dir.join("launchd/com.example.caddy.plist"),
+        b"<plist />\n",
+    )
+    .expect("must write launchd plist");
+    fs::write(
+        package_dir.join("windows/caddy-service.toml"),
+        b"name = 'caddy'\n",
+    )
+    .expect("must write windows descriptor");
+
+    let integration = PackageIntegration::Service {
+        name: "caddy".to_string(),
+        linux_systemd_user: Some("services/caddy.service".to_string()),
+        macos_launch_agent: Some("launchd/com.example.caddy.plist".to_string()),
+        windows_service: Some("windows/caddy-service.toml".to_string()),
+        enable: false,
+    };
+    let projected = expose_integrations(&layout, &package_dir, "caddy", &integration)
+        .expect("must expose service integrations");
+
+    assert_eq!(projected.len(), 3);
+    assert_eq!(projected[0].rel_path, "services/caddy/caddy.service");
+    assert_eq!(projected[1].rel_path, "services/caddy/caddy.launchd.plist");
+    assert_eq!(
+        projected[2].rel_path,
+        "services/caddy/caddy.windows-service.toml"
+    );
+    for projection in &projected {
+        assert!(layout
+            .integrations_dir()
+            .join(&projection.rel_path)
+            .exists());
+    }
+    write_integration_state(&layout, "caddy", &projected).expect("must write integration state");
+    let loaded = read_integration_state(&layout, "caddy").expect("must read integration state");
+    assert_eq!(loaded, projected);
+}
+
+#[test]
+fn expose_service_integration_preflights_all_platform_sources_before_copying() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("caddy", "2.10.2");
+    fs::create_dir_all(package_dir.join("services")).expect("must create service dir");
+    fs::write(package_dir.join("services/caddy.service"), b"[Service]\n")
+        .expect("must write service unit");
+
+    let integration = PackageIntegration::Service {
+        name: "caddy".to_string(),
+        linux_systemd_user: Some("services/caddy.service".to_string()),
+        macos_launch_agent: Some("launchd/com.example.caddy.plist".to_string()),
+        windows_service: None,
+        enable: false,
+    };
+    let err = expose_integrations(&layout, &package_dir, "caddy", &integration)
+        .expect_err("missing macos source must fail before copying linux source");
+
+    assert!(err.to_string().contains("launchd/com.example.caddy.plist"));
+    assert!(!layout
+        .integrations_dir()
+        .join("services/caddy/caddy.service")
+        .exists());
 }
 
 #[test]
@@ -5664,6 +8926,306 @@ fn uninstall_skips_pruning_cache_path_outside_artifacts_dir() {
     assert!(!layout.receipt_path("app").exists());
     assert!(!layout.receipt_path("shared").exists());
 
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[cfg(unix)]
+#[test]
+fn activation_transaction_uninstall_removes_owned_docker_activation_before_clearing_state() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_receipt(
+        &layout,
+        "docker-compose",
+        "1.0.0",
+        &[],
+        InstallReason::Root,
+        None,
+    );
+
+    let projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+    write_integration_state(&layout, "docker-compose", std::slice::from_ref(&projection))
+        .expect("must write integration state");
+    let source_path = layout.integrations_dir().join(&projection.rel_path);
+    fs::create_dir_all(source_path.parent().expect("source must have parent"))
+        .expect("must create source parent");
+    fs::write(&source_path, b"plugin").expect("must write integration payload");
+    let host_path = layout
+        .prefix()
+        .join("home")
+        .join("test")
+        .join(".docker")
+        .join("cli-plugins")
+        .join("docker-compose");
+    fs::create_dir_all(host_path.parent().expect("host path must have parent"))
+        .expect("must create host parent");
+    std::os::unix::fs::symlink(&source_path, &host_path).expect("must create owned host symlink");
+    write_integration_activation_state(
+        &layout,
+        &[IntegrationActivationRecord {
+            package_state_key: "docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: projection.key.clone(),
+            kind: projection.kind.clone(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some(host_path.display().to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        }],
+    )
+    .expect("must write activation state");
+
+    uninstall_package(&layout, "docker-compose").expect("uninstall must clean activation");
+
+    assert!(
+        !host_path.exists(),
+        "owned host activation should be removed"
+    );
+    assert!(
+        read_integration_activation_state(&layout)
+            .expect("must read activation state")
+            .is_empty(),
+        "activation state should clear only after removal succeeds"
+    );
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[cfg(unix)]
+#[test]
+fn activation_transaction_uninstall_keeps_stale_owned_host_path_and_records_conflict() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_receipt(
+        &layout,
+        "docker-compose",
+        "1.0.0",
+        &[],
+        InstallReason::Root,
+        None,
+    );
+
+    let projection = IntegrationProjection {
+        kind: "docker_cli_plugin".to_string(),
+        key: "docker_cli_plugin:compose".to_string(),
+        rel_path: "docker/cli-plugins/docker-compose".to_string(),
+    };
+    write_integration_state(&layout, "docker-compose", std::slice::from_ref(&projection))
+        .expect("must write integration state");
+    let expected_source = layout.integrations_dir().join(&projection.rel_path);
+    fs::create_dir_all(expected_source.parent().expect("source must have parent"))
+        .expect("must create source parent");
+    fs::write(&expected_source, b"plugin").expect("must write integration payload");
+    let stale_source = layout
+        .integrations_dir()
+        .join("docker/cli-plugins/docker-compose-stale");
+    fs::write(&stale_source, b"stale").expect("must write stale payload");
+    let host_path = layout
+        .prefix()
+        .join("home")
+        .join("test")
+        .join(".docker")
+        .join("cli-plugins")
+        .join("docker-compose");
+    fs::create_dir_all(host_path.parent().expect("host path must have parent"))
+        .expect("must create host parent");
+    std::os::unix::fs::symlink(&stale_source, &host_path)
+        .expect("must create stale owned host symlink");
+    write_integration_activation_state(
+        &layout,
+        &[IntegrationActivationRecord {
+            package_state_key: "docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: projection.key.clone(),
+            kind: projection.kind.clone(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::None,
+            desired_state: IntegrationDesiredState::Enabled,
+            applied_state: IntegrationAppliedState::Enabled,
+            host_path: Some(host_path.display().to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        }],
+    )
+    .expect("must write activation state");
+
+    uninstall_package(&layout, "docker-compose")
+        .expect("uninstall should not delete stale host path");
+
+    assert!(host_path.exists(), "stale host path must be left intact");
+    assert_eq!(
+        fs::read_link(&host_path).expect("must read stale host symlink"),
+        stale_source
+    );
+    let records = read_integration_activation_state(&layout).expect("must read activation state");
+    assert_eq!(
+        records.len(),
+        1,
+        "conflicted activation should remain recorded"
+    );
+    assert_eq!(
+        records[0].reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_transaction_service_uninstall_keeps_state_when_metadata_removal_not_verified() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let projection = IntegrationProjection {
+        kind: "service".to_string(),
+        key: "service:caddy".to_string(),
+        rel_path: "services/caddy.service".to_string(),
+    };
+    let record = IntegrationActivationRecord {
+        package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+        package: "caddy".to_string(),
+        integration_key: projection.key.clone(),
+        kind: "service".to_string(),
+        adapter: IntegrationAdapterKind::SystemdUser,
+        scope: IntegrationActivationScope::User,
+        desired_state: IntegrationDesiredState::Running,
+        applied_state: IntegrationAppliedState::Running,
+        host_path: Some("systemd-user:caddy.service".to_string()),
+        reason_code: IntegrationReasonCode::Ok,
+    };
+    write_integration_activation_state(&layout, std::slice::from_ref(&record))
+        .expect("must seed activation state");
+
+    crate::uninstall::cleanup_activation_records_for_uninstall_with(
+        &layout,
+        "caddy",
+        None,
+        std::slice::from_ref(&projection),
+        |_record, _plan, _records| ActivationAdapterOutcome {
+            reason_code: IntegrationReasonCode::Ok,
+            applied_state: IntegrationAppliedState::Stopped,
+            rollback: Vec::new(),
+        },
+    )
+    .expect("cleanup should retain unverified service state");
+
+    let records = read_integration_activation_state(&layout).expect("must read activation state");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
+    assert_eq!(
+        records[0].reason_code,
+        IntegrationReasonCode::HostPathConflict
+    );
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_transaction_service_uninstall_clears_state_after_metadata_removal_verified() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let projection = IntegrationProjection {
+        kind: "service".to_string(),
+        key: "service:caddy".to_string(),
+        rel_path: "services/caddy.service".to_string(),
+    };
+    let record = IntegrationActivationRecord {
+        package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+        package: "caddy".to_string(),
+        integration_key: projection.key.clone(),
+        kind: "service".to_string(),
+        adapter: IntegrationAdapterKind::SystemdUser,
+        scope: IntegrationActivationScope::User,
+        desired_state: IntegrationDesiredState::Running,
+        applied_state: IntegrationAppliedState::Running,
+        host_path: Some("systemd-user:caddy.service".to_string()),
+        reason_code: IntegrationReasonCode::Ok,
+    };
+    write_integration_activation_state(&layout, std::slice::from_ref(&record))
+        .expect("must seed activation state");
+
+    crate::uninstall::cleanup_activation_records_for_uninstall_with(
+        &layout,
+        "caddy",
+        None,
+        std::slice::from_ref(&projection),
+        |_record, plan, _records| ActivationAdapterOutcome {
+            reason_code: IntegrationReasonCode::Ok,
+            applied_state: IntegrationAppliedState::Stopped,
+            rollback: vec![ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedServiceMetadata,
+                path: plan.host_path.clone(),
+                previous_symlink_target: Some(plan.source_path.clone()),
+                previous_shim_target: None,
+                previous_owner: Some(ActivationOwner {
+                    package_state_key: plan.package_state_key.clone(),
+                    package: plan.package.clone(),
+                    integration_key: plan.integration_key.clone(),
+                }),
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: None,
+                expected_current_shim_target: None,
+                expected_current_owner: None,
+                expected_current_absent: true,
+                created_parent_dirs: Vec::new(),
+            }],
+        },
+    )
+    .expect("cleanup should clear verified service state");
+
+    assert!(read_integration_activation_state(&layout)
+        .expect("must read activation state")
+        .is_empty());
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
+fn activation_transaction_uninstall_preserves_service_state_when_real_removal_unverified() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    write_receipt(&layout, "caddy", "1.0.0", &[], InstallReason::Root, None);
+    let projection = IntegrationProjection {
+        kind: "service".to_string(),
+        key: "service:caddy".to_string(),
+        rel_path: "services/caddy.service".to_string(),
+    };
+    write_integration_state(&layout, "caddy", std::slice::from_ref(&projection))
+        .expect("must seed integration state");
+    write_integration_activation_state(
+        &layout,
+        &[IntegrationActivationRecord {
+            package_state_key: "caddy".to_string(),
+            package: "caddy".to_string(),
+            integration_key: projection.key.clone(),
+            kind: "service".to_string(),
+            adapter: IntegrationAdapterKind::SystemdUser,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Running,
+            applied_state: IntegrationAppliedState::Running,
+            host_path: Some("systemd-user:caddy.service".to_string()),
+            reason_code: IntegrationReasonCode::Ok,
+        }],
+    )
+    .expect("must seed service activation state");
+
+    uninstall_package(&layout, "caddy")
+        .expect("uninstall should preserve unverified service state");
+
+    let records = read_integration_activation_state(&layout).expect("must read activation state");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
+    assert!(matches!(
+        records[0].reason_code,
+        IntegrationReasonCode::NativeCommandFailed | IntegrationReasonCode::AdapterToolMissing
+    ));
+    assert!(
+        !layout.receipt_path("caddy").exists(),
+        "uninstall should still remove package receipt"
+    );
     let _ = fs::remove_dir_all(layout.prefix());
 }
 

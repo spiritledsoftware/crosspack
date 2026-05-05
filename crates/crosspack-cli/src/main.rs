@@ -19,37 +19,51 @@ use crosspack_core::{
 use crosspack_installer::read_declared_services_state;
 #[cfg(test)]
 use crosspack_installer::read_installed_package_state;
+#[cfg(test)]
+use crosspack_installer::MemoryActivationFs;
 use crosspack_installer::{
-    append_transaction_journal_entry, bin_path, clear_active_transaction, current_unix_timestamp,
-    default_user_prefix, expose_binary, expose_completion, expose_gui_app, expose_integration,
-    exposed_completion_path, gui_asset_path, install_from_artifact_to_dir,
-    install_from_source_archive_to_dir, projected_exposed_completion_path, projected_gui_assets,
-    projected_integration, read_active_transaction_marker, read_all_declared_services_states,
+    append_transaction_journal_entry, apply_integration_plan_with_fs, apply_service_plan, bin_path,
+    clear_active_transaction, current_unix_timestamp, default_user_prefix,
+    disable_integration_plan_with_fs, disable_service_plan, expose_binary, expose_completion,
+    expose_gui_app, expose_integrations, exposed_completion_path, gui_asset_path,
+    install_from_artifact_to_dir, install_from_source_archive_to_dir,
+    plan_docker_cli_plugin_activation, plan_path_plugin_activation, plan_service_activation,
+    projected_exposed_completion_path, projected_gui_assets, projected_integrations,
+    read_active_transaction_marker, read_all_declared_services_states,
     read_all_gui_exposure_states, read_all_installed_package_states, read_all_integration_states,
-    read_all_pins, read_gui_exposure_state, read_gui_native_state, read_install_receipts,
-    read_integration_state, read_transaction_metadata, register_native_gui_app_best_effort,
-    remove_exposed_binary, remove_exposed_completion, remove_exposed_gui_asset,
-    remove_exposed_integration, remove_file_if_exists, remove_native_gui_registration_best_effort,
-    resolve_installed_package_selector, run_native_service_action,
-    run_package_native_uninstall_actions,
+    read_all_pins, read_gui_exposure_state, read_gui_native_state, read_identity_integration_state,
+    read_install_receipts, read_integration_activation_state, read_integration_state,
+    read_transaction_metadata, register_native_gui_app_best_effort, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
+    remove_file_if_exists, remove_native_gui_registration_best_effort,
+    replay_activation_rollback_entry_with_fs, resolve_installed_package_selector,
+    run_package_native_uninstall_actions, run_service_action_plan,
     uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
     uninstall_package_identity, uninstall_package_with_dependency_overrides_and_ignored_roots,
     update_transaction_status, write_declared_services_state, write_gui_exposure_state,
     write_gui_native_state, write_identity_declared_services_state,
     write_identity_gui_exposure_state, write_identity_gui_native_state,
     write_identity_install_receipt, write_identity_integration_state, write_identity_pin,
-    write_install_receipt, write_installed_package_state, write_integration_state, write_pin,
+    write_install_receipt, write_installed_package_state, write_integration_activation_state,
+    write_integration_state, write_pin, ActivationAdapterOutcome, ActivationFilesystem,
+    ActivationFsEntry, ActivationOwner, ActivationRollbackEntry, ActivationRollbackOperation,
     ActiveTransactionMarker, ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity,
-    InstalledPackageSelector, InstalledPackageState, IntegrationProjection, NativeServiceAction,
-    NativeServiceOutcome, PrefixLayout, TransactionCoordinator, TransactionJournalEntry,
-    TransactionMetadata, TransactionRecoveryAction, TransactionRepairReason, TransactionStatus,
-    UninstallResult, UninstallStatus,
+    HostActivationContext, HostPlatform, InstallInteractionPolicy, InstallMode, InstallReason,
+    InstallReceipt, InstalledPackageIdentity, InstalledPackageSelector, InstalledPackageState,
+    IntegrationActivationPlan, IntegrationActivationRecord, IntegrationActivationScope,
+    IntegrationAdapterKind, IntegrationAppliedState, IntegrationDesiredState,
+    IntegrationProjection, IntegrationReasonCode, NativeServiceAction, PrefixLayout,
+    RealActivationFs, ServiceActivationMetadata, SystemActivationCommandExecutor,
+    TransactionCoordinator, TransactionJournalEntry, TransactionMetadata,
+    TransactionRecoveryAction, TransactionRepairReason, TransactionStatus, UninstallResult,
+    UninstallStatus,
 };
 #[cfg(test)]
 use crosspack_installer::{
     read_active_transaction, set_active_transaction, write_transaction_metadata,
 };
+#[cfg(test)]
+use crosspack_installer::{run_native_service_action, NativeServiceOutcome};
 use crosspack_registry::{
     ConfiguredRegistryIndex, PackageSkipDiagnostic, RegistryIndex, RegistrySourceKind,
     RegistrySourceRecord, RegistrySourceSnapshotState, RegistrySourceStore,
@@ -357,6 +371,10 @@ enum Commands {
         #[command(subcommand)]
         command: ServicesCommands,
     },
+    Integrations {
+        #[command(subcommand)]
+        command: IntegrationsCommands,
+    },
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
@@ -422,10 +440,27 @@ enum CacheCommands {
 #[derive(Subcommand, Debug)]
 enum ServicesCommands {
     List,
-    Status { name: String },
-    Start { name: String },
-    Stop { name: String },
-    Restart { name: String },
+    Status { package: String, service: String },
+    Start { package: String, service: String },
+    Stop { package: String, service: String },
+    Restart { package: String, service: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum IntegrationsCommands {
+    List,
+    Status {
+        package: String,
+        integration: String,
+    },
+    Enable {
+        package: String,
+        integration: String,
+    },
+    Disable {
+        package: String,
+        integration: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

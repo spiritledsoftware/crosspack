@@ -57,15 +57,17 @@
 19. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
     - macOS `.app` registration uses bundle-copy deployment and tries `/Applications/<App>.app` before `~/Applications/<App>.app`.
     - Existing unmanaged app bundles at either macOS destination are not overwritten; registration emits warnings and continues.
-20. Remove stale previously-owned binaries, completion files, GUI assets, and native GUI registrations no longer declared for that package.
-21. Persist declared manifest services to identity-keyed service state for service-command lookup.
-22. Write install receipt to an identity-keyed receipt path.
+20. Project typed Docker CLI, PATH plugin, and service integration payloads under `<prefix>/integrations/`.
+21. Reject service `enable = true` before host mutation; Docker CLI, PATH plugin, and service host activation remain explicit.
+22. Remove stale previously-owned binaries, completion files, GUI assets, native GUI registrations, and integration projections no longer declared for that package.
+23. Persist declared manifest services to identity-keyed service state for service-command lookup.
+24. Write install receipt to an identity-keyed receipt path.
       - persist `install_mode=managed|native` from artifact-kind defaults,
       - set `install_reason=root` for requested roots,
       - set `install_reason=dependency` for transitive-only packages,
       - preserve existing `install_reason=root` when upgrading already-rooted packages.
-23. Write a versioned installed-state document keyed by installed identity while preserving legacy receipt/sidecar reads.
-24. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
+25. Write a versioned installed-state document keyed by installed identity while preserving legacy receipt/sidecar reads.
+26. Best-effort refresh Crosspack shell completion assets under `<prefix>/share/completions/crosspack.<shell>` so package completion loaders are up to date.
 
 `crosspack install --dry-run` executes the same planning and renders deterministic, script-friendly preview lines from typed `InstallPlan` data:
 - `transaction_preview operation=... mode=dry-run`
@@ -157,6 +159,8 @@ Current behavior includes provider capability selection (`provides`), conflict g
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
 - `state/installed/<name>.gui-native` sidecar (optional): native uninstall action records (`key`, `kind`, `path`) for deterministic uninstall/rollback cleanup.
 - `state/installed/<name>.services` sidecar (optional): declared service records (`name`, optional `native_id`) for deterministic service command routing.
+- `state/installed/<name>.integrations` sidecar (optional): declared Docker CLI, PATH plugin, and service projection records for deterministic status, activation, and cleanup.
+- `state/installed/integrations.activation` state file (optional): versioned activation records with package identity, integration key, adapter, desired/applied state, host path, and reason code.
 - `identity_profile`, `identity_target`, `identity_source_namespace`, `identity_source_provenance`, and `identity_package` (identity-keyed receipts)
 - `state/installed/default--<target-or-host>--default--<name>.state.json` document (optional current format): versioned hydrated package state including identity, receipt, GUI/native/service/integration projections; legacy `<name>.state.json` and previous three-part identity-key documents remain readable.
 - `dependency` (repeated `name@version`, optional)
@@ -178,6 +182,8 @@ Current behavior includes provider capability selection (`provides`), conflict g
 - Completion collision: install fails if a projected package completion file is already owned by another package or exists unmanaged in Crosspack completion storage.
 - GUI asset collision: install fails if a projected GUI ownership key is already owned by another package or a projected GUI asset path already exists unmanaged.
 - Native GUI registration failures (including macOS destination prepare/write failures and unmanaged overwrite protection): install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
+- Service install-time activation for `enable = true` is not shipped; manifests that request it fail closed before host mutation and do not persist activation state.
+- Explicit `crosspack integrations enable|disable` records success/failure in the activation state file and never treats Docker CLI or PATH plugin projection alone as host activation.
 - Native service adapter failures for `services status|start|stop|restart`: commands return deterministic fallback reason codes (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) while preserving deterministic plain output shape.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 - Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
@@ -194,7 +200,8 @@ Current behavior includes provider capability selection (`provides`), conflict g
    - if `install_mode=native`, run native uninstall actions from `.gui-native` sidecar before managed cleanup,
    - remove package directories, exposed binaries, exposed package completion files, and GUI assets,
    - for managed installs, remove native GUI registrations best-effort using `.gui-native` state records,
-   - remove GUI sidecars (`.gui` and `.gui-native`) and receipt files,
+   - disable/remove supported owned activation records and host paths before deleting projected integration payloads; service activation records are preserved if host cleanup cannot be verified,
+   - remove GUI sidecars (`.gui` and `.gui-native`), integration sidecars (`.integrations`), and receipt files,
    - collect cache paths from receipts.
 6. Remove cache files that are no longer referenced by any remaining receipt.
 7. Return deterministic uninstall result including status, pruned dependency names, and blocking roots (if blocked).

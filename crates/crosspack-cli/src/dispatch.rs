@@ -425,6 +425,11 @@ fn run_cli(cli: Cli) -> Result<()> {
             let layout = PrefixLayout::new(prefix);
             run_services_command(&layout, command)?;
         }
+        Commands::Integrations { command } => {
+            let prefix = default_user_prefix()?;
+            let layout = PrefixLayout::new(prefix);
+            run_integrations_command(&layout, command)?;
+        }
         Commands::Cache { command } => {
             let prefix = default_user_prefix()?;
             let layout = PrefixLayout::new(prefix);

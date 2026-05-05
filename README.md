@@ -188,10 +188,14 @@ cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry 
 | `uninstall <name>` | Remove a package when not required by remaining roots and prune orphan dependencies. |
 | `list` | List installed packages. |
 | `services list` | List managed service states for installed packages with Crosspack service-state records. |
-| `services status <name>` | Show managed service state (`running`/`stopped`) for an installed package. |
-| `services start <name>` | Set managed service state to `running` for an installed package. |
-| `services stop <name>` | Set managed service state to `stopped` for an installed package. |
-| `services restart <name>` | Set managed service state to `running` for an installed package. |
+| `services status <package> <service>` | Show live managed service state (`running`/`stopped`) for an installed package. |
+| `services start <package> <service>` | Set managed service state to `running` for an installed package. |
+| `services stop <package> <service>` | Set managed service state to `stopped` for an installed package. |
+| `services restart <package> <service>` | Set managed service state to `running` for an installed package. |
+| `integrations list` | List projected Docker CLI, PATH plugin, and service integrations for installed packages. |
+| `integrations status <package> <integration>` | Show projection and activation state for matching integrations. |
+| `integrations enable <package> <integration>` | Explicitly activate a Docker CLI plugin, PATH plugin, or service integration on the host. |
+| `integrations disable <package> <integration>` | Explicitly remove owned host activation while preserving package projection state. |
 | `cache list` | List cached artifact files and sizes. |
 | `cache gc` | Remove unreferenced artifact cache files while retaining receipt-referenced files. |
 | `cache prune` | Remove all artifact cache files. |
@@ -222,6 +226,16 @@ Crosspack verifies both metadata and artifacts:
 - Package-level malformed records are isolated where commands can proceed without selecting that package. Signed malformed package records do not prevent a source snapshot from becoming ready, but source-level trust failures still fail closed: missing or invalid registry keys, bad configured-source fingerprints, missing ready snapshots, and missing or invalid metadata signatures remain fatal.
 - Artifacts are verified with SHA-256 before extraction.
 - Install state is tracked via receipts and transaction metadata under the prefix state directory.
+- Integration activation state is tracked in `<prefix>/state/installed/integrations.activation`; uninstall and rollback remove only supported host activation records owned by the package identity.
+
+## Host Integrations
+
+Registry metadata can declare typed integrations without maintainer scripts:
+
+- Docker CLI plugins and PATH plugins are projected into the Crosspack prefix during install. Host activation is explicit through `crosspack integrations enable` and reversible through `crosspack integrations disable`.
+- Services may declare Linux systemd-user, macOS launch-agent, and Windows service source metadata. Service host activation is explicit-only today; manifests should not set `enable = true`, and install fails closed before host mutation if they do.
+- Service uninstall preserves activation records when host cleanup cannot be verified; it does not claim service disable/remove support.
+- Activation records persist desired/applied state, adapter, host path, and reason code in `<prefix>/state/installed/integrations.activation` for status, rollback, and uninstall safety.
 
 Broad package discovery may emit additive plain stderr warnings when invalid package-level metadata is skipped:
 
