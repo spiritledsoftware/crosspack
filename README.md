@@ -188,14 +188,14 @@ cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry 
 | `uninstall <name>` | Remove a package when not required by remaining roots and prune orphan dependencies. |
 | `list` | List installed packages. |
 | `services list` | List managed service states for installed packages with Crosspack service-state records. |
-| `services status <name>` | Show managed service state (`running`/`stopped`) for an installed package. |
-| `services start <name>` | Set managed service state to `running` for an installed package. |
-| `services stop <name>` | Set managed service state to `stopped` for an installed package. |
-| `services restart <name>` | Set managed service state to `running` for an installed package. |
+| `services status <package> <service>` | Show live managed service state (`running`/`stopped`) for an installed package. |
+| `services start <package> <service>` | Set managed service state to `running` for an installed package. |
+| `services stop <package> <service>` | Set managed service state to `stopped` for an installed package. |
+| `services restart <package> <service>` | Set managed service state to `running` for an installed package. |
 | `integrations list` | List projected Docker CLI, PATH plugin, and service integrations for installed packages. |
-| `integrations status <package-or-key>` | Show projection and activation state for matching integrations. |
-| `integrations enable <package-or-key>` | Explicitly activate a Docker CLI plugin, PATH plugin, or service integration on the host. |
-| `integrations disable <package-or-key>` | Explicitly remove owned host activation while preserving package projection state. |
+| `integrations status <package> <integration>` | Show projection and activation state for matching integrations. |
+| `integrations enable <package> <integration>` | Explicitly activate a Docker CLI plugin, PATH plugin, or service integration on the host. |
+| `integrations disable <package> <integration>` | Explicitly remove owned host activation while preserving package projection state. |
 | `cache list` | List cached artifact files and sizes. |
 | `cache gc` | Remove unreferenced artifact cache files while retaining receipt-referenced files. |
 | `cache prune` | Remove all artifact cache files. |

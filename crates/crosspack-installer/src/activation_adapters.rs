@@ -57,7 +57,7 @@ fn owner_matches_rollback_expectation(
 ) -> bool {
     match (expected, actual) {
         (Some(expected), Some(actual)) => expected == actual,
-        (Some(_), None) => true,
+        (Some(_), None) => false,
         (None, _) => true,
     }
 }

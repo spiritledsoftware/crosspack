@@ -1905,12 +1905,30 @@ fn activate_enabled_services_for_install(
                 IntegrationReasonCode::HostPathConflict.as_str()
             ));
         }
-        return Err(anyhow!(
-            "service activation failed package={} service={} reason={}",
-            package_name,
-            name,
-            IntegrationReasonCode::UnsupportedHost.as_str()
-        ));
+        let mut executor = SystemActivationCommandExecutor;
+        let outcome = apply_service_plan(&mut executor, &plan);
+        if outcome.reason_code != IntegrationReasonCode::Ok {
+            return Err(anyhow!(
+                "service activation failed package={} service={} reason={}",
+                package_name,
+                name,
+                outcome.reason_code.as_str()
+            ));
+        }
+        let mut records = read_integration_activation_state(layout)?;
+        records.push(IntegrationActivationRecord {
+            package_state_key: package_state_key.to_string(),
+            package: package_name.to_string(),
+            integration_key: plan.integration_key,
+            kind: plan.kind,
+            adapter: plan.adapter,
+            scope: plan.scope,
+            desired_state: IntegrationDesiredState::Running,
+            applied_state: outcome.applied_state,
+            host_path: Some(plan.host_path),
+            reason_code: outcome.reason_code,
+        });
+        write_integration_activation_state(layout, &records).map(|_| ())?;
     }
     Ok(())
 }

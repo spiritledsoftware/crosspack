@@ -442,7 +442,10 @@ fn run_service_status_for_package_command(
     package: &str,
     service: &str,
 ) -> Result<()> {
-    let line = service_status_line_for_package(layout, package, service)?;
+    let mut executor = SystemActivationCommandExecutor;
+    let line = service_status_line_for_package(layout, package, service, |plan| {
+        run_service_action_plan(&mut executor, plan, NativeServiceAction::Status)
+    })?;
     println!("{line}");
     Ok(())
 }
@@ -451,18 +454,47 @@ fn service_status_line_for_package(
     layout: &PrefixLayout,
     package: &str,
     service: &str,
+    mut run_status: impl FnMut(&IntegrationActivationPlan) -> ActivationAdapterOutcome,
 ) -> Result<String> {
     declared_service_for_package_service(layout, package, service)?;
-    let activation = service_activation_record(layout, package, service)?;
-    match activation {
-        Some(activation) => Ok(format_service_activation_line(
-            package,
-            service,
-            &activation,
-            service_activation_applied(&activation),
-        )),
+    match service_activation_record(layout, package, service)? {
+        Some(mut activation) => {
+            let plan = activation_plan_from_record(&activation)?;
+            let outcome = run_status(&plan);
+            activation.applied_state = outcome.applied_state;
+            activation.reason_code = outcome.reason_code;
+            Ok(format_service_activation_line(
+                package,
+                service,
+                &activation,
+                activation.reason_code == IntegrationReasonCode::Ok,
+            ))
+        }
         None => Ok(format_projected_service_line(package, service)),
     }
+}
+
+#[cfg(test)]
+fn service_status_line_for_package_from_state(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<String> {
+    service_status_line_for_package(layout, package, service, |_| {
+        service_activation_record(layout, package, service)
+            .ok()
+            .flatten()
+            .map(|activation| ActivationAdapterOutcome {
+                reason_code: activation.reason_code,
+                applied_state: activation.applied_state,
+                rollback: Vec::new(),
+            })
+            .unwrap_or_else(|| ActivationAdapterOutcome {
+                reason_code: IntegrationReasonCode::StateMissing,
+                applied_state: IntegrationAppliedState::Unsupported,
+                rollback: Vec::new(),
+            })
+    })
 }
 
 fn run_service_action_for_package_command(
@@ -512,7 +544,9 @@ fn service_action_line_for_package(
         NativeServiceAction::Status => activation.desired_state,
         NativeServiceAction::Start | NativeServiceAction::Restart => IntegrationDesiredState::Running,
     };
-    upsert_activation_record(layout, activation.clone())?;
+    if action != NativeServiceAction::Status {
+        upsert_activation_record(layout, activation.clone())?;
+    }
     Ok(format_service_activation_line(
         package,
         service,
@@ -1037,7 +1071,14 @@ fn run_integration_activation_command_inner(
     let mut fs = real_activation_fs_from_records(host.platform, &records);
     let rollback = preview_integration_activation_rollback(&fs, &plan, enable);
     journal_integration_activation_rollback_payload(layout, tx, rollback.as_ref())?;
-    let outcome = if enable {
+    let outcome = if plan.kind == "service" {
+        let mut executor = SystemActivationCommandExecutor;
+        if enable {
+            apply_service_plan(&mut executor, &plan)
+        } else {
+            disable_service_plan(&mut executor, &plan)
+        }
+    } else if enable {
         apply_integration_plan_with_fs(&mut fs, &plan)
     } else {
         disable_integration_plan_with_fs(&mut fs, &plan)
@@ -1308,7 +1349,18 @@ fn real_activation_fs_from_records(
 ) -> RealActivationFs {
     RealActivationFs::new(
         platform,
-        records.iter().filter_map(|record| {
+        records
+            .iter()
+            .filter(|record| {
+                record.reason_code == IntegrationReasonCode::Ok
+                    && matches!(
+                        record.applied_state,
+                        IntegrationAppliedState::Installed
+                            | IntegrationAppliedState::Enabled
+                            | IntegrationAppliedState::Running
+                    )
+            })
+            .filter_map(|record| {
             Some((
                 record.host_path.clone()?,
                 ActivationOwner {
@@ -1462,7 +1514,8 @@ fn package_state_key_for_cli(layout: &PrefixLayout, package: &str) -> Result<Str
 fn upsert_activation_record(layout: &PrefixLayout, record: IntegrationActivationRecord) -> Result<()> {
     let mut records = read_integration_activation_state(layout)?;
     records.retain(|existing| {
-        !(existing.package == record.package && existing.integration_key == record.integration_key)
+        !(existing.package_state_key == record.package_state_key
+            && existing.integration_key == record.integration_key)
     });
     records.push(record);
     write_integration_activation_state(layout, &records).map(|_| ())

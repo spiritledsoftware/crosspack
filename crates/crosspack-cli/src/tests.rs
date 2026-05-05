@@ -9814,8 +9814,6 @@ old-cc = "<2.0.0"
         let host = HostActivationContext::linux()
             .with_prefix("/prefix")
             .with_home("/home/user");
-        let txid = "tx-service-activation-install";
-        let seq = 7;
         let err = activate_enabled_services_for_install(
             &layout,
             "caddy",
@@ -9827,7 +9825,7 @@ old-cc = "<2.0.0"
         .expect_err("production install-time service activation should fail closed");
 
         assert!(
-            err.to_string().contains("unsupported-host"),
+            err.to_string().contains("service activation failed"),
             "unexpected error: {err}"
         );
         let records = read_integration_activation_state(&layout).expect("must read activation state");
@@ -9836,10 +9834,15 @@ old-cc = "<2.0.0"
             "fail-closed service enable must not persist applied activation state"
         );
         assert!(
-            !layout.transaction_journal_path(txid).exists(),
+            std::fs::read_dir(layout.transactions_dir())
+                .map(|entries| {
+                    entries.filter_map(|entry| entry.ok()).all(|entry| {
+                        entry.path().extension().and_then(|ext| ext.to_str()) != Some("journal")
+                    })
+                })
+                .unwrap_or(true),
             "fail-closed service enable must not journal synthetic metadata rollback"
         );
-        assert_eq!(seq, 7);
 
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
@@ -9929,7 +9932,7 @@ old-cc = "<2.0.0"
         .expect_err("service enable should fail closed inside transaction");
 
         assert!(
-            err.to_string().contains("unsupported-host"),
+            err.to_string().contains("service activation failed"),
             "unexpected error: {err}"
         );
         assert!(
@@ -10758,7 +10761,7 @@ old-cc = "<2.0.0"
         )
         .expect("must seed activation state");
 
-        let line = service_status_line_for_package(&layout, "caddy", "caddy")
+        let line = service_status_line_for_package_from_state(&layout, "caddy", "caddy")
             .expect("status should render activation state");
 
         assert_eq!(

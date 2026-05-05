@@ -2872,6 +2872,42 @@ fn activation_replay_remove_created_symlink_verifies_target_before_delete() {
 }
 
 #[test]
+fn activation_replay_remove_created_symlink_requires_expected_owner() {
+    let mut fs = MemoryActivationFs::new(HostPlatform::Linux).with_symlink_support(true);
+    fs.write_symlink(
+        "/prefix/bin/democtl",
+        "/prefix/share/integrations/path/demo/democtl",
+    );
+    let rollback = ActivationRollbackEntry {
+        operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+        path: "/prefix/bin/democtl".to_string(),
+        previous_symlink_target: None,
+        previous_shim_target: None,
+        previous_owner: None,
+        created_symlink_target: Some("/prefix/share/integrations/path/demo/democtl".to_string()),
+        created_shim_target: None,
+        created_owner: Some(ActivationOwner {
+            package_state_key: "default--host--core--demo".to_string(),
+            package: "demo".to_string(),
+            integration_key: "path_plugin:demo:democtl".to_string(),
+        }),
+        expected_current_symlink_target: None,
+        expected_current_shim_target: None,
+        expected_current_owner: None,
+        expected_current_absent: false,
+        created_parent_dirs: Vec::new(),
+    };
+
+    let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &rollback);
+
+    assert_eq!(outcome.reason_code, IntegrationReasonCode::HostPathConflict);
+    assert_eq!(
+        fs.symlink_target("/prefix/bin/democtl").as_deref(),
+        Some("/prefix/share/integrations/path/demo/democtl")
+    );
+}
+
+#[test]
 fn activation_replay_windows_shim_remove_and_restore_are_verified() {
     let owner = ActivationOwner {
         package_state_key: "default--host--core--demo".to_string(),
