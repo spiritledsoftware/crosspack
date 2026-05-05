@@ -10952,6 +10952,64 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn integration_activation_test_helper_dispatches_service_runner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("caddy", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        let integration = PackageIntegration::Service {
+            name: "caddy".to_string(),
+            linux_systemd_user: Some("services/caddy.service".to_string()),
+            macos_launch_agent: None,
+            windows_service: None,
+            enable: false,
+        };
+        write_integration_state(
+            &layout,
+            "caddy",
+            &projected_integrations("caddy", &integration).expect("must project service"),
+        )
+        .expect("must seed integration state");
+        let host = HostActivationContext::linux()
+            .with_prefix("/prefix")
+            .with_home("/home/user");
+        let mut fs = MemoryActivationFs::new(HostPlatform::Linux);
+        let mut called = false;
+
+        let line = run_integration_activation_command_with_fs_tx_and_service_runner(
+            &layout,
+            None,
+            &host,
+            &mut fs,
+            "caddy",
+            "service:caddy",
+            true,
+            |plan, enable| {
+                called = true;
+                assert_eq!(plan.kind, "service");
+                assert!(enable);
+                ActivationAdapterOutcome {
+                    reason_code: IntegrationReasonCode::Ok,
+                    applied_state: IntegrationAppliedState::Running,
+                    rollback: Vec::new(),
+                }
+            },
+        )
+        .expect("service integration activation should use injected service runner");
+
+        assert!(called, "service activation should call injected runner");
+        assert!(line.contains("state=running adapter=systemd-user reason=ok"));
+        let records = read_integration_activation_state(&layout).expect("must read state");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
+        assert_eq!(records[0].reason_code, IntegrationReasonCode::Ok);
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn integration_status_line_reports_ambiguous_short_names_with_full_key_guidance() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");

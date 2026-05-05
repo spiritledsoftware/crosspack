@@ -1116,6 +1116,37 @@ fn run_integration_activation_command_with_fs_and_tx(
     integration: &str,
     enable: bool,
 ) -> Result<String> {
+    run_integration_activation_command_with_fs_tx_and_service_runner(
+        layout,
+        tx,
+        host,
+        fs,
+        package,
+        integration,
+        enable,
+        |plan, enable| {
+            let mut executor = SystemActivationCommandExecutor;
+            if enable {
+                apply_service_plan(&mut executor, plan)
+            } else {
+                disable_service_plan(&mut executor, plan)
+            }
+        },
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_integration_activation_command_with_fs_tx_and_service_runner(
+    layout: &PrefixLayout,
+    tx: Option<&TransactionMetadata>,
+    host: &HostActivationContext,
+    fs: &mut impl ActivationFilesystem,
+    package: &str,
+    integration: &str,
+    enable: bool,
+    mut run_service: impl FnMut(&IntegrationActivationPlan, bool) -> ActivationAdapterOutcome,
+) -> Result<String> {
     layout.ensure_base_dirs()?;
     ensure_installed_name_unambiguous(layout, package)?;
     let projection = resolve_projected_integration(layout, package, integration)?;
@@ -1123,7 +1154,9 @@ fn run_integration_activation_command_with_fs_and_tx(
     plan.package_state_key = package_state_key_for_cli(layout, package)?;
     let rollback = preview_integration_activation_rollback(fs, &plan, enable);
     journal_integration_activation_rollback_payload(layout, tx, rollback.as_ref())?;
-    let outcome = if enable {
+    let outcome = if plan.kind == "service" {
+        run_service(&plan, enable)
+    } else if enable {
         apply_integration_plan_with_fs(fs, &plan)
     } else {
         disable_integration_plan_with_fs(fs, &plan)
