@@ -1036,9 +1036,10 @@ fn update_filesystem_source_fails_when_package_template_signature_is_invalid() {
         .error
         .as_deref()
         .expect("must include error message");
+    let rendered_path = rendered.replace('\\', "/");
     assert!(rendered.contains("source-metadata-invalid"));
     assert!(rendered.contains("metadata signature"));
-    assert!(rendered.contains("packages/ripgrep.toml"));
+    assert!(rendered_path.contains("packages/ripgrep.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1080,9 +1081,10 @@ fn update_filesystem_source_fails_when_release_signature_is_invalid() {
         .error
         .as_deref()
         .expect("must include error message");
+    let rendered_path = rendered.replace('\\', "/");
     assert!(rendered.contains("source-metadata-invalid"));
     assert!(rendered.contains("metadata signature"));
-    assert!(rendered.contains("releases/ripgrep/14.1.0.toml"));
+    assert!(rendered_path.contains("releases/ripgrep/14.1.0.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
@@ -1161,9 +1163,10 @@ fn source_metadata_policy_fails_when_release_signature_is_invalid() {
         .error
         .as_deref()
         .expect("must include error message");
+    let rendered_path = rendered.replace('\\', "/");
     assert!(rendered.contains("source-metadata-invalid"));
     assert!(rendered.contains("metadata signature"));
-    assert!(rendered.contains("releases/ripgrep/14.1.0.toml"));
+    assert!(rendered_path.contains("releases/ripgrep/14.1.0.toml"));
 
     let _ = fs::remove_dir_all(&source_root);
     let _ = fs::remove_dir_all(&root);
