@@ -37,7 +37,7 @@ use crosspack_installer::{
     remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
     remove_file_if_exists, remove_native_gui_registration_best_effort,
     replay_activation_rollback_entry_with_fs, resolve_installed_package_selector,
-    run_package_native_uninstall_actions, run_service_action_plan,
+    run_package_native_uninstall_actions, run_service_action_plan, service_projection_matches_host,
     uninstall_blocked_by_roots_with_dependency_overrides_and_ignored_roots, uninstall_package,
     uninstall_package_identity, uninstall_package_with_dependency_overrides_and_ignored_roots,
     update_transaction_status, write_declared_services_state, write_gui_exposure_state,

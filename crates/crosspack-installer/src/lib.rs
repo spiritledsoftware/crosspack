@@ -44,8 +44,8 @@ pub use exposure::{
     read_all_gui_exposure_states, read_all_integration_states, read_gui_exposure_state,
     read_identity_integration_state, read_integration_state, remove_exposed_binary,
     remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
-    write_gui_exposure_state, write_identity_gui_exposure_state, write_identity_integration_state,
-    write_integration_state,
+    service_projection_matches_host, write_gui_exposure_state, write_identity_gui_exposure_state,
+    write_identity_integration_state, write_integration_state,
 };
 pub use fs_utils::remove_file_if_exists;
 pub use identity::{InstalledPackageIdentity, InstalledPackageSelector};

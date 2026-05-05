@@ -708,7 +708,7 @@ fn push_service_projection(
     });
 }
 
-fn service_projection_matches_host(
+pub fn service_projection_matches_host(
     projection: &IntegrationProjection,
     platform: HostPlatform,
 ) -> bool {
