@@ -122,38 +122,25 @@ pub(crate) fn validate_loaded_sources(sources: &[RegistrySourceRecord]) -> Resul
 }
 
 pub(crate) fn validate_community_recipe_catalog_path(path: &str) -> Result<()> {
-    if path.is_empty() {
-        anyhow::bail!("invalid community recipe catalog path: must not be empty");
+    if path.is_empty()
+        || path == "."
+        || path.starts_with("./")
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || path.chars().any(char::is_control)
+        || looks_like_windows_drive(path)
+    {
+        anyhow::bail!(
+            "invalid community recipe catalog path '{}': must be a normalized relative .toml path",
+            path
+        );
     }
 
     let path_value = Path::new(path);
-    if path_value.is_absolute() {
-        anyhow::bail!(
-            "invalid community recipe catalog path '{}': must be relative",
-            path
-        );
-    }
-
-    if path_value
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        anyhow::bail!(
-            "invalid community recipe catalog path '{}': parent traversal is not allowed",
-            path
-        );
-    }
-
-    if path_value
-        .components()
-        .any(|component| matches!(component, std::path::Component::CurDir))
-    {
-        anyhow::bail!(
-            "invalid community recipe catalog path '{}': '.' segments are not allowed",
-            path
-        );
-    }
-
     if path_value
         .extension()
         .and_then(|extension| extension.to_str())
@@ -166,6 +153,11 @@ pub(crate) fn validate_community_recipe_catalog_path(path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn looks_like_windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 pub(crate) fn select_update_sources(

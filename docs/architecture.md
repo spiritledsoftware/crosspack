@@ -84,6 +84,8 @@ Default user prefixes:
 - `depends <name>`, `uses <name>`, and `why <name>` provide deterministic dependency introspection from installed receipts.
 - `bundle export` writes deterministic root+pin environment bundles; `bundle apply` replays bundle roots through standard resolve/install flows.
 - `services list|status|start|stop|restart` resolves service names from manifest-declared service state persisted under `<prefix>/state/installed/<name>.services` and tracks deterministic state files under `<prefix>/state/services/`.
+- `integrations list|status|enable|disable` resolves typed Docker CLI plugin, PATH plugin, and service integration projections from installed package state. Docker CLI and PATH plugin install only project payloads under the prefix; host activation is explicit and persisted in `<prefix>/state/installed/integrations.activation`.
+- Service integrations are explicit-only in shipped install behavior. `enable = true` in metadata fails closed before host mutation and does not persist activation state.
 - Service actions integrate host-native adapters (`systemd` on Linux, `launchctl` on macOS, `sc` on Windows) with deterministic reason-coded fallback (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) when native actions are unavailable or fail.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
 - During dependency resolution, package names are resolved directly first; if no direct package exists, manifests that declare the requested token in `provides` are considered capability providers. During upgrade resolution, capability providers already installed at the same package version are preferred when they still satisfy dependency constraints, pins, and conflicts, avoiding provider churn without changing direct package-name precedence.
@@ -100,6 +102,7 @@ Default user prefixes:
 - Native GUI registration is best-effort: on macOS, adapters attempt system-scope registration first and fall back to user-scope; on other platforms, registration remains user-scope only. Adapter failures produce warning lines and do not fail otherwise successful installs/upgrades/uninstalls.
 - `uninstall` is dependency-aware: it blocks removal when remaining roots still require the package, reports blocking roots, removes requested packages, and auto-prunes orphan dependencies.
 - `uninstall` prunes unreferenced artifact cache files for removed packages.
+- `uninstall` removes only supported activation records and host paths owned by the removed package identity. Service activation records are preserved when host disable/remove cannot be verified.
 - `cache list`, `cache gc`, and `cache prune` provide explicit artifact cache lifecycle controls.
 - Transaction recovery commands are shipped and operational:
   - `rollback [txid]` replays rollback for eligible failed/incomplete transactions.

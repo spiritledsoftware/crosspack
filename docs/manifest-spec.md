@@ -62,6 +62,7 @@ After merge, Crosspack expects runtime manifest semantics equivalent to:
 - `dependencies` (optional map)
 - `source_build` (optional)
 - `services` (optional)
+- `integrations` (optional)
 - `artifacts` with executable/completion/GUI metadata
 
 The merge model allows package templates to carry stable metadata while release docs carry per-version URL/checksum data.
@@ -86,6 +87,16 @@ Constraints:
 - service tokens use package-token grammar (`[a-z0-9][a-z0-9._+-]{0,63}`)
 - names must be unique per manifest
 - invalid declarations fail closed
+
+## Typed Host Integrations (`integrations`)
+
+Typed integrations describe host-visible activation targets without arbitrary scripts. All integration source paths are artifact-relative, normalized paths; absolute paths and `..` segments fail closed.
+
+- `kind = "docker_cli_plugin"`: requires `name` and `source`. Install projects the plugin payload under the Crosspack prefix; host activation is explicit through `crosspack integrations enable`.
+- `kind = "path_plugin"`: requires `host`, `name`, and `source`. Install projects the plugin payload under the Crosspack prefix; host activation is explicit through `crosspack integrations enable`.
+- `kind = "service"`: requires `name` and at least one service source. `source` is accepted as a legacy alias for `linux_systemd_user`; platform-specific fields are `linux_systemd_user`, `macos_launch_agent`, and `windows_service`.
+
+Service host activation is explicit-only in the current shipped behavior. Manifests should not set `enable = true`; if they do, install fails closed before host mutation and does not persist activation state.
 
 ## Artifact Kind Policy
 

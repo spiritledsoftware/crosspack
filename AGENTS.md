@@ -6,6 +6,7 @@
 - `crosspack-cli` builds both binaries, `crosspack` and `cpk`, from `crates/crosspack-cli/src/main.rs`.
 - CLI implementation is split with `include!` at the bottom of `main.rs` (`dispatch.rs`, `command_flows.rs`, `core_flows.rs`, `bundle_flows.rs`, `metadata.rs`, `render.rs`, `completion.rs`), so those files share one module scope.
 - `registry` is a git submodule (`https://github.com/spiritledsoftware/crosspack-registry.git`), not ordinary in-repo source.
+- When editing `registry`, commit changes inside the submodule only; do not stage or commit the root repo's `registry` gitlink pointer. The registry submodule's GitHub Actions handle propagating registry updates back to the root repo.
 - More specific guidance exists in `crates/AGENTS.md`, `crates/crosspack-cli/AGENTS.md`, `crates/crosspack-installer/AGENTS.md`, and `crates/crosspack-registry/AGENTS.md`.
 
 ## Commands

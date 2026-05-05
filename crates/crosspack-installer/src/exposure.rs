@@ -387,10 +387,11 @@ pub fn expose_completion(
         })?;
     }
 
-    fs::copy(&source_path, &destination).with_context(|| {
+    let source_display = source_path.display().to_string();
+    fs::copy(source_path, &destination).with_context(|| {
         format!(
             "failed to expose completion file {} -> {}",
-            source_path.display(),
+            source_display,
             destination.display()
         )
     })?;
@@ -423,12 +424,44 @@ pub fn expose_integration(
     package_name: &str,
     integration: &PackageIntegration,
 ) -> Result<IntegrationProjection> {
-    let source_rel = validated_relative_integration_source_path(integration.source())?;
+    let mut projections = expose_integrations(layout, install_root, package_name, integration)?;
+    if projections.len() != 1 {
+        return Err(anyhow!(
+            "integration '{}' projects {} files; use multi-projection exposure",
+            integration.kind(),
+            projections.len()
+        ));
+    }
+    Ok(projections.remove(0))
+}
+
+pub fn expose_integrations(
+    layout: &PrefixLayout,
+    install_root: &Path,
+    package_name: &str,
+    integration: &PackageIntegration,
+) -> Result<Vec<IntegrationProjection>> {
+    let sources = projected_integration_sources(package_name, integration)?;
+    let mut preflighted = Vec::with_capacity(sources.len());
+    for (source, projection) in &sources {
+        let source_path = preflight_integration_source(install_root, source)?;
+        preflighted.push((source_path, projection.clone()));
+    }
+    let mut projections = Vec::with_capacity(preflighted.len());
+    for (source_path, projection) in preflighted {
+        copy_integration_source(layout, &source_path, &projection)?;
+        projections.push(projection);
+    }
+    Ok(projections)
+}
+
+fn preflight_integration_source(install_root: &Path, source: &str) -> Result<PathBuf> {
+    let source_rel = validated_relative_integration_source_path(source)?;
     let source_path = install_root.join(source_rel);
     if !source_path.exists() {
         return Err(anyhow!(
             "declared integration source path '{}' was not found in install root: {}",
-            integration.source(),
+            source,
             source_path.display()
         ));
     }
@@ -441,12 +474,18 @@ pub fn expose_integration(
     if !metadata.is_file() {
         return Err(anyhow!(
             "declared integration source path '{}' must be a file: {}",
-            integration.source(),
+            source,
             source_path.display()
         ));
     }
+    Ok(source_path)
+}
 
-    let projection = projected_integration(package_name, integration)?;
+fn copy_integration_source(
+    layout: &PrefixLayout,
+    source_path: &Path,
+    projection: &IntegrationProjection,
+) -> Result<()> {
     let destination = integration_path(layout, &projection.rel_path)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
@@ -460,14 +499,15 @@ pub fn expose_integration(
             )
         })?;
     }
-    fs::copy(&source_path, &destination).with_context(|| {
+    let source_display = source_path.display().to_string();
+    fs::copy(source_path, &destination).with_context(|| {
         format!(
             "failed to expose integration file {} -> {}",
-            source_path.display(),
+            source_display,
             destination.display()
         )
     })?;
-    Ok(projection)
+    Ok(())
 }
 
 pub fn remove_exposed_integration(
@@ -488,7 +528,22 @@ pub fn projected_integration(
     package_name: &str,
     integration: &PackageIntegration,
 ) -> Result<IntegrationProjection> {
-    let projection = match integration {
+    let mut projections = projected_integrations(package_name, integration)?;
+    if projections.len() != 1 {
+        return Err(anyhow!(
+            "integration '{}' projects {} files; use multi-projection planning",
+            integration.kind(),
+            projections.len()
+        ));
+    }
+    Ok(projections.remove(0))
+}
+
+pub fn projected_integrations(
+    package_name: &str,
+    integration: &PackageIntegration,
+) -> Result<Vec<IntegrationProjection>> {
+    let projections = match integration {
         PackageIntegration::DockerCliPlugin { name, .. } => IntegrationProjection {
             kind: integration.kind().to_string(),
             key: format!("docker_cli_plugin:{name}"),
@@ -507,18 +562,105 @@ pub fn projected_integration(
                 normalize_integration_token(name)
             ),
         },
-        PackageIntegration::Service { name, .. } => IntegrationProjection {
-            kind: integration.kind().to_string(),
-            key: format!("service:{name}"),
-            rel_path: format!(
-                "services/{}/{}.service",
-                normalize_integration_token(package_name),
-                normalize_integration_token(name)
-            ),
-        },
+        PackageIntegration::Service {
+            name,
+            linux_systemd_user,
+            macos_launch_agent,
+            windows_service,
+            ..
+        } => {
+            let mut projections = Vec::new();
+            push_service_projection(
+                &mut projections,
+                integration.kind(),
+                package_name,
+                name,
+                linux_systemd_user,
+                "service",
+            );
+            push_service_projection(
+                &mut projections,
+                integration.kind(),
+                package_name,
+                name,
+                macos_launch_agent,
+                "launchd.plist",
+            );
+            push_service_projection(
+                &mut projections,
+                integration.kind(),
+                package_name,
+                name,
+                windows_service,
+                "windows-service.toml",
+            );
+            return validate_integration_projections(projections);
+        }
     };
-    validated_relative_integration_storage_path(&projection.rel_path)?;
-    Ok(projection)
+    validate_integration_projections(vec![projections])
+}
+
+fn projected_integration_sources(
+    package_name: &str,
+    integration: &PackageIntegration,
+) -> Result<Vec<(String, IntegrationProjection)>> {
+    match integration {
+        PackageIntegration::DockerCliPlugin { source, .. }
+        | PackageIntegration::PathPlugin { source, .. } => Ok(vec![(
+            source.clone(),
+            projected_integration(package_name, integration)?,
+        )]),
+        PackageIntegration::Service {
+            linux_systemd_user,
+            macos_launch_agent,
+            windows_service,
+            ..
+        } => {
+            let projections = projected_integrations(package_name, integration)?;
+            let sources = [linux_systemd_user, macos_launch_agent, windows_service]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .zip(projections)
+                .collect();
+            Ok(sources)
+        }
+    }
+}
+
+fn push_service_projection(
+    projections: &mut Vec<IntegrationProjection>,
+    kind: &str,
+    package_name: &str,
+    name: &str,
+    source: &Option<String>,
+    suffix: &str,
+) {
+    if source.is_none() {
+        return;
+    }
+    projections.push(IntegrationProjection {
+        kind: kind.to_string(),
+        key: format!("service:{name}"),
+        rel_path: format!(
+            "services/{}/{}.{}",
+            normalize_integration_token(package_name),
+            normalize_integration_token(name),
+            suffix
+        ),
+    });
+}
+
+fn validate_integration_projections(
+    projections: Vec<IntegrationProjection>,
+) -> Result<Vec<IntegrationProjection>> {
+    if projections.is_empty() {
+        return Err(anyhow!("integration must declare at least one source"));
+    }
+    for projection in &projections {
+        validated_relative_integration_storage_path(&projection.rel_path)?;
+    }
+    Ok(projections)
 }
 
 fn integration_path(layout: &PrefixLayout, rel_path: &str) -> Result<PathBuf> {

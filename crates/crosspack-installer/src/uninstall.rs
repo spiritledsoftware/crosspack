@@ -15,10 +15,12 @@ use crate::native::{
 };
 use crate::receipts::clear_declared_services_state;
 use crate::{
-    clear_installed_package_state_document, read_all_installed_package_states,
-    read_identity_install_receipt, InstallMode, InstallReason, InstallReceipt,
-    InstalledPackageIdentity, InstalledPackageState, PrefixLayout, UninstallResult,
-    UninstallStatus,
+    clear_installed_package_state_document, disable_integration_plan,
+    read_all_installed_package_states, read_identity_install_receipt,
+    read_integration_activation_state, write_integration_activation_state, HostPlatform,
+    InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity, InstalledPackageState,
+    IntegrationActivationPlan, IntegrationAppliedState, IntegrationDesiredState,
+    IntegrationProjection, IntegrationReasonCode, PrefixLayout, UninstallResult, UninstallStatus,
 };
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
@@ -155,6 +157,16 @@ fn remove_identity_artifacts(
     if receipt.install_mode == InstallMode::Native {
         run_identity_native_uninstall_actions(layout, identity)?;
     }
+
+    let integrations = state
+        .map(|state| state.integrations.as_slice())
+        .unwrap_or(&[]);
+    cleanup_activation_records_for_uninstall(
+        layout,
+        &receipt.name,
+        Some(&identity.state_key()),
+        integrations,
+    )?;
 
     let package_dir = layout.identity_package_dir(identity, &receipt.version);
     let package_existed = package_dir.exists();
@@ -497,6 +509,14 @@ fn remove_receipt_artifacts(
         clear_native_sidecar_state(layout, &receipt.name)?;
     }
 
+    let integration_projections = read_integration_state(layout, &receipt.name)?;
+    cleanup_activation_records_for_uninstall(
+        layout,
+        &receipt.name,
+        None,
+        &integration_projections,
+    )?;
+
     let package_dir = layout.package_dir(&receipt.name, &receipt.version);
     let package_existed = package_dir.exists();
     if package_existed {
@@ -516,7 +536,6 @@ fn remove_receipt_artifacts(
         remove_exposed_gui_asset(layout, asset)?;
     }
     clear_gui_exposure_state(layout, &receipt.name)?;
-    let integration_projections = read_integration_state(layout, &receipt.name)?;
     for projection in &integration_projections {
         remove_exposed_integration(layout, projection)?;
     }
@@ -541,6 +560,138 @@ fn remove_receipt_artifacts(
     } else {
         UninstallStatus::RepairedStaleState
     })
+}
+
+fn cleanup_activation_records_for_uninstall(
+    layout: &PrefixLayout,
+    package: &str,
+    package_state_key: Option<&str>,
+    projections: &[IntegrationProjection],
+) -> Result<()> {
+    cleanup_activation_records_for_uninstall_with(
+        layout,
+        package,
+        package_state_key,
+        projections,
+        |record, plan, existing_records| {
+            let platform = current_host_platform();
+            if record.kind == "service" {
+                crate::ActivationAdapterOutcome {
+                    reason_code: IntegrationReasonCode::UnsupportedHost,
+                    applied_state: IntegrationAppliedState::Unsupported,
+                    rollback: Vec::new(),
+                }
+            } else {
+                disable_integration_plan(platform, plan, existing_records)
+            }
+        },
+    )
+}
+
+pub(crate) fn cleanup_activation_records_for_uninstall_with(
+    layout: &PrefixLayout,
+    package: &str,
+    package_state_key: Option<&str>,
+    projections: &[IntegrationProjection],
+    mut disable_record: impl FnMut(
+        &crate::IntegrationActivationRecord,
+        &IntegrationActivationPlan,
+        &[crate::IntegrationActivationRecord],
+    ) -> crate::ActivationAdapterOutcome,
+) -> Result<()> {
+    let mut records = read_integration_activation_state(layout)?;
+    let existing_records = records.clone();
+    let mut changed = false;
+    let mut next_records = Vec::with_capacity(records.len());
+
+    for mut record in records.drain(..) {
+        if record.package != package {
+            next_records.push(record);
+            continue;
+        }
+        if package_state_key.is_some_and(|key| record.package_state_key != key) {
+            next_records.push(record);
+            continue;
+        }
+
+        let Some(plan) = activation_plan_for_uninstall_record(layout, &record, projections) else {
+            record.desired_state = IntegrationDesiredState::Projected;
+            record.applied_state = IntegrationAppliedState::Failed;
+            record.reason_code = IntegrationReasonCode::StateMissing;
+            next_records.push(record);
+            changed = true;
+            continue;
+        };
+
+        let outcome = disable_record(&record, &plan, &existing_records);
+        if outcome.reason_code == IntegrationReasonCode::Ok
+            && uninstall_activation_cleanup_verified(&record, &outcome)
+        {
+            changed = true;
+            continue;
+        }
+
+        record.desired_state = IntegrationDesiredState::Projected;
+        record.applied_state = IntegrationAppliedState::Failed;
+        record.reason_code = if outcome.reason_code == IntegrationReasonCode::Ok {
+            IntegrationReasonCode::HostPathConflict
+        } else {
+            outcome.reason_code
+        };
+        next_records.push(record);
+        changed = true;
+    }
+
+    if changed {
+        write_integration_activation_state(layout, &next_records)?;
+    }
+    Ok(())
+}
+
+fn uninstall_activation_cleanup_verified(
+    record: &crate::IntegrationActivationRecord,
+    outcome: &crate::ActivationAdapterOutcome,
+) -> bool {
+    record.kind != "service"
+        || outcome.rollback.iter().any(|entry| {
+            entry.operation == crate::ActivationRollbackOperation::RestoreOwnedServiceMetadata
+        })
+}
+
+fn activation_plan_for_uninstall_record(
+    layout: &PrefixLayout,
+    record: &crate::IntegrationActivationRecord,
+    projections: &[IntegrationProjection],
+) -> Option<IntegrationActivationPlan> {
+    let projection = projections
+        .iter()
+        .find(|projection| projection.key == record.integration_key)?;
+    let host_path = record.host_path.clone()?;
+    Some(IntegrationActivationPlan {
+        package_state_key: record.package_state_key.clone(),
+        package: record.package.clone(),
+        integration_key: record.integration_key.clone(),
+        kind: record.kind.clone(),
+        adapter: record.adapter.clone(),
+        scope: record.scope.clone(),
+        desired_state: IntegrationDesiredState::Projected,
+        host_path,
+        source_path: layout
+            .integrations_dir()
+            .join(&projection.rel_path)
+            .display()
+            .to_string(),
+    })
+}
+
+fn current_host_platform() -> HostPlatform {
+    if cfg!(target_os = "windows") {
+        HostPlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        HostPlatform::Macos
+    } else {
+        HostPlatform::Linux
+    }
 }
 
 fn dependency_map(receipts: &HashMap<String, InstallReceipt>) -> HashMap<String, BTreeSet<String>> {

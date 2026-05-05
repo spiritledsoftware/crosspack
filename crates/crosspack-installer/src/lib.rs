@@ -1,3 +1,6 @@
+mod activation_adapters;
+mod activation_plan;
+mod activation_state;
 mod artifact;
 mod atomic_write;
 mod durable;
@@ -14,18 +17,34 @@ mod transactions;
 mod types;
 mod uninstall;
 
+pub use activation_adapters::{
+    apply_docker_cli_plugin_plan, apply_integration_plan, apply_integration_plan_with_fs,
+    apply_path_plugin_plan, apply_service_plan, apply_service_plan_with_fs,
+    disable_docker_cli_plugin_plan, disable_integration_plan, disable_integration_plan_with_fs,
+    disable_path_plugin_plan, disable_service_plan, disable_service_plan_with_fs,
+    replay_activation_rollback_entry_with_fs, run_service_action_plan, status_service_plan,
+    ActivationAdapterOutcome, ActivationCommandExecutor, ActivationFilesystem, ActivationFsEntry,
+    ActivationOwner, ActivationRollbackEntry, ActivationRollbackOperation, MemoryActivationFs,
+    NativeCommandResult, RealActivationFs, SystemActivationCommandExecutor,
+};
+pub use activation_plan::{
+    plan_docker_cli_plugin_activation, plan_path_plugin_activation, plan_service_activation,
+    HostActivationContext, IntegrationPlanError, ServiceActivationMetadata,
+};
+pub use activation_state::{read_integration_activation_state, write_integration_activation_state};
 pub use artifact::{
     install_from_artifact, install_from_artifact_to_dir, install_from_source_archive,
     install_from_source_archive_to_dir,
 };
 pub use exposure::{
     bin_path, clear_gui_exposure_state, clear_integration_state, expose_binary, expose_completion,
-    expose_gui_app, expose_integration, exposed_completion_path, gui_asset_path,
-    projected_exposed_completion_path, projected_gui_assets, projected_integration,
-    read_all_gui_exposure_states, read_all_integration_states, read_gui_exposure_state,
-    read_integration_state, remove_exposed_binary, remove_exposed_completion,
-    remove_exposed_gui_asset, remove_exposed_integration, write_gui_exposure_state,
-    write_identity_gui_exposure_state, write_identity_integration_state, write_integration_state,
+    expose_gui_app, expose_integration, expose_integrations, exposed_completion_path,
+    gui_asset_path, projected_exposed_completion_path, projected_gui_assets, projected_integration,
+    projected_integrations, read_all_gui_exposure_states, read_all_integration_states,
+    read_gui_exposure_state, read_integration_state, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
+    write_gui_exposure_state, write_identity_gui_exposure_state, write_identity_integration_state,
+    write_integration_state,
 };
 pub use fs_utils::remove_file_if_exists;
 pub use identity::{InstalledPackageIdentity, InstalledPackageSelector};
@@ -63,11 +82,14 @@ pub use transactions::{
     write_transaction_metadata, ActiveTransactionMarker,
 };
 pub use types::{
-    ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord,
-    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt, IntegrationProjection,
-    NativeServiceAction, NativeServiceOutcome, NativeSidecarState, NativeUninstallAction,
-    TransactionJournalEntry, TransactionMetadata, TransactionRecoveryAction,
-    TransactionRepairReason, TransactionStatus, UninstallResult, UninstallStatus,
+    ArtifactInstallOptions, GuiExposureAsset, GuiNativeRegistrationRecord, HostPlatform,
+    InstallInteractionPolicy, InstallMode, InstallReason, InstallReceipt,
+    IntegrationActivationPlan, IntegrationActivationRecord, IntegrationActivationScope,
+    IntegrationAdapterKind, IntegrationAppliedState, IntegrationDesiredState,
+    IntegrationProjection, IntegrationReasonCode, NativeServiceAction, NativeServiceOutcome,
+    NativeSidecarState, NativeUninstallAction, TransactionJournalEntry, TransactionMetadata,
+    TransactionRecoveryAction, TransactionRepairReason, TransactionStatus, UninstallResult,
+    UninstallStatus,
 };
 pub use uninstall::{
     uninstall_blocked_by_roots_with_dependency_overrides,

@@ -533,24 +533,34 @@ fn source_store_persists_and_loads_optional_community_metadata() {
 
 #[test]
 fn source_store_rejects_invalid_community_recipe_catalog_path() {
-    let root = test_registry_root();
-    let store = RegistrySourceStore::new(&root);
+    for path in [
+        "../recipes.toml",
+        ".",
+        "community//recipes.toml",
+        "./community/recipes.toml",
+        "community\\recipes.toml",
+        "C:/community/recipes.toml",
+        "community/recipes\u{7}.toml",
+    ] {
+        let root = test_registry_root();
+        let store = RegistrySourceStore::new(&root);
 
-    let mut source = source_record("community", 5);
-    source.community = Some(RegistrySourceCommunity {
-        recipe_catalog_path: "../recipes.toml".to_string(),
-    });
+        let mut source = source_record("community", 5);
+        source.community = Some(RegistrySourceCommunity {
+            recipe_catalog_path: path.to_string(),
+        });
 
-    let err = store
-        .add_source(source)
-        .expect_err("must reject unsafe community recipe catalog path");
-    assert!(
-        err.to_string()
-            .contains("invalid community recipe catalog path"),
-        "expected community path validation error, got: {err:#}"
-    );
+        let err = store
+            .add_source(source)
+            .expect_err("must reject unsafe community recipe catalog path");
+        assert!(
+            err.to_string()
+                .contains("invalid community recipe catalog path"),
+            "expected community path validation error for {path:?}, got: {err:#}"
+        );
 
-    let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[test]
@@ -1937,6 +1947,47 @@ sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn integration_smoke_registry_packages_parse_typed_integrations() {
+    let registry_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crate must be nested under crates/")
+        .join("registry");
+
+    let docker_compose = read_registry_package_template(&registry_root, "docker-compose");
+    let kubectx = read_registry_package_template(&registry_root, "kubectx");
+    let syncthing = read_registry_package_template(&registry_root, "syncthing");
+
+    let docker_integration = integration_with_kind(&docker_compose, "docker_cli_plugin")
+        .expect("docker-compose must declare docker CLI plugin integration");
+    assert_eq!(toml_str(docker_integration, "name"), Some("compose"));
+    assert_eq!(toml_str(docker_integration, "source"), Some("artifact.bin"));
+
+    let path_integration = integration_with_kind(&kubectx, "path_plugin")
+        .expect("kubectx must declare kubectl PATH plugin integration");
+    assert_eq!(toml_str(path_integration, "host"), Some("kubectl"));
+    assert_eq!(toml_str(path_integration, "name"), Some("ctx"));
+    assert_eq!(toml_str(path_integration, "source"), Some("kubectx"));
+
+    let service_integration = integration_with_kind(&syncthing, "service")
+        .expect("syncthing must declare service integration");
+    assert_eq!(toml_str(service_integration, "name"), Some("syncthing"));
+    assert_eq!(toml_bool(service_integration, "enable"), None);
+    assert_eq!(
+        toml_str(service_integration, "linux_systemd_user"),
+        Some("etc/linux-systemd/user/syncthing.service")
+    );
+    assert_eq!(
+        toml_str(service_integration, "macos_launch_agent"),
+        Some("etc/macos-launchd/user/syncthing.plist")
+    );
+    assert_eq!(
+        toml_str(service_integration, "windows_service"),
+        Some("etc/windows-service/syncthing.xml")
+    );
+}
+
 fn write_signed_manifest(package_dir: &std::path::Path, signing_key: &SigningKey, version: &str) {
     let package_name = package_dir
         .file_name()
@@ -2001,6 +2052,30 @@ fn package_template_toml(name: &str) -> String {
 
 fn package_template_toml_with_license(name: &str, license: &str) -> String {
     format!("name = \"{name}\"\nlicense = \"{license}\"\n")
+}
+
+fn read_registry_package_template(registry_root: &Path, package: &str) -> toml::Value {
+    let path = registry_root
+        .join("packages")
+        .join(format!("{package}.toml"));
+    let content = fs::read_to_string(&path).expect("must read registry package template");
+    toml::from_str(&content).expect("registry package template must parse")
+}
+
+fn integration_with_kind<'a>(manifest: &'a toml::Value, kind: &str) -> Option<&'a toml::Value> {
+    manifest
+        .get("integrations")?
+        .as_array()?
+        .iter()
+        .find(|integration| toml_str(integration, "kind") == Some(kind))
+}
+
+fn toml_str<'a>(value: &'a toml::Value, field: &str) -> Option<&'a str> {
+    value.get(field)?.as_str()
+}
+
+fn toml_bool(value: &toml::Value, field: &str) -> Option<bool> {
+    value.get(field)?.as_bool()
 }
 
 fn release_toml(version: &str) -> String {

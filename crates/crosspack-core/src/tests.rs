@@ -168,6 +168,222 @@ enable = false
 }
 
 #[test]
+fn integration_service_platform_sources_accepts_fields() {
+    let content = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "service"
+name = "demo"
+linux_systemd_user = "services/demo.service"
+macos_launch_agent = "launchd/com.example.demo.plist"
+windows_service = "windows/demo-service.xml"
+enable = true
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    assert_eq!(parsed.integrations.len(), 1);
+    assert_eq!(parsed.integrations[0].kind(), "service");
+    match &parsed.integrations[0] {
+        PackageIntegration::Service {
+            linux_systemd_user,
+            macos_launch_agent,
+            windows_service,
+            enable,
+            ..
+        } => {
+            assert_eq!(linux_systemd_user.as_deref(), Some("services/demo.service"));
+            assert_eq!(
+                macos_launch_agent.as_deref(),
+                Some("launchd/com.example.demo.plist")
+            );
+            assert_eq!(windows_service.as_deref(), Some("windows/demo-service.xml"));
+            assert!(*enable);
+        }
+        other => panic!("expected service integration, got {other:?}"),
+    }
+}
+
+#[test]
+fn integration_service_platform_sources_accepts_source_alias() {
+    let content = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "service"
+name = "demo"
+source = "services/demo.service"
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    match &parsed.integrations[0] {
+        PackageIntegration::Service {
+            linux_systemd_user, ..
+        } => assert_eq!(linux_systemd_user.as_deref(), Some("services/demo.service")),
+        other => panic!("expected service integration, got {other:?}"),
+    }
+}
+
+#[test]
+fn integration_service_platform_sources_docker_and_path_reject_enable() {
+    let docker = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "docker_cli_plugin"
+name = "compose"
+source = "docker-compose"
+enable = true
+"#;
+    let path = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "path_plugin"
+host = "kubectl"
+name = "ctx"
+source = "kubectl-ctx"
+enable = true
+"#;
+
+    PackageManifest::from_toml_str(docker).expect_err("docker integration enable must fail");
+    PackageManifest::from_toml_str(path).expect_err("path integration enable must fail");
+}
+
+#[test]
+fn integration_service_platform_sources_docker_and_path_reject_unknown_fields() {
+    let docker = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "docker_cli_plugin"
+name = "compose"
+source = "docker-compose"
+macos_launch_agent = "launchd/com.example.compose.plist"
+"#;
+    let path = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "path_plugin"
+host = "kubectl"
+name = "ctx"
+source = "kubectl-ctx"
+windows_service = "windows/ctx.xml"
+"#;
+
+    PackageManifest::from_toml_str(docker).expect_err("docker unknown field must fail");
+    PackageManifest::from_toml_str(path).expect_err("path unknown field must fail");
+}
+
+#[test]
+fn integration_service_platform_sources_generic_source_uses_linux_only() {
+    let content = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "service"
+name = "mac-only"
+macos_launch_agent = "launchd/com.example.demo.plist"
+
+[[integrations]]
+kind = "service"
+name = "win-only"
+windows_service = "windows/demo-service.xml"
+
+[[integrations]]
+kind = "service"
+name = "linux"
+linux_systemd_user = "services/demo.service"
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    assert_eq!(parsed.integrations[0].source(), "");
+    assert_eq!(parsed.integrations[1].source(), "");
+    assert_eq!(parsed.integrations[2].source(), "services/demo.service");
+}
+
+#[test]
+fn integration_service_platform_sources_rejects_missing_service_sources() {
+    let content = r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "service"
+name = "demo"
+enable = true
+"#;
+
+    let err = PackageManifest::from_toml_str(content)
+        .expect_err("service integration without any source must fail");
+    assert!(
+        err.to_string().contains("service integration") && err.to_string().contains("source"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn integration_service_platform_sources_rejects_unsafe_paths() {
+    for (field, value) in [
+        ("linux_systemd_user", ""),
+        ("linux_systemd_user", "."),
+        ("linux_systemd_user", ".."),
+        ("linux_systemd_user", "/tmp/demo.service"),
+        ("linux_systemd_user", "../demo.service"),
+        ("macos_launch_agent", r"launchd\com.example.demo.plist"),
+        ("macos_launch_agent", r"C:\demo.xml"),
+        ("macos_launch_agent", "C:/demo.xml"),
+        ("macos_launch_agent", r"\\server\share\demo.plist"),
+        ("macos_launch_agent", "."),
+        ("macos_launch_agent", ""),
+        ("windows_service", "services//demo.service"),
+        ("windows_service", "services/./demo.service"),
+        ("windows_service", r"..\demo-service.xml"),
+        ("windows_service", r"windows\demo-service.xml"),
+        ("windows_service", "windows/demo\tservice.xml"),
+        ("windows_service", "windows/demo\nservice.xml"),
+        ("windows_service", "windows/demo\u{1f}service.xml"),
+    ] {
+        let value = if value.contains('\u{1f}') {
+            "\"windows/demo\\u001fservice.xml\"".to_string()
+        } else {
+            format!("{value:?}")
+        };
+        let content = format!(
+            r#"
+name = "demo"
+version = "1.2.3"
+
+[[integrations]]
+kind = "service"
+name = "demo"
+{field} = {value}
+"#
+        );
+
+        let err = PackageManifest::from_toml_str(&content)
+            .expect_err("unsafe platform service source must fail");
+        let chain = err
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            chain.contains("integration source path") && chain.contains(field),
+            "unexpected error for {field}={value}: {chain}"
+        );
+    }
+}
+
+#[test]
 fn parse_manifest_rejects_duplicate_integration_ownership() {
     let content = r#"
 name = "demo"

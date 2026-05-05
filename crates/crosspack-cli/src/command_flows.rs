@@ -227,14 +227,26 @@ impl ManagedServiceState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManagedServiceRow {
+    package: String,
     name: String,
     state: ManagedServiceState,
+    activation: Option<IntegrationActivationRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeclaredServiceRecord {
     package: String,
     service: ServiceDeclaration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectedIntegrationRow {
+    package: String,
+    name: String,
+    key: String,
+    kind: String,
+    rel_path: String,
+    activation: Option<IntegrationActivationRecord>,
 }
 
 fn managed_services_state_dir(layout: &PrefixLayout) -> PathBuf {
@@ -254,6 +266,7 @@ fn validate_service_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn declared_service_for_name(layout: &PrefixLayout, name: &str) -> Result<DeclaredServiceRecord> {
     validate_service_name(name)?;
     let declared = collect_declared_services(layout)?;
@@ -263,6 +276,34 @@ fn declared_service_for_name(layout: &PrefixLayout, name: &str) -> Result<Declar
         ));
     };
     Ok(service)
+}
+
+fn declared_service_for_package_service(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<DeclaredServiceRecord> {
+    validate_service_name(service)?;
+    ensure_installed_name_unambiguous(layout, package)?;
+    let declared_by_package = read_all_declared_services_states(layout)?;
+    let Some(package_services) = declared_by_package.get(package) else {
+        return Err(anyhow!(
+            "No declared service found: package={package} service={service}"
+        ));
+    };
+    let Some(declared) = package_services
+        .iter()
+        .find(|declared| declared.name == service)
+        .cloned()
+    else {
+        return Err(anyhow!(
+            "No declared service found: package={package} service={service}"
+        ));
+    };
+    Ok(DeclaredServiceRecord {
+        package: package.to_string(),
+        service: declared,
+    })
 }
 
 fn collect_declared_services(
@@ -299,6 +340,7 @@ fn collect_declared_services(
     Ok(services)
 }
 
+#[cfg(test)]
 fn declared_service_native_id(service: &ServiceDeclaration) -> String {
     service
         .native_id
@@ -346,6 +388,7 @@ fn read_managed_service_state(layout: &PrefixLayout, name: &str) -> Result<Manag
     parsed_state.ok_or_else(|| anyhow!("missing service state in {}", path.display()))
 }
 
+#[cfg(test)]
 fn write_managed_service_state(
     layout: &PrefixLayout,
     name: &str,
@@ -368,34 +411,116 @@ fn write_managed_service_state(
 
 fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServiceRow>> {
     let declared = collect_declared_services(layout)?;
+    let activation_records = read_integration_activation_state(layout)?;
     let mut rows = Vec::new();
-    for name in declared.keys() {
+    for (name, record) in declared {
+        let integration_key = format!("service:{name}");
+        let activation = activation_records
+            .iter()
+            .find(|activation| {
+                activation.package == record.package && activation.integration_key == integration_key
+            })
+            .cloned();
         rows.push(ManagedServiceRow {
+            package: record.package,
             name: name.clone(),
-            state: read_managed_service_state(layout, name)?,
+            state: read_managed_service_state(layout, &name)?,
+            activation,
         });
     }
 
-    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    rows.sort_by(|left, right| {
+        left.package
+            .cmp(&right.package)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     Ok(rows)
 }
 
-fn run_service_status_command(layout: &PrefixLayout, name: &str) -> Result<()> {
-    ensure_installed_name_unambiguous(layout, name)?;
-    let declared = declared_service_for_name(layout, name)?;
-    let native_outcome = run_native_service_action(
-        NativeServiceAction::Status,
-        &declared.service.name,
-        &declared_service_native_id(&declared.service),
-    );
-    let state = read_managed_service_state(layout, name)?;
-    println!(
-        "{}",
-        render_service_state_line(name, state, None, &native_outcome)
-    );
+fn run_service_status_for_package_command(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<()> {
+    let line = service_status_line_for_package(layout, package, service)?;
+    println!("{line}");
     Ok(())
 }
 
+fn service_status_line_for_package(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<String> {
+    declared_service_for_package_service(layout, package, service)?;
+    let activation = service_activation_record(layout, package, service)?;
+    match activation {
+        Some(activation) => Ok(format_service_activation_line(
+            package,
+            service,
+            &activation,
+            service_activation_applied(&activation),
+        )),
+        None => Ok(format_projected_service_line(package, service)),
+    }
+}
+
+fn run_service_action_for_package_command(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+    action: NativeServiceAction,
+) -> Result<()> {
+    let mut executor = SystemActivationCommandExecutor;
+    let line = service_action_line_for_package(layout, package, service, action, |plan| {
+        run_service_action_plan(&mut executor, plan, action)
+    })?;
+    println!("{line}");
+    Ok(())
+}
+
+fn service_action_line_for_package(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+    action: NativeServiceAction,
+    mut run_action: impl FnMut(&IntegrationActivationPlan) -> ActivationAdapterOutcome,
+) -> Result<String> {
+    declared_service_for_package_service(layout, package, service)?;
+    let Some(mut activation) = service_activation_record(layout, package, service)? else {
+        let activation = IntegrationActivationRecord {
+            package_state_key: package.to_string(),
+            package: package.to_string(),
+            integration_key: format!("service:{service}"),
+            kind: "service".to_string(),
+            adapter: IntegrationAdapterKind::None,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Projected,
+            applied_state: IntegrationAppliedState::Unsupported,
+            host_path: None,
+            reason_code: IntegrationReasonCode::StateMissing,
+        };
+        return Ok(format_service_activation_line(package, service, &activation, false));
+    };
+    let plan = activation_plan_from_record(&activation)?;
+    let outcome = run_action(&plan);
+    activation.applied_state = outcome.applied_state;
+    activation.reason_code = outcome.reason_code;
+    activation.desired_state = match action {
+        NativeServiceAction::Stop => IntegrationDesiredState::Projected,
+        NativeServiceAction::Status => activation.desired_state,
+        NativeServiceAction::Start | NativeServiceAction::Restart => IntegrationDesiredState::Running,
+    };
+    upsert_activation_record(layout, activation.clone())?;
+    Ok(format_service_activation_line(
+        package,
+        service,
+        &activation,
+        activation.reason_code == IntegrationReasonCode::Ok,
+    ))
+}
+
+#[cfg(test)]
 fn run_service_start_command(layout: &PrefixLayout, name: &str) -> Result<()> {
     ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
@@ -419,6 +544,7 @@ fn run_service_start_command(layout: &PrefixLayout, name: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn run_service_stop_command(layout: &PrefixLayout, name: &str) -> Result<()> {
     ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
@@ -442,6 +568,7 @@ fn run_service_stop_command(layout: &PrefixLayout, name: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn run_service_restart_command(layout: &PrefixLayout, name: &str) -> Result<()> {
     ensure_installed_name_unambiguous(layout, name)?;
     let declared = declared_service_for_name(layout, name)?;
@@ -465,6 +592,7 @@ fn run_service_restart_command(layout: &PrefixLayout, name: &str) -> Result<()> 
     Ok(())
 }
 
+#[cfg(test)]
 fn render_service_state_line(
     name: &str,
     state: ManagedServiceState,
@@ -482,6 +610,80 @@ fn render_service_state_line(
     line
 }
 
+fn format_projected_service_line(package: &str, service: &str) -> String {
+    format!(
+        "service package={package} name={service} state=projected adapter=none scope=user applied=false reason=not-enabled"
+    )
+}
+
+fn format_service_list_projection_line(
+    package: &str,
+    service: &str,
+    state: ManagedServiceState,
+) -> String {
+    format!(
+        "service package={package} name={service} state={} adapter=none scope=user applied=false reason=not-enabled",
+        state.as_str()
+    )
+}
+
+fn format_managed_service_row(row: &ManagedServiceRow) -> String {
+    if let Some(activation) = &row.activation {
+        format_service_activation_line(
+            &row.package,
+            &row.name,
+            activation,
+            service_activation_applied(activation),
+        )
+    } else {
+        format_service_list_projection_line(&row.package, &row.name, row.state)
+    }
+}
+
+fn format_service_activation_line(
+    package: &str,
+    service: &str,
+    activation: &IntegrationActivationRecord,
+    applied: bool,
+) -> String {
+    format!(
+        "service package={package} name={service} state={} adapter={} scope={} applied={} reason={}",
+        activation.applied_state.as_str(),
+        activation.adapter.as_str(),
+        activation.scope.as_str(),
+        applied,
+        activation.reason_code.as_str()
+    )
+}
+
+fn service_activation_applied(activation: &IntegrationActivationRecord) -> bool {
+    activation.reason_code == IntegrationReasonCode::Ok
+        && matches!(
+            activation.applied_state,
+            IntegrationAppliedState::Installed
+                | IntegrationAppliedState::Enabled
+                | IntegrationAppliedState::Running
+        )
+}
+
+fn service_activation_record(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<Option<IntegrationActivationRecord>> {
+    let key = format!("service:{service}");
+    let matches = read_integration_activation_state(layout)?
+        .into_iter()
+        .filter(|record| record.package == package && record.integration_key == key)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(anyhow!(
+            "ambiguous service activation state: package={package} service={service}"
+        ));
+    }
+    Ok(matches.into_iter().next())
+}
+
 fn run_services_command(layout: &PrefixLayout, command: ServicesCommands) -> Result<()> {
     layout.ensure_base_dirs()?;
     match command {
@@ -491,16 +693,706 @@ fn run_services_command(layout: &PrefixLayout, command: ServicesCommands) -> Res
                 println!("No managed services");
             } else {
                 for row in rows {
-                    println!("{} {}", row.name, row.state.as_str());
+                    println!("{}", format_managed_service_row(&row));
                 }
             }
         }
-        ServicesCommands::Status { name } => run_service_status_command(layout, &name)?,
-        ServicesCommands::Start { name } => run_service_start_command(layout, &name)?,
-        ServicesCommands::Stop { name } => run_service_stop_command(layout, &name)?,
-        ServicesCommands::Restart { name } => run_service_restart_command(layout, &name)?,
+        ServicesCommands::Status { package, service } => {
+            run_service_status_for_package_command(layout, &package, &service)?
+        }
+        ServicesCommands::Start { package, service } => run_service_action_for_package_command(
+            layout,
+            &package,
+            &service,
+            NativeServiceAction::Start,
+        )?,
+        ServicesCommands::Stop { package, service } => run_service_action_for_package_command(
+            layout,
+            &package,
+            &service,
+            NativeServiceAction::Stop,
+        )?,
+        ServicesCommands::Restart { package, service } => run_service_action_for_package_command(
+            layout,
+            &package,
+            &service,
+            NativeServiceAction::Restart,
+        )?,
     }
     Ok(())
+}
+
+fn projected_integration_short_name(key: &str) -> &str {
+    key.rsplit(':').next().unwrap_or(key)
+}
+
+fn row_from_projected_integration(
+    package: &str,
+    projection: &IntegrationProjection,
+) -> ProjectedIntegrationRow {
+    ProjectedIntegrationRow {
+        package: package.to_string(),
+        name: projected_integration_short_name(&projection.key).to_string(),
+        key: projection.key.clone(),
+        kind: projection.kind.clone(),
+        rel_path: projection.rel_path.clone(),
+        activation: None,
+    }
+}
+
+fn collect_projected_integration_rows(layout: &PrefixLayout) -> Result<Vec<ProjectedIntegrationRow>> {
+    let states = read_all_integration_states(layout)?;
+    let activations = read_integration_activation_state(layout)?;
+    let mut rows = Vec::new();
+    let mut seen_logical_integrations = std::collections::BTreeSet::new();
+    for (package, projections) in states {
+        for projection in projections {
+            if projection.kind == "service"
+                && !seen_logical_integrations.insert((package.clone(), projection.key.clone()))
+            {
+                continue;
+            }
+            let mut row = row_from_projected_integration(&package, &projection);
+            row.activation = activations
+                .iter()
+                .find(|activation| {
+                    activation.package == package && activation.integration_key == projection.key
+                })
+                .cloned();
+            rows.push(row);
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.package
+            .cmp(&right.package)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.key.cmp(&right.key))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.rel_path.cmp(&right.rel_path))
+    });
+    Ok(rows)
+}
+
+fn format_projected_integration_line(row: &ProjectedIntegrationRow) -> String {
+    if let Some(activation) = &row.activation {
+        return format_integration_activation_row(row, activation);
+    }
+    format!(
+        "integration package={} name={} key={} kind={} state=projected adapter=none reason=not-enabled path={}",
+        row.package,
+        row.name,
+        row.key,
+        row.kind,
+        encode_output_value(&row.rel_path)
+    )
+}
+
+fn format_integration_activation_line(
+    package: &str,
+    projection: &IntegrationProjection,
+    activation: Option<&IntegrationActivationRecord>,
+) -> String {
+    let row = row_from_projected_integration(package, projection);
+    match activation {
+        Some(activation) => format_integration_activation_row(&row, activation),
+        None => format_projected_integration_line(&row),
+    }
+}
+
+fn format_integration_activation_row(
+    row: &ProjectedIntegrationRow,
+    activation: &IntegrationActivationRecord,
+) -> String {
+    format!(
+        "integration package={} name={} key={} kind={} state={} adapter={} reason={} path={}",
+        row.package,
+        row.name,
+        row.key,
+        row.kind,
+        integration_output_state(activation).as_str(),
+        activation.adapter.as_str(),
+        activation.reason_code.as_str(),
+        encode_output_value(activation.host_path.as_deref().unwrap_or(&row.rel_path))
+    )
+}
+
+fn encode_output_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'%' => encoded.push_str("%25"),
+            b' ' => encoded.push_str("%20"),
+            b'\\' => encoded.push_str("%5C"),
+            b'\t' => encoded.push_str("%09"),
+            b'\n' => encoded.push_str("%0A"),
+            b'\r' => encoded.push_str("%0D"),
+            0x00..=0x1F | 0x7F => encoded.push_str(&format!("%{byte:02X}")),
+            _ => encoded.push(byte as char),
+        }
+    }
+    encoded
+}
+
+fn integration_output_state(activation: &IntegrationActivationRecord) -> IntegrationAppliedState {
+    if activation.desired_state == IntegrationDesiredState::Projected
+        || activation.desired_state == IntegrationDesiredState::Disabled
+        || activation.reason_code != IntegrationReasonCode::Ok
+    {
+        IntegrationAppliedState::Projected
+    } else {
+        activation.applied_state.clone()
+    }
+}
+
+fn format_projected_integration_lines(rows: &[ProjectedIntegrationRow]) -> Vec<String> {
+    rows.iter().map(format_projected_integration_line).collect()
+}
+
+fn integration_status_line(
+    layout: &PrefixLayout,
+    package: &str,
+    integration: &str,
+) -> Result<String> {
+    let projection = resolve_projected_integration(layout, package, integration)?;
+    let activation = read_integration_activation_state(layout)?
+        .into_iter()
+        .find(|record| record.package == package && record.integration_key == projection.key);
+    Ok(format_integration_activation_line(
+        package,
+        &projection,
+        activation.as_ref(),
+    ))
+}
+
+fn resolve_projected_integration(
+    layout: &PrefixLayout,
+    package: &str,
+    integration: &str,
+) -> Result<IntegrationProjection> {
+    let projections = read_integration_state(layout, package)?;
+    let mut matches = projections
+        .into_iter()
+        .filter(|projection| {
+            projection.key == integration
+                || projected_integration_short_name(&projection.key) == integration
+        })
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return Err(anyhow!(
+            "No projected integration found: package={package} integration={integration}"
+        ));
+    }
+    if matches.len() > 1 {
+        let first_key = matches[0].key.clone();
+        let first_kind = matches[0].kind.clone();
+        if matches
+            .iter()
+            .all(|projection| projection.key == first_key && projection.kind == first_kind)
+        {
+            matches.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+            return Ok(matches.remove(0));
+        }
+        return Err(anyhow!(
+            "ambiguous projected integration: package={package} integration={integration}; use full integration key"
+        ));
+    }
+
+    Ok(matches.remove(0))
+}
+
+fn run_integrations_command(layout: &PrefixLayout, command: IntegrationsCommands) -> Result<()> {
+    match command {
+        IntegrationsCommands::List => {
+            let rows = collect_projected_integration_rows(layout)?;
+            if rows.is_empty() {
+                println!("No projected integrations");
+            } else {
+                for line in format_projected_integration_lines(&rows) {
+                    println!("{line}");
+                }
+            }
+        }
+        IntegrationsCommands::Status {
+            package,
+            integration,
+        } => println!("{}", integration_status_line(layout, &package, &integration)?),
+        IntegrationsCommands::Enable {
+            package,
+            integration,
+        } => println!(
+            "{}",
+            run_integration_activation_command(layout, &package, &integration, true)?
+        ),
+        IntegrationsCommands::Disable {
+            package,
+            integration,
+        } => println!(
+            "{}",
+            run_integration_activation_command(layout, &package, &integration, false)?
+        ),
+    }
+    Ok(())
+}
+
+fn run_integration_activation_command(
+    layout: &PrefixLayout,
+    package: &str,
+    integration: &str,
+    enable: bool,
+) -> Result<String> {
+    ensure_no_active_transaction_for(layout, "integrations")?;
+    let mut line = None;
+    execute_with_transaction(layout, "integrations", None, |tx| {
+        line = Some(run_integration_activation_command_inner(
+            layout,
+            Some(tx),
+            package,
+            integration,
+            enable,
+        )?);
+        Ok(())
+    })?;
+    line.ok_or_else(|| anyhow!("integration activation did not produce output"))
+}
+
+fn run_integration_activation_command_inner(
+    layout: &PrefixLayout,
+    tx: Option<&TransactionMetadata>,
+    package: &str,
+    integration: &str,
+    enable: bool,
+) -> Result<String> {
+    layout.ensure_base_dirs()?;
+    ensure_installed_name_unambiguous(layout, package)?;
+    let projection = resolve_projected_integration(layout, package, integration)?;
+    let host = current_host_activation_context(layout)?;
+    let mut plan = plan_activation_for_projection(&host, package, &projection)?;
+    plan.package_state_key = package_state_key_for_cli(layout, package)?;
+    let records = read_integration_activation_state(layout)?;
+    let mut fs = real_activation_fs_from_records(host.platform, &records);
+    let rollback = preview_integration_activation_rollback(&fs, &plan, enable);
+    journal_integration_activation_rollback_payload(layout, tx, rollback.as_ref())?;
+    let outcome = if enable {
+        apply_integration_plan_with_fs(&mut fs, &plan)
+    } else {
+        disable_integration_plan_with_fs(&mut fs, &plan)
+    };
+    finish_integration_activation_command(layout, package, &projection, &plan, outcome, enable)
+}
+
+#[cfg(test)]
+fn run_integration_activation_command_with_fs(
+    layout: &PrefixLayout,
+    host: &HostActivationContext,
+    fs: &mut impl ActivationFilesystem,
+    package: &str,
+    integration: &str,
+    enable: bool,
+) -> Result<String> {
+    run_integration_activation_command_with_fs_and_tx(
+        layout,
+        None,
+        host,
+        fs,
+        package,
+        integration,
+        enable,
+    )
+}
+
+#[cfg(test)]
+fn run_integration_activation_command_with_fs_and_tx(
+    layout: &PrefixLayout,
+    tx: Option<&TransactionMetadata>,
+    host: &HostActivationContext,
+    fs: &mut impl ActivationFilesystem,
+    package: &str,
+    integration: &str,
+    enable: bool,
+) -> Result<String> {
+    layout.ensure_base_dirs()?;
+    ensure_installed_name_unambiguous(layout, package)?;
+    let projection = resolve_projected_integration(layout, package, integration)?;
+    let mut plan = plan_activation_for_projection(host, package, &projection)?;
+    plan.package_state_key = package_state_key_for_cli(layout, package)?;
+    let rollback = preview_integration_activation_rollback(fs, &plan, enable);
+    journal_integration_activation_rollback_payload(layout, tx, rollback.as_ref())?;
+    let outcome = if enable {
+        apply_integration_plan_with_fs(fs, &plan)
+    } else {
+        disable_integration_plan_with_fs(fs, &plan)
+    };
+    finish_integration_activation_command(layout, package, &projection, &plan, outcome, enable)
+}
+
+fn journal_integration_activation_rollback_payload(
+    layout: &PrefixLayout,
+    tx: Option<&TransactionMetadata>,
+    rollback: Option<&ActivationRollbackEntry>,
+) -> Result<()> {
+    let Some(tx) = tx else {
+        return Ok(());
+    };
+    let Some(rollback) = rollback else {
+        return Ok(());
+    };
+    append_transaction_journal_entry(
+        layout,
+        &tx.txid,
+        &TransactionJournalEntry {
+            seq: 1,
+            step: "integration_activation_rollback".to_string(),
+            state: "planned".to_string(),
+            path: Some(serde_json::to_string(rollback)?),
+        },
+    )
+    .map(|_| ())
+}
+
+fn preview_integration_activation_rollback(
+    fs: &impl ActivationFilesystem,
+    plan: &IntegrationActivationPlan,
+    enable: bool,
+) -> Option<ActivationRollbackEntry> {
+    let expected_owner = ActivationOwner {
+        package_state_key: plan.package_state_key.clone(),
+        package: plan.package.clone(),
+        integration_key: plan.integration_key.clone(),
+    };
+    match (plan.kind.as_str(), enable, fs.platform(), fs.entry(&plan.host_path)) {
+        ("docker_cli_plugin", true, _, None) => Some(ActivationRollbackEntry {
+            operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+            path: plan.host_path.clone(),
+            previous_symlink_target: None,
+            previous_shim_target: None,
+            previous_owner: None,
+            created_symlink_target: Some(plan.source_path.clone()),
+            created_shim_target: None,
+            created_owner: Some(expected_owner.clone()),
+            expected_current_symlink_target: None,
+            expected_current_shim_target: None,
+            expected_current_owner: None,
+            expected_current_absent: false,
+            created_parent_dirs: Vec::new(),
+        }),
+        ("docker_cli_plugin", true, _, Some(ActivationFsEntry::Symlink { target, owner }))
+            if owner.as_ref() == Some(&expected_owner) && target != plan.source_path =>
+        {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+                path: plan.host_path.clone(),
+                previous_symlink_target: Some(target),
+                previous_shim_target: None,
+                previous_owner: owner,
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: Some(plan.source_path.clone()),
+                expected_current_shim_target: None,
+                expected_current_owner: Some(expected_owner.clone()),
+                expected_current_absent: false,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        ("docker_cli_plugin", false, _, Some(ActivationFsEntry::Symlink { target, owner }))
+            if target == plan.source_path && owner.as_ref() == Some(&expected_owner) =>
+        {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+                path: plan.host_path.clone(),
+                previous_symlink_target: Some(target),
+                previous_shim_target: None,
+                previous_owner: owner,
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: None,
+                expected_current_shim_target: None,
+                expected_current_owner: None,
+                expected_current_absent: true,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        ("path_plugin", true, HostPlatform::Linux | HostPlatform::Macos, None) => {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RemoveCreatedSymlink,
+                path: plan.host_path.clone(),
+                previous_symlink_target: None,
+                previous_shim_target: None,
+                previous_owner: None,
+                created_symlink_target: Some(plan.source_path.clone()),
+                created_shim_target: None,
+                created_owner: Some(expected_owner.clone()),
+                expected_current_symlink_target: None,
+                expected_current_shim_target: None,
+                expected_current_owner: None,
+                expected_current_absent: false,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        (
+            "path_plugin",
+            true,
+            HostPlatform::Linux | HostPlatform::Macos,
+            Some(ActivationFsEntry::Symlink { target, owner }),
+        ) if owner.as_ref() == Some(&expected_owner) && target != plan.source_path => {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+                path: plan.host_path.clone(),
+                previous_symlink_target: Some(target),
+                previous_shim_target: None,
+                previous_owner: owner,
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: Some(plan.source_path.clone()),
+                expected_current_shim_target: None,
+                expected_current_owner: Some(expected_owner.clone()),
+                expected_current_absent: false,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        ("path_plugin", true, HostPlatform::Windows, None) => Some(ActivationRollbackEntry {
+            operation: ActivationRollbackOperation::RemoveCreatedWindowsShim,
+            path: plan.host_path.clone(),
+            previous_symlink_target: None,
+            previous_shim_target: None,
+            previous_owner: None,
+            created_symlink_target: None,
+            created_shim_target: Some(plan.source_path.clone()),
+            created_owner: Some(expected_owner.clone()),
+            expected_current_symlink_target: None,
+            expected_current_shim_target: None,
+            expected_current_owner: None,
+            expected_current_absent: false,
+            created_parent_dirs: Vec::new(),
+        }),
+        (
+            "path_plugin",
+            true,
+            HostPlatform::Windows,
+            Some(ActivationFsEntry::WindowsShim { target, owner }),
+        ) if owner.as_ref() == Some(&expected_owner) && target != plan.source_path => {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedWindowsShim,
+                path: plan.host_path.clone(),
+                previous_symlink_target: None,
+                previous_shim_target: Some(target),
+                previous_owner: owner,
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: None,
+                expected_current_shim_target: Some(plan.source_path.clone()),
+                expected_current_owner: Some(expected_owner.clone()),
+                expected_current_absent: false,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        (
+            "path_plugin",
+            false,
+            HostPlatform::Linux | HostPlatform::Macos,
+            Some(ActivationFsEntry::Symlink { target, owner }),
+        ) if target == plan.source_path && owner.as_ref() == Some(&expected_owner) => {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedSymlink,
+                path: plan.host_path.clone(),
+                previous_symlink_target: Some(target),
+                previous_shim_target: None,
+                previous_owner: owner,
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: None,
+                expected_current_shim_target: None,
+                expected_current_owner: None,
+                expected_current_absent: true,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        (
+            "path_plugin",
+            false,
+            HostPlatform::Windows,
+            Some(ActivationFsEntry::WindowsShim { target, owner }),
+        ) if target == plan.source_path && owner.as_ref() == Some(&expected_owner) => {
+            Some(ActivationRollbackEntry {
+                operation: ActivationRollbackOperation::RestoreOwnedWindowsShim,
+                path: plan.host_path.clone(),
+                previous_symlink_target: None,
+                previous_shim_target: Some(target),
+                previous_owner: owner,
+                created_symlink_target: None,
+                created_shim_target: None,
+                created_owner: None,
+                expected_current_symlink_target: None,
+                expected_current_shim_target: None,
+                expected_current_owner: None,
+                expected_current_absent: true,
+                created_parent_dirs: Vec::new(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn real_activation_fs_from_records(
+    platform: HostPlatform,
+    records: &[IntegrationActivationRecord],
+) -> RealActivationFs {
+    RealActivationFs::new(
+        platform,
+        records.iter().filter_map(|record| {
+            Some((
+                record.host_path.clone()?,
+                ActivationOwner {
+                    package_state_key: record.package_state_key.clone(),
+                    package: record.package.clone(),
+                    integration_key: record.integration_key.clone(),
+                },
+            ))
+        }),
+    )
+}
+
+fn finish_integration_activation_command(
+    layout: &PrefixLayout,
+    package: &str,
+    projection: &IntegrationProjection,
+    plan: &IntegrationActivationPlan,
+    outcome: ActivationAdapterOutcome,
+    enable: bool,
+) -> Result<String> {
+    let record = IntegrationActivationRecord {
+        package_state_key: plan.package_state_key.clone(),
+        package: package.to_string(),
+        integration_key: projection.key.clone(),
+        kind: projection.kind.clone(),
+        adapter: plan.adapter.clone(),
+        scope: plan.scope.clone(),
+        desired_state: if enable {
+            IntegrationDesiredState::Enabled
+        } else {
+            IntegrationDesiredState::Projected
+        },
+        applied_state: if enable {
+            outcome.applied_state
+        } else {
+            IntegrationAppliedState::Projected
+        },
+        host_path: Some(plan.host_path.clone()),
+        reason_code: outcome.reason_code,
+    };
+    upsert_activation_record(layout, record.clone())?;
+    Ok(format_integration_activation_line(
+        package,
+        projection,
+        Some(&record),
+    ))
+}
+
+fn plan_activation_for_projection(
+    host: &HostActivationContext,
+    package: &str,
+    projection: &IntegrationProjection,
+) -> Result<IntegrationActivationPlan> {
+    match projection.kind.as_str() {
+        "docker_cli_plugin" => plan_docker_cli_plugin_activation(host, package, projection)
+            .map_err(|err| anyhow!(err)),
+        "path_plugin" => {
+            let host_name = path_plugin_host_binary_name(&projection.key)?;
+            plan_path_plugin_activation(host, package, &host_name, projection)
+                .map_err(|err| anyhow!(err))
+        }
+        kind => Err(anyhow!(
+            "integration activation is not supported for kind '{kind}'"
+        )),
+    }
+}
+
+fn path_plugin_host_binary_name(key: &str) -> Result<String> {
+    let mut parts = key.split(':');
+    let kind = parts.next();
+    let host = parts.next();
+    let name = parts.next();
+    if kind != Some("path_plugin") || host.is_none() || name.is_none() || parts.next().is_some() {
+        return Err(anyhow!("invalid path plugin integration key: {key}"));
+    }
+    Ok(format!("{}-{}", host.unwrap(), name.unwrap()))
+}
+
+fn current_host_activation_context(layout: &PrefixLayout) -> Result<HostActivationContext> {
+    let platform = current_host_platform();
+    let mut host = match platform {
+        HostPlatform::Linux => HostActivationContext::linux(),
+        HostPlatform::Macos => HostActivationContext::macos(),
+        HostPlatform::Windows => HostActivationContext::windows(),
+    }
+    .with_prefix(&layout.prefix().display().to_string());
+
+    for key in ["DOCKER_CONFIG"] {
+        if let Ok(value) = std::env::var(key) {
+            host = host.with_env(key, &value);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        host = host.with_home(&home);
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        host = host.with_user_profile(&profile);
+    }
+    Ok(host)
+}
+
+fn current_host_platform() -> HostPlatform {
+    if cfg!(target_os = "windows") {
+        HostPlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        HostPlatform::Macos
+    } else {
+        HostPlatform::Linux
+    }
+}
+
+fn package_state_key_for_cli(layout: &PrefixLayout, package: &str) -> Result<String> {
+    let states = read_all_installed_package_states(layout)?;
+    let matches = states
+        .into_iter()
+        .filter(|state| state.identity.package == package)
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        Ok(matches[0].identity.state_key())
+    } else {
+        Ok(package.to_string())
+    }
+}
+
+fn upsert_activation_record(layout: &PrefixLayout, record: IntegrationActivationRecord) -> Result<()> {
+    let mut records = read_integration_activation_state(layout)?;
+    records.retain(|existing| {
+        !(existing.package == record.package && existing.integration_key == record.integration_key)
+    });
+    records.push(record);
+    write_integration_activation_state(layout, &records).map(|_| ())
+}
+
+fn activation_plan_from_record(record: &IntegrationActivationRecord) -> Result<IntegrationActivationPlan> {
+    Ok(IntegrationActivationPlan {
+        package_state_key: record.package_state_key.clone(),
+        package: record.package.clone(),
+        integration_key: record.integration_key.clone(),
+        kind: record.kind.clone(),
+        adapter: record.adapter.clone(),
+        scope: record.scope.clone(),
+        desired_state: record.desired_state.clone(),
+        host_path: record
+            .host_path
+            .clone()
+            .ok_or_else(|| anyhow!("activation record missing host path"))?,
+        source_path: String::new(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1330,6 +2222,21 @@ fn backup_package_from_step(step: &str) -> Option<&str> {
     step.strip_prefix("backup_package_state:")
 }
 
+fn activation_rollback_entry_from_record(
+    record: &TransactionJournalRecord,
+) -> Result<Option<ActivationRollbackEntry>> {
+    if record.step != "integration_activation_rollback" || record.state != "planned" {
+        return Ok(None);
+    }
+    let payload = record
+        .path
+        .as_deref()
+        .ok_or_else(|| anyhow!("integration activation rollback journal entry missing payload"))?;
+    Ok(Some(serde_json::from_str(payload).with_context(|| {
+        "failed parsing integration activation rollback journal payload"
+    })?))
+}
+
 fn package_apply_step_name(
     operation: &str,
     package_name: &str,
@@ -1389,6 +2296,10 @@ fn snapshot_native_sidecar_path(snapshot_root: &Path) -> PathBuf {
 
 fn snapshot_declared_services_sidecar_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root.join("services").join("declared.services")
+}
+
+fn snapshot_activation_layout(snapshot_root: &Path) -> PrefixLayout {
+    PrefixLayout::new(snapshot_root)
 }
 
 fn snapshot_identity_pkgs_root(snapshot_root: &Path) -> PathBuf {
@@ -1754,6 +2665,16 @@ fn capture_package_state_snapshot(
         }
     }
 
+    let activation_records = read_integration_activation_state(layout)?
+        .into_iter()
+        .filter(|record| record.package == package_name)
+        .collect::<Vec<_>>();
+    if !activation_records.is_empty() {
+        let activation_snapshot = snapshot_activation_layout(&snapshot_root);
+        activation_snapshot.ensure_base_dirs()?;
+        write_integration_activation_state(&activation_snapshot, &activation_records)?;
+    }
+
     let native_sidecar_path = layout.gui_native_state_path(package_name);
     if native_sidecar_path.exists() {
         manifest.native_sidecar_exists = true;
@@ -2003,6 +2924,7 @@ fn restore_package_state_snapshot(
     remove_file_if_exists(&layout.declared_services_state_path(package_name))?;
 
     let Some(snapshot_root) = snapshot_root else {
+        restore_activation_state_snapshot(layout, package_name, None)?;
         return Ok(());
     };
 
@@ -2102,6 +3024,7 @@ fn restore_package_state_snapshot(
         }
     }
     write_integration_state(layout, package_name, &integrations)?;
+    restore_activation_state_snapshot(layout, package_name, Some(snapshot_root))?;
 
     if native_sidecar_exists {
         let dst = layout.gui_native_state_path(package_name);
@@ -2167,6 +3090,29 @@ fn replay_rollback_journal(layout: &PrefixLayout, txid: &str) -> Result<bool> {
         return Ok(false);
     }
 
+    let mut activation_rollbacks = Vec::new();
+    for record in records.iter().rev() {
+        if let Some(entry) = activation_rollback_entry_from_record(record)? {
+            activation_rollbacks.push(entry);
+        }
+    }
+
+    let mut replayed_activation = false;
+    for entry in activation_rollbacks {
+        let records = read_integration_activation_state(layout)?;
+        let mut fs = real_activation_fs_from_records(current_host_platform(), &records);
+        let outcome = replay_activation_rollback_entry_with_fs(&mut fs, &entry);
+        if outcome.reason_code != IntegrationReasonCode::Ok {
+            return Err(anyhow!(
+                "integration activation rollback failed path={} reason={}",
+                entry.path,
+                outcome.reason_code.as_str()
+            ));
+        }
+        restore_activation_state_after_replayed_rollback(layout, &entry)?;
+        replayed_activation = true;
+    }
+
     let mut backups = HashMap::new();
     for record in &records {
         if record.state != "done" {
@@ -2193,7 +3139,7 @@ fn replay_rollback_journal(layout: &PrefixLayout, txid: &str) -> Result<bool> {
         let mut backup_steps = backups.into_iter().collect::<Vec<_>>();
         backup_steps.sort_by(|left, right| left.0.cmp(&right.0));
         if backup_steps.is_empty() {
-            return Ok(false);
+            return Ok(replayed_activation);
         }
         for (package_name, snapshot_root) in backup_steps {
             restore_package_state_snapshot(layout, &package_name, Some(snapshot_root.as_path()))?;
@@ -2215,6 +3161,74 @@ fn replay_rollback_journal(layout: &PrefixLayout, txid: &str) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+fn restore_activation_state_after_replayed_rollback(
+    layout: &PrefixLayout,
+    entry: &ActivationRollbackEntry,
+) -> Result<()> {
+    let mut records = read_integration_activation_state(layout)?;
+    match entry.operation {
+        ActivationRollbackOperation::RemoveCreatedSymlink
+        | ActivationRollbackOperation::RemoveCreatedWindowsShim
+        | ActivationRollbackOperation::RemoveCreatedServiceMetadata => {
+            if let Some(owner) = entry.created_owner.as_ref() {
+                records.retain(|record| {
+                    !(record.package_state_key == owner.package_state_key
+                        && record.package == owner.package
+                        && record.integration_key == owner.integration_key)
+                });
+            } else {
+                records.retain(|record| record.host_path.as_deref() != Some(entry.path.as_str()));
+            }
+        }
+        ActivationRollbackOperation::RestoreOwnedSymlink
+        | ActivationRollbackOperation::RestoreOwnedWindowsShim
+        | ActivationRollbackOperation::RestoreOwnedServiceMetadata => {
+            let Some(owner) = entry.previous_owner.as_ref() else {
+                write_integration_activation_state(layout, &records)?;
+                return Ok(());
+            };
+            let applied_state = if entry.operation
+                == ActivationRollbackOperation::RestoreOwnedServiceMetadata
+            {
+                IntegrationAppliedState::Stopped
+            } else {
+                IntegrationAppliedState::Enabled
+            };
+            if let Some(record) = records.iter_mut().find(|record| {
+                record.package_state_key == owner.package_state_key
+                    && record.package == owner.package
+                    && record.integration_key == owner.integration_key
+            }) {
+                record.desired_state = if applied_state == IntegrationAppliedState::Running {
+                    IntegrationDesiredState::Running
+                } else {
+                    IntegrationDesiredState::Enabled
+                };
+                record.applied_state = applied_state;
+                record.host_path = Some(entry.path.clone());
+                record.reason_code = IntegrationReasonCode::Ok;
+            }
+        }
+    }
+    write_integration_activation_state(layout, &records).map(|_| ())
+}
+
+fn restore_activation_state_snapshot(
+    layout: &PrefixLayout,
+    package_name: &str,
+    snapshot_root: Option<&Path>,
+) -> Result<()> {
+    let mut live_records = read_integration_activation_state(layout)?;
+    live_records.retain(|record| record.package != package_name);
+
+    if let Some(snapshot_root) = snapshot_root {
+        let snapshot_layout = snapshot_activation_layout(snapshot_root);
+        live_records.extend(read_integration_activation_state(&snapshot_layout)?);
+    }
+
+    write_integration_activation_state(layout, &live_records).map(|_| ())
 }
 
 fn latest_rollback_candidate_txid(layout: &PrefixLayout) -> Result<Option<String>> {
