@@ -659,10 +659,12 @@ impl ActivationFilesystem for RealActivationFs {
                     });
                 }
             }
-            return Some(ActivationFsEntry::ServiceMetadata {
-                source: path.to_string(),
-                owner: Some(owner),
-            });
+            if owner.integration_key.starts_with("service:") {
+                return Some(ActivationFsEntry::ServiceMetadata {
+                    source: path.to_string(),
+                    owner: Some(owner),
+                });
+            }
         }
         Some(ActivationFsEntry::File)
     }
