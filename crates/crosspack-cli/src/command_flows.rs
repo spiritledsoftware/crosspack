@@ -471,6 +471,7 @@ fn run_service_action_for_package_command(
     service: &str,
     action: NativeServiceAction,
 ) -> Result<()> {
+    ensure_no_active_transaction_for(layout, "services")?;
     let mut executor = SystemActivationCommandExecutor;
     let line = service_action_line_for_package(layout, package, service, action, |plan| {
         run_service_action_plan(&mut executor, plan, action)
@@ -1279,8 +1280,10 @@ fn finish_integration_activation_command(
         },
         applied_state: if enable {
             outcome.applied_state
-        } else {
+        } else if outcome.reason_code == IntegrationReasonCode::Ok {
             IntegrationAppliedState::Projected
+        } else {
+            outcome.applied_state
         },
         host_path: Some(plan.host_path.clone()),
         reason_code: outcome.reason_code,

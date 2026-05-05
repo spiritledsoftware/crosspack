@@ -10476,6 +10476,47 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn integrations_disable_failure_preserves_failure_applied_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let projection = IntegrationProjection {
+            kind: "docker_cli_plugin".to_string(),
+            key: "docker_cli_plugin:compose".to_string(),
+            rel_path: "docker/cli-plugins/docker-compose".to_string(),
+        };
+        let plan = IntegrationActivationPlan {
+            package_state_key: "default--x86_64-unknown-linux-gnu--core--docker-compose".to_string(),
+            package: "docker-compose".to_string(),
+            integration_key: projection.key.clone(),
+            kind: projection.kind.clone(),
+            adapter: IntegrationAdapterKind::DockerCli,
+            scope: IntegrationActivationScope::User,
+            desired_state: IntegrationDesiredState::Projected,
+            host_path: "/home/user/.docker/cli-plugins/docker-compose".to_string(),
+            source_path: "/prefix/share/integrations/docker/cli-plugins/docker-compose".to_string(),
+        };
+
+        let line = finish_integration_activation_command(
+            &layout,
+            "docker-compose",
+            &projection,
+            &plan,
+            ActivationAdapterOutcome {
+                reason_code: IntegrationReasonCode::HostPathConflict,
+                applied_state: IntegrationAppliedState::Failed,
+                rollback: Vec::new(),
+            },
+            false,
+        )
+        .expect("disable failure should render deterministic line");
+
+        assert!(line.contains("state=projected adapter=docker-cli reason=host-path-conflict"));
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records[0].desired_state, IntegrationDesiredState::Projected);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
+    }
+
+    #[test]
     fn integrations_activation_success_persists_activation_state() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -10826,6 +10867,33 @@ old-cc = "<2.0.0"
         let records = read_integration_activation_state(&layout).expect("must read activation state");
         assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
         assert_eq!(records[0].desired_state, IntegrationDesiredState::Running);
+    }
+
+    #[test]
+    fn service_action_command_rejects_active_transaction_before_state_write() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        set_active_transaction(&layout, "tx-service-active").expect("must write active marker");
+
+        let err = run_service_action_for_package_command(
+            &layout,
+            "caddy",
+            "caddy",
+            NativeServiceAction::Start,
+        )
+        .expect_err("active transaction should block service mutation");
+
+        assert!(
+            err.to_string().contains("cannot services")
+                && err.to_string().contains("active_transaction"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty(),
+            "blocked service action must not write activation state"
+        );
     }
 
     #[test]
