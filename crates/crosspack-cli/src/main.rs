@@ -25,7 +25,7 @@ use crosspack_installer::{
     append_transaction_journal_entry, apply_integration_plan_with_fs, apply_service_plan, bin_path,
     clear_active_transaction, current_unix_timestamp, default_user_prefix,
     disable_integration_plan_with_fs, disable_service_plan, expose_binary, expose_completion,
-    expose_gui_app, expose_integrations, exposed_completion_path, gui_asset_path,
+    expose_gui_app, expose_integrations_for_host_platform, exposed_completion_path, gui_asset_path,
     install_from_artifact_to_dir, install_from_source_archive_to_dir,
     plan_docker_cli_plugin_activation, plan_path_plugin_activation, plan_service_activation,
     projected_exposed_completion_path, projected_gui_assets, projected_integrations,

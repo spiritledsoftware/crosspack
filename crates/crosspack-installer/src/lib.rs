@@ -38,13 +38,14 @@ pub use artifact::{
 };
 pub use exposure::{
     bin_path, clear_gui_exposure_state, clear_integration_state, expose_binary, expose_completion,
-    expose_gui_app, expose_integration, expose_integrations, exposed_completion_path,
-    gui_asset_path, projected_exposed_completion_path, projected_gui_assets, projected_integration,
-    projected_integrations, read_all_gui_exposure_states, read_all_integration_states,
-    read_gui_exposure_state, read_identity_integration_state, read_integration_state,
-    remove_exposed_binary, remove_exposed_completion, remove_exposed_gui_asset,
-    remove_exposed_integration, write_gui_exposure_state, write_identity_gui_exposure_state,
-    write_identity_integration_state, write_integration_state,
+    expose_gui_app, expose_integration, expose_integrations, expose_integrations_for_host_platform,
+    exposed_completion_path, gui_asset_path, projected_exposed_completion_path,
+    projected_gui_assets, projected_integration, projected_integrations,
+    read_all_gui_exposure_states, read_all_integration_states, read_gui_exposure_state,
+    read_identity_integration_state, read_integration_state, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
+    write_gui_exposure_state, write_identity_gui_exposure_state, write_identity_integration_state,
+    write_integration_state,
 };
 pub use fs_utils::remove_file_if_exists;
 pub use identity::{InstalledPackageIdentity, InstalledPackageSelector};
