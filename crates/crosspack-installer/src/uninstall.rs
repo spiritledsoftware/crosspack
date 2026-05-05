@@ -15,12 +15,13 @@ use crate::native::{
 };
 use crate::receipts::clear_declared_services_state;
 use crate::{
-    clear_installed_package_state_document, disable_integration_plan,
+    clear_installed_package_state_document, disable_integration_plan, disable_service_plan,
     read_all_installed_package_states, read_identity_install_receipt,
     read_integration_activation_state, write_integration_activation_state, HostPlatform,
     InstallMode, InstallReason, InstallReceipt, InstalledPackageIdentity, InstalledPackageState,
     IntegrationActivationPlan, IntegrationAppliedState, IntegrationDesiredState,
-    IntegrationProjection, IntegrationReasonCode, PrefixLayout, UninstallResult, UninstallStatus,
+    IntegrationProjection, IntegrationReasonCode, PrefixLayout, SystemActivationCommandExecutor,
+    UninstallResult, UninstallStatus,
 };
 
 pub fn uninstall_package(layout: &PrefixLayout, name: &str) -> Result<UninstallResult> {
@@ -576,11 +577,8 @@ fn cleanup_activation_records_for_uninstall(
         |record, plan, existing_records| {
             let platform = current_host_platform();
             if record.kind == "service" {
-                crate::ActivationAdapterOutcome {
-                    reason_code: IntegrationReasonCode::UnsupportedHost,
-                    applied_state: IntegrationAppliedState::Unsupported,
-                    rollback: Vec::new(),
-                }
+                let mut executor = SystemActivationCommandExecutor;
+                disable_service_plan(&mut executor, plan)
             } else {
                 disable_integration_plan(platform, plan, existing_records)
             }

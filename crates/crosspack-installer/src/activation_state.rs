@@ -38,8 +38,9 @@ pub fn write_integration_activation_state(
             return Err(anyhow!("duplicate integration activation state record"));
         }
         payload.push_str(&format!(
-            "activation={}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "activation={}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             record.package_state_key,
+            record.package,
             record.integration_key,
             record.kind,
             record.adapter.as_str(),
@@ -128,39 +129,26 @@ fn parse_integration_activation_state(raw: &str) -> Result<Vec<IntegrationActiva
 
 fn parse_activation_row(value: &str) -> Result<IntegrationActivationRecord> {
     let fields = value.split('\t').collect::<Vec<_>>();
-    if fields.len() != 9 {
+    if fields.len() != 10 {
         return Err(anyhow!("invalid integration activation state row format"));
     }
 
     Ok(IntegrationActivationRecord {
         package_state_key: fields[0].to_string(),
-        // The v1 state-file schema intentionally omits package; keep the in-memory field useful
-        // by deriving it from the current identity key convention's final package token.
-        package: package_from_state_key(fields[0]),
-        integration_key: fields[1].to_string(),
-        kind: fields[2].to_string(),
-        adapter: IntegrationAdapterKind::parse(fields[3])?,
-        scope: IntegrationActivationScope::parse(fields[4])?,
-        desired_state: IntegrationDesiredState::parse(fields[5])?,
-        applied_state: IntegrationAppliedState::parse(fields[6])?,
-        host_path: if fields[7].is_empty() {
+        package: fields[1].to_string(),
+        integration_key: fields[2].to_string(),
+        kind: fields[3].to_string(),
+        adapter: IntegrationAdapterKind::parse(fields[4])?,
+        scope: IntegrationActivationScope::parse(fields[5])?,
+        desired_state: IntegrationDesiredState::parse(fields[6])?,
+        applied_state: IntegrationAppliedState::parse(fields[7])?,
+        host_path: if fields[8].is_empty() {
             None
         } else {
-            Some(fields[7].to_string())
+            Some(fields[8].to_string())
         },
-        reason_code: IntegrationReasonCode::parse(fields[8])?,
+        reason_code: IntegrationReasonCode::parse(fields[9])?,
     })
-}
-
-fn package_from_state_key(package_state_key: &str) -> String {
-    let mut remaining = package_state_key;
-    for _ in 0..3 {
-        let Some((_, rest)) = remaining.split_once("--") else {
-            return package_state_key.to_string();
-        };
-        remaining = rest;
-    }
-    remaining.to_string()
 }
 
 fn validate_record_fields(record: &IntegrationActivationRecord) -> Result<()> {

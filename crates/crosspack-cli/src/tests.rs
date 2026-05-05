@@ -970,6 +970,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
+    fn test_installed_identity(package: &str) -> InstalledPackageIdentity {
+        InstalledPackageIdentity {
+            profile: "default".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+            source_namespace: "core".to_string(),
+            source_provenance: Some("git:https://example.test/core".to_string()),
+            package: package.to_string(),
+        }
+    }
+
     #[test]
     fn uninstall_journals_rollback_payload_before_forward_mutation_task_8_inventory_gap() {
         let layout = test_layout();
@@ -1267,6 +1277,12 @@ mod tests {
             .join("docker-compose");
         std::os::unix::fs::symlink(&source_path, &host_path)
             .expect("must create interrupted activation symlink");
+        assert!(
+            std::fs::symlink_metadata(&host_path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false),
+            "fixture should create a symlink before rollback"
+        );
 
         let rollback = ActivationRollbackEntry {
             operation: ActivationRollbackOperation::RemoveCreatedSymlink,
@@ -1299,7 +1315,7 @@ mod tests {
             .expect("rollback command should replay activation rollback");
 
         assert!(
-            !host_path.exists(),
+            std::fs::symlink_metadata(&host_path).is_err(),
             "rollback should remove symlink created by interrupted activation"
         );
         let updated = read_transaction_metadata(&layout, txid)
@@ -10101,7 +10117,8 @@ old-cc = "<2.0.0"
             .expect("must create stale integration dir");
         fs::write(layout.integrations_dir().join(&stale.rel_path), b"stale")
             .expect("must write stale integration");
-        write_integration_state(&layout, "kubectx", std::slice::from_ref(&stale))
+        let identity = test_installed_identity("kubectx");
+        write_identity_integration_state(&layout, &identity, std::slice::from_ref(&stale))
             .expect("must seed stale integration state");
 
         let integration = PackageIntegration::PathPlugin {
@@ -10112,6 +10129,7 @@ old-cc = "<2.0.0"
         let projected = sync_integration_projection_state(
             &layout,
             "kubectx",
+            &identity,
             &install_root,
             std::slice::from_ref(&integration),
         )
@@ -10122,7 +10140,11 @@ old-cc = "<2.0.0"
         assert!(layout.integrations_dir().join(&projected[0].rel_path).exists());
         assert!(!layout.integrations_dir().join(&stale.rel_path).exists());
         assert_eq!(
-            read_integration_state(&layout, "kubectx").expect("must read state"),
+            read_identity_integration_state(&layout, &identity).expect("must read identity state"),
+            projected
+        );
+        assert_eq!(
+            read_integration_state(&layout, "kubectx").expect("must read legacy mirror state"),
             projected
         );
     }
@@ -10150,6 +10172,7 @@ old-cc = "<2.0.0"
         let err = sync_integration_projection_state(
             &layout,
             "other-compose",
+            &test_installed_identity("other-compose"),
             &install_root,
             std::slice::from_ref(&integration),
         )

@@ -65,11 +65,23 @@ pub fn read_integration_state(
     package_name: &str,
 ) -> Result<Vec<IntegrationProjection>> {
     let path = layout.integration_state_path(package_name);
+    read_integration_state_path(&path)
+}
+
+pub fn read_identity_integration_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<Vec<IntegrationProjection>> {
+    let path = layout.identity_integration_state_path(identity);
+    read_integration_state_path(&path)
+}
+
+fn read_integration_state_path(path: &Path) -> Result<Vec<IntegrationProjection>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let raw = fs::read_to_string(&path)
+    let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read integration state: {}", path.display()))?;
     parse_integration_state(&raw)
         .with_context(|| format!("failed to parse integration state: {}", path.display()))

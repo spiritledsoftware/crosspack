@@ -26,14 +26,15 @@ use crate::artifact::{
     stage_exe_payload_with_runner, stage_msix_payload_with_runner, stage_pkg_payload_with_hooks,
     strip_rel_components,
 };
+#[cfg(target_os = "linux")]
+use crate::native::run_native_service_action_with_activation_executor;
 use crate::native::{
     macos_registration_destination_candidates, macos_registration_source_path,
     parse_native_sidecar_state, project_linux_user_applications_dir,
     project_macos_user_applications_dir, project_windows_start_menu_programs_dir,
     register_macos_application_symlink_with_creator,
     register_macos_native_gui_registration_with_executor_and_creator,
-    register_native_gui_app_best_effort_with_executor,
-    run_native_service_action_with_activation_executor, run_native_service_action_with_executor,
+    register_native_gui_app_best_effort_with_executor, run_native_service_action_with_executor,
     select_macos_registration_destination, MACOS_LSREGISTER_PATH,
 };
 use crate::receipts::{parse_identity_receipt, parse_receipt};
@@ -344,14 +345,14 @@ fn activation_state_writes_spec_activation_row_order() {
 
     assert_eq!(
         fs::read_to_string(layout.integration_activation_state_path()).expect("must read state"),
-        "version=1\nactivation=default--x86_64-unknown-linux-gnu--core--docker-compose\tdocker_cli_plugin:compose\tdocker_cli_plugin\tdocker-cli\tnone\tenabled\tenabled\t/home/test/.docker/cli-plugins/docker-compose\tok\n"
+        "version=1\nactivation=default--x86_64-unknown-linux-gnu--core--docker-compose\tdocker-compose\tdocker_cli_plugin:compose\tdocker_cli_plugin\tdocker-cli\tnone\tenabled\tenabled\t/home/test/.docker/cli-plugins/docker-compose\tok\n"
     );
 
     let _ = fs::remove_dir_all(layout.prefix());
 }
 
 #[test]
-fn activation_state_reads_package_from_identity_state_key() {
+fn activation_state_reads_package_from_serialized_column() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
     let identity = InstalledPackageIdentity {
@@ -364,7 +365,7 @@ fn activation_state_reads_package_from_identity_state_key() {
     fs::write(
         layout.integration_activation_state_path(),
         format!(
-            "version=1\nactivation={}\tdocker_cli_plugin:compose\tdocker_cli_plugin\tdocker-cli\tnone\tenabled\tenabled\t/home/test/.docker/cli-plugins/docker-compose\tok\n",
+            "version=1\nactivation={}\tdocker-compose\tdocker_cli_plugin:compose\tdocker_cli_plugin\tdocker-cli\tnone\tenabled\tenabled\t/home/test/.docker/cli-plugins/docker-compose\tok\n",
             identity.state_key()
         ),
     )
@@ -378,7 +379,7 @@ fn activation_state_reads_package_from_identity_state_key() {
 }
 
 #[test]
-fn activation_state_reads_package_with_double_dash_from_identity_state_key() {
+fn activation_state_reads_package_with_double_dash_from_serialized_column() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
     let identity = InstalledPackageIdentity {
@@ -391,7 +392,7 @@ fn activation_state_reads_package_with_double_dash_from_identity_state_key() {
     fs::write(
         layout.integration_activation_state_path(),
         format!(
-            "version=1\nactivation={}\tpath_plugin:foo\tpath_plugin\tpath-plugin-bin\tnone\tenabled\tenabled\t/home/test/bin/foo\tok\n",
+            "version=1\nactivation={}\tfoo--bar\tpath_plugin:foo\tpath_plugin\tpath-plugin-bin\tnone\tenabled\tenabled\t/home/test/bin/foo\tok\n",
             identity.state_key()
         ),
     )
@@ -422,7 +423,7 @@ fn activation_state_rejects_missing_version() {
     layout.ensure_base_dirs().expect("must create dirs");
     fs::write(
         layout.integration_activation_state_path(),
-        "activation=key\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tok\n",
     )
     .expect("must write fixture");
 
@@ -445,11 +446,11 @@ fn activation_state_empty_records_propagate_clear_errors() {
 #[test]
 fn activation_state_rejects_invalid_enum_values() {
     for (index, row) in [
-        "activation=key\tintegration\tkind\tnot-adapter\tnone\tenabled\tenabled\t/path\tok\n",
-        "activation=key\tintegration\tkind\tdocker-cli\tnot-scope\tenabled\tenabled\t/path\tok\n",
-        "activation=key\tintegration\tkind\tdocker-cli\tnone\tnot-desired\tenabled\t/path\tok\n",
-        "activation=key\tintegration\tkind\tdocker-cli\tnone\tenabled\tnot-applied\t/path\tok\n",
-        "activation=key\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tnot-reason\n",
+        "activation=key\tpkg\tintegration\tkind\tnot-adapter\tnone\tenabled\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnot-scope\tenabled\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tnot-desired\tenabled\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tnot-applied\t/path\tok\n",
+        "activation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tnot-reason\n",
     ]
     .into_iter()
     .enumerate()
@@ -477,7 +478,7 @@ fn activation_state_rejects_duplicate_activation_rows_on_read() {
     layout.ensure_base_dirs().expect("must create dirs");
     fs::write(
         layout.integration_activation_state_path(),
-        "version=1\nactivation=key\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tok\nactivation=key\tintegration\tkind\tdocker-cli\tnone\trunning\trunning\t/path\tok\n",
+        "version=1\nactivation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\tok\nactivation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\trunning\trunning\t/path\tok\n",
     )
     .expect("must write fixture");
 
@@ -528,7 +529,7 @@ fn activation_state_rejects_missing_columns() {
     layout.ensure_base_dirs().expect("must create dirs");
     fs::write(
         layout.integration_activation_state_path(),
-        "version=1\nactivation=key\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\n",
+        "version=1\nactivation=key\tpkg\tintegration\tkind\tdocker-cli\tnone\tenabled\tenabled\t/path\n",
     )
     .expect("must write fixture");
 
@@ -9128,7 +9129,7 @@ fn activation_transaction_uninstall_preserves_service_state_when_real_removal_un
     assert_eq!(records[0].applied_state, IntegrationAppliedState::Failed);
     assert_eq!(
         records[0].reason_code,
-        IntegrationReasonCode::UnsupportedHost
+        IntegrationReasonCode::NativeCommandFailed
     );
     assert!(
         !layout.receipt_path("caddy").exists(),

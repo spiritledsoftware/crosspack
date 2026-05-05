@@ -138,10 +138,11 @@ fn legacy_native_service_plan(native_id: &str) -> Option<IntegrationActivationPl
             format!("systemd-user:{native_id}"),
         )
     } else if cfg!(target_os = "macos") {
+        let home = std::env::var("HOME").ok()?;
         (
             HostPlatform::Macos,
             IntegrationAdapterKind::LaunchdUser,
-            format!("/Users/current/Library/LaunchAgents/{native_id}.plist"),
+            format!("{home}/Library/LaunchAgents/{native_id}.plist"),
         )
     } else if cfg!(windows) {
         (

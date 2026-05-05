@@ -746,8 +746,33 @@ fn collect_projected_integration_rows(layout: &PrefixLayout) -> Result<Vec<Proje
     let activations = read_integration_activation_state(layout)?;
     let mut rows = Vec::new();
     let mut seen_logical_integrations = std::collections::BTreeSet::new();
+    let host_platform = current_host_platform();
     for (package, projections) in states {
+        let mut service_candidates = std::collections::BTreeMap::<
+            String,
+            Vec<IntegrationProjection>,
+        >::new();
+        let mut non_service_projections = Vec::new();
         for projection in projections {
+            if projection.kind == "service" {
+                service_candidates
+                    .entry(projection.key.clone())
+                    .or_default()
+                    .push(projection);
+            } else {
+                non_service_projections.push(projection);
+            }
+        }
+
+        let selected_service_projections = service_candidates
+            .into_values()
+            .filter_map(|mut candidates| select_host_service_projection(&mut candidates, host_platform))
+            .collect::<Vec<_>>();
+
+        for projection in non_service_projections
+            .into_iter()
+            .chain(selected_service_projections)
+        {
             if projection.kind == "service"
                 && !seen_logical_integrations.insert((package.clone(), projection.key.clone()))
             {
@@ -772,6 +797,32 @@ fn collect_projected_integration_rows(layout: &PrefixLayout) -> Result<Vec<Proje
             .then_with(|| left.rel_path.cmp(&right.rel_path))
     });
     Ok(rows)
+}
+
+fn select_host_service_projection(
+    candidates: &mut Vec<IntegrationProjection>,
+    platform: HostPlatform,
+) -> Option<IntegrationProjection> {
+    let host_match = candidates
+        .iter()
+        .position(|projection| service_projection_matches_host(projection, platform));
+    if let Some(index) = host_match {
+        return Some(candidates.remove(index));
+    }
+    candidates.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    if candidates.is_empty() {
+        None
+    } else {
+        Some(candidates.remove(0))
+    }
+}
+
+fn service_projection_matches_host(projection: &IntegrationProjection, platform: HostPlatform) -> bool {
+    match platform {
+        HostPlatform::Linux => projection.rel_path.ends_with(".service"),
+        HostPlatform::Macos => projection.rel_path.ends_with(".launchd.plist"),
+        HostPlatform::Windows => projection.rel_path.ends_with(".windows-service.toml"),
+    }
 }
 
 fn format_projected_integration_line(row: &ProjectedIntegrationRow) -> String {
@@ -819,16 +870,21 @@ fn format_integration_activation_row(
 
 fn encode_output_value(value: &str) -> String {
     let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'%' => encoded.push_str("%25"),
-            b' ' => encoded.push_str("%20"),
-            b'\\' => encoded.push_str("%5C"),
-            b'\t' => encoded.push_str("%09"),
-            b'\n' => encoded.push_str("%0A"),
-            b'\r' => encoded.push_str("%0D"),
-            0x00..=0x1F | 0x7F => encoded.push_str(&format!("%{byte:02X}")),
-            _ => encoded.push(byte as char),
+    for ch in value.chars() {
+        match ch {
+            '%' => encoded.push_str("%25"),
+            ' ' => encoded.push_str("%20"),
+            '\\' => encoded.push_str("%5C"),
+            '\t' => encoded.push_str("%09"),
+            '\n' => encoded.push_str("%0A"),
+            '\r' => encoded.push_str("%0D"),
+            _ if ch.is_control() => {
+                let mut buffer = [0; 4];
+                for byte in ch.encode_utf8(&mut buffer).as_bytes() {
+                    encoded.push_str(&format!("%{byte:02X}"));
+                }
+            }
+            _ => encoded.push(ch),
         }
     }
     encoded
@@ -891,6 +947,13 @@ fn resolve_projected_integration(
             .iter()
             .all(|projection| projection.key == first_key && projection.kind == first_kind)
         {
+            if first_kind == "service" {
+                if let Some(projection) =
+                    select_host_service_projection(&mut matches, current_host_platform())
+                {
+                    return Ok(projection);
+                }
+            }
             matches.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
             return Ok(matches.remove(0));
         }
@@ -1309,10 +1372,34 @@ fn plan_activation_for_projection(
             plan_path_plugin_activation(host, package, &host_name, projection)
                 .map_err(|err| anyhow!(err))
         }
+        "service" => {
+            let metadata = service_activation_metadata_from_projection(projection)?;
+            plan_service_activation(host, package, &metadata).map_err(|err| anyhow!(err))
+        }
         kind => Err(anyhow!(
             "integration activation is not supported for kind '{kind}'"
         )),
     }
+}
+
+fn service_activation_metadata_from_projection(
+    projection: &IntegrationProjection,
+) -> Result<ServiceActivationMetadata> {
+    let name = projected_integration_short_name(&projection.key);
+    let mut metadata = ServiceActivationMetadata::new(name);
+    if projection.rel_path.ends_with(".service") {
+        metadata = metadata.with_source(&projection.rel_path);
+    } else if projection.rel_path.ends_with(".launchd.plist") {
+        metadata = metadata.with_macos_launch_agent(&projection.rel_path);
+    } else if projection.rel_path.ends_with(".windows-service.toml") {
+        metadata = metadata.with_windows_service(&projection.rel_path);
+    } else {
+        return Err(anyhow!(
+            "invalid service integration projection path: {}",
+            projection.rel_path
+        ));
+    }
+    Ok(metadata)
 }
 
 fn path_plugin_host_binary_name(key: &str) -> Result<String> {

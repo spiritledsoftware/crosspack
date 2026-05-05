@@ -922,7 +922,10 @@ pub fn disable_docker_cli_plugin_plan(
             }
         }
         Some(_) => ActivationAdapterOutcome::conflict(),
-        None => ActivationAdapterOutcome::ok(),
+        None => ActivationAdapterOutcome::service(
+            IntegrationReasonCode::Ok,
+            IntegrationAppliedState::Stopped,
+        ),
     }
 }
 
@@ -1184,7 +1187,10 @@ pub fn disable_path_plugin_plan(
             }
         }
         Some(_) => ActivationAdapterOutcome::conflict(),
-        None => ActivationAdapterOutcome::ok(),
+        None => ActivationAdapterOutcome::service(
+            IntegrationReasonCode::Ok,
+            IntegrationAppliedState::Stopped,
+        ),
     }
 }
 
@@ -1409,17 +1415,28 @@ fn real_activation_fs_from_records(
     platform: HostPlatform,
     records: &[crate::IntegrationActivationRecord],
 ) -> RealActivationFs {
-    let owners = records.iter().filter_map(|record| {
-        let path = record.host_path.clone()?;
-        Some((
-            path,
-            ActivationOwner {
-                package_state_key: record.package_state_key.clone(),
-                package: record.package.clone(),
-                integration_key: record.integration_key.clone(),
-            },
-        ))
-    });
+    let owners = records
+        .iter()
+        .filter(|record| {
+            record.reason_code == IntegrationReasonCode::Ok
+                && matches!(
+                    record.applied_state,
+                    IntegrationAppliedState::Installed
+                        | IntegrationAppliedState::Enabled
+                        | IntegrationAppliedState::Running
+                )
+        })
+        .filter_map(|record| {
+            let path = record.host_path.clone()?;
+            Some((
+                path,
+                ActivationOwner {
+                    package_state_key: record.package_state_key.clone(),
+                    package: record.package.clone(),
+                    integration_key: record.integration_key.clone(),
+                },
+            ))
+        });
     RealActivationFs::new(platform, owners)
 }
 

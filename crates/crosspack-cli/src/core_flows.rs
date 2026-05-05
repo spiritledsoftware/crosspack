@@ -1798,10 +1798,11 @@ fn sync_native_gui_registration_state_best_effort(
 fn sync_integration_projection_state(
     layout: &PrefixLayout,
     package_name: &str,
+    identity: &InstalledPackageIdentity,
     install_root: &Path,
     integrations: &[PackageIntegration],
 ) -> Result<Vec<IntegrationProjection>> {
-    let previous_projections = read_integration_state(layout, package_name)?;
+    let previous_projections = read_identity_integration_state(layout, identity)?;
     let desired_projections = integrations
         .iter()
         .map(|integration| projected_integrations(package_name, integration))
@@ -1812,7 +1813,7 @@ fn sync_integration_projection_state(
     let all_projection_states = read_all_integration_states(layout)?;
     for desired in &desired_projections {
         for (owner, projections) in &all_projection_states {
-            if owner == package_name {
+            if owner == &identity.state_key() || owner == package_name {
                 continue;
             }
             if projections
@@ -1845,6 +1846,7 @@ fn sync_integration_projection_state(
     }) {
         remove_exposed_integration(layout, stale_projection)?;
     }
+    write_identity_integration_state(layout, identity, &current_projections)?;
     write_integration_state(layout, package_name, &current_projections)?;
     Ok(current_projections)
 }
@@ -2235,6 +2237,7 @@ fn install_resolved(
     let exposed_integrations = sync_integration_projection_state(
         layout,
         &resolved.manifest.name,
+        &identity,
         &install_root,
         &resolved.manifest.integrations,
     )?;

@@ -176,7 +176,11 @@ pub fn plan_docker_cli_plugin_activation(
         adapter: IntegrationAdapterKind::DockerCli,
         scope: IntegrationActivationScope::None,
         desired_state: IntegrationDesiredState::Enabled,
-        host_path: join_native(host.platform, &docker_config, &["cli-plugins", package]),
+        host_path: join_native(
+            host.platform,
+            &docker_config,
+            &["cli-plugins", file_name(&projection.rel_path)],
+        ),
         source_path: integration_source_path(host, &projection.rel_path),
     })
 }

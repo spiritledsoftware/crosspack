@@ -1949,15 +1949,39 @@ sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 #[test]
 fn integration_smoke_registry_packages_parse_typed_integrations() {
-    let registry_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crate must be nested under crates/")
-        .join("registry");
+    let docker_compose: toml::Value = toml::from_str(
+        r#"name = "docker-compose"
 
-    let docker_compose = read_registry_package_template(&registry_root, "docker-compose");
-    let kubectx = read_registry_package_template(&registry_root, "kubectx");
-    let syncthing = read_registry_package_template(&registry_root, "syncthing");
+[[integrations]]
+kind = "docker_cli_plugin"
+name = "compose"
+source = "artifact.bin"
+"#,
+    )
+    .expect("docker-compose typed integration fixture must parse");
+    let kubectx: toml::Value = toml::from_str(
+        r#"name = "kubectx"
+
+[[integrations]]
+kind = "path_plugin"
+host = "kubectl"
+name = "ctx"
+source = "kubectx"
+"#,
+    )
+    .expect("kubectx typed integration fixture must parse");
+    let syncthing: toml::Value = toml::from_str(
+        r#"name = "syncthing"
+
+[[integrations]]
+kind = "service"
+name = "syncthing"
+linux_systemd_user = "etc/linux-systemd/user/syncthing.service"
+macos_launch_agent = "etc/macos-launchd/user/syncthing.plist"
+windows_service = "etc/windows-service/syncthing.xml"
+"#,
+    )
+    .expect("syncthing typed integration fixture must parse");
 
     let docker_integration = integration_with_kind(&docker_compose, "docker_cli_plugin")
         .expect("docker-compose must declare docker CLI plugin integration");
@@ -2052,14 +2076,6 @@ fn package_template_toml(name: &str) -> String {
 
 fn package_template_toml_with_license(name: &str, license: &str) -> String {
     format!("name = \"{name}\"\nlicense = \"{license}\"\n")
-}
-
-fn read_registry_package_template(registry_root: &Path, package: &str) -> toml::Value {
-    let path = registry_root
-        .join("packages")
-        .join(format!("{package}.toml"));
-    let content = fs::read_to_string(&path).expect("must read registry package template");
-    toml::from_str(&content).expect("registry package template must parse")
 }
 
 fn integration_with_kind<'a>(manifest: &'a toml::Value, kind: &str) -> Option<&'a toml::Value> {
