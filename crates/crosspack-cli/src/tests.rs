@@ -9962,6 +9962,7 @@ old-cc = "<2.0.0"
         let _ = std::fs::remove_dir_all(layout.prefix());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn service_activation_transaction_failure_removes_copied_launch_agent() {
         let layout = test_layout();
