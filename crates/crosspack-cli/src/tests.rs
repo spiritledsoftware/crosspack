@@ -6953,7 +6953,7 @@ requirement = "^14"
     }
 
     #[test]
-    fn generate_completions_uses_crosspack_command_name() {
+    fn generate_completions_uses_crosspack_and_cpk_command_names() {
         let shells = [
             CliCompletionShell::Bash,
             CliCompletionShell::Zsh,
@@ -6971,6 +6971,10 @@ requirement = "^14"
             assert!(
                 rendered.contains("crosspack"),
                 "completion script should target canonical binary name for {shell:?}"
+            );
+            assert!(
+                rendered.contains("cpk"),
+                "completion script should target short alias binary name for {shell:?}"
             );
         }
         let _ = std::fs::remove_dir_all(layout.prefix());
@@ -7032,10 +7036,17 @@ requirement = "^14"
         let compdef_index = rendered
             .find("compdef _crosspack crosspack")
             .expect("zsh script should register crosspack completion function");
+        let cpk_compdef_index = rendered
+            .find("compdef _cpk cpk")
+            .expect("zsh script should register cpk completion function");
 
         assert!(
             compinit_index < compdef_index,
             "zsh script must initialize completion system before compdef registration"
+        );
+        assert!(
+            compinit_index < cpk_compdef_index,
+            "zsh script must initialize completion system before cpk compdef registration"
         );
     }
 
