@@ -171,11 +171,6 @@ impl TerminalProgress {
         }
     }
 
-    fn finish_abandon(mut self) {
-        if let Some(progress_bar) = self.progress_bar.take() {
-            progress_bar.finish_and_clear();
-        }
-    }
 }
 
 fn format_elapsed(elapsed: Duration) -> String {

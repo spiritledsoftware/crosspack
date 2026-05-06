@@ -20,15 +20,13 @@
 
 ## Boundaries
 
-- `crosspack-cli`: command parsing, orchestration, terminal/plain output contracts, and command-to-crate wiring.
-- `crosspack-core`: manifest/domain structs and serde-facing schemas; keep it free of command behavior and concrete IO/runtime side effects.
-- `crosspack-resolver`: dependency graph solve, constraints, and deterministic ordering; keep installer state and terminal formatting out.
-- `crosspack-installer`: prefix layout, receipts, pins, transaction markers/journals, rollback/uninstall/cache/completion/GUI/service state.
-- `crosspack-registry`: source records, source ordering, snapshot lifecycle, registry index reads, fingerprint/signature gates.
-- `crosspack-security`: SHA-256 and Ed25519 helpers; do not duplicate hash/signature verification ad hoc in other crates.
+- Keep root guidance repo-wide. Crate ownership, cross-crate coupling, and crate-level anti-patterns live in `crates/AGENTS.md`.
+- More specific `AGENTS.md` files inherit this file; do not duplicate root-wide rules there unless the local rule is narrower or intentionally stricter.
 
 ## Contracts To Preserve
 
+- Cross-platform support is not an afterthought. Treat Linux, macOS, and Windows as first-class targets when designing features, tests, paths, service/GUI integrations, shell behavior, and CI expectations.
+- Do not land Linux-only assumptions for behavior that ships cross-platform. If a feature cannot support macOS or Windows yet, make the limitation explicit in code, tests, docs, and user-facing output rather than relying on accidental platform failures.
 - Plain/non-interactive output is the automation contract; rich TTY output must remain additive decoration only.
 - Do not change machine-oriented line shapes without coordinated tests/docs: `transaction_preview`, `transaction_summary`, `risk_flags`, `change_*`, `update summary: updated=<n> up-to-date=<n> failed=<n>`.
 - Metadata trust fails closed: configured sources require pinned `registry.pub` fingerprint, ready `snapshot.json`, and verified `.toml.sig` sidecars.
