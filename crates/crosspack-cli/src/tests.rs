@@ -7003,6 +7003,31 @@ requirement = "^14"
     }
 
     #[test]
+    fn powershell_completion_script_is_safe_to_dot_source_from_profiles() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        let mut output = Vec::new();
+        write_completions_script(CliCompletionShell::Powershell, &layout, &mut output)
+            .expect("completion script generation should succeed");
+        let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+
+        assert!(
+            !rendered.contains("using namespace"),
+            "PowerShell completion script must not require using statements to appear first"
+        );
+        assert!(rendered.contains("[System.Management.Automation.CompletionResult]::new"));
+        assert!(
+            rendered.contains(
+                "[System.Management.Automation.Language.StringConstantExpressionAst]"
+            )
+        );
+        assert!(rendered.contains("[System.Management.Automation.Language.StringConstantType]"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn zsh_completion_script_uses_fpath_for_package_completions() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
