@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.1](https://github.com/spiritledsoftware/crosspack/compare/v0.15.0...v0.15.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* **cli:** add completions for cpk alias ([#130](https://github.com/spiritledsoftware/crosspack/issues/130)) ([803c681](https://github.com/spiritledsoftware/crosspack/commit/803c6813e723884194dc604492681cda1bc4f34d))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to 1f75196a1d5a999cea4ff376a42204f0a9922eae ([9ad5262](https://github.com/spiritledsoftware/crosspack/commit/9ad5262bfb1f4fcc04bd6f9c38817a27f1527ae1))
+
 ## [0.15.0](https://github.com/spiritledsoftware/crosspack/compare/v0.14.2...v0.15.0) (2026-05-06)
 
 
