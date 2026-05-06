@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.2](https://github.com/spiritledsoftware/crosspack/compare/v0.14.1...v0.14.2) (2026-05-06)
+
+
+### Bug Fixes
+
+* **cli:** make services surface service integrations ([#126](https://github.com/spiritledsoftware/crosspack/issues/126)) ([32cc9fb](https://github.com/spiritledsoftware/crosspack/commit/32cc9fb7aadc8e0312362023025758dead3eba70))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to 0f7cfb6850ec333ed5ef4dd4cd3d6efbbea06126 ([2a555a2](https://github.com/spiritledsoftware/crosspack/commit/2a555a2eaa25e38e5e8f69cf127549542e385df9))
+
 ## [0.14.1](https://github.com/spiritledsoftware/crosspack/compare/v0.14.0...v0.14.1) (2026-05-05)
 
 
