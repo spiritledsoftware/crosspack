@@ -4,9 +4,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
 
 permissions:
   contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-please-cargo-lock-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   lockfile:
@@ -16,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.head_ref }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -28,11 +36,20 @@ jobs:
         run: cargo generate-lockfile
 
       - name: Commit and push Cargo.lock if changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           if ! git diff --quiet -- Cargo.lock; then
+            pr_state="$(gh pr view "$PR_NUMBER" --json state --jq .state)"
+            if [ "$pr_state" != "OPEN" ]; then
+              echo "pull request is no longer open; skipping Cargo.lock push"
+              exit 0
+            fi
             git config user.name  "crosspack-bot[bot]"
             git config user.email "crosspack-bot[bot]@users.noreply.github.com"
             git add Cargo.lock
             git commit -m "chore: sync Cargo.lock"
-            git push
+            git push origin "HEAD:${HEAD_REF}"
           fi
