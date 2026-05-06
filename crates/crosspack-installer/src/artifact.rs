@@ -98,10 +98,7 @@ pub fn install_from_source_archive_to_dir(
     build_commands: &[String],
     install_commands: &[String],
 ) -> Result<PathBuf> {
-    if !matches!(
-        source_archive_type,
-        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarXz | ArchiveType::TarZst
-    ) {
+    if !source_archive_type.supports_source_build() {
         return Err(anyhow!(
             "unsupported source build archive type '{}': expected one of zip, tar.gz, tar.xz, tar.zst",
             source_archive_type.as_str()

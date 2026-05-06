@@ -971,6 +971,14 @@ fn archive_type_from_url() {
         Some(ArchiveType::TarXz)
     );
     assert_eq!(
+        ArchiveType::infer_from_url("https://example.test/pkg.txz"),
+        Some(ArchiveType::TarXz)
+    );
+    assert_eq!(
+        ArchiveType::infer_from_url("https://example.test/pkg.tar.xz?download=1#asset"),
+        Some(ArchiveType::TarXz)
+    );
+    assert_eq!(
         ArchiveType::infer_from_url("https://example.test/pkg.bin"),
         Some(ArchiveType::Bin)
     );
@@ -998,6 +1006,31 @@ fn archive_type_from_url() {
         ArchiveType::infer_from_url("https://example.test/path/"),
         None
     );
+}
+
+#[test]
+fn archive_type_source_build_support_is_limited_to_extractable_archives() {
+    for archive_type in [
+        ArchiveType::Zip,
+        ArchiveType::TarGz,
+        ArchiveType::TarXz,
+        ArchiveType::TarZst,
+    ] {
+        assert!(archive_type.supports_source_build());
+    }
+
+    for archive_type in [
+        ArchiveType::Bin,
+        ArchiveType::Msi,
+        ArchiveType::Dmg,
+        ArchiveType::AppImage,
+        ArchiveType::Exe,
+        ArchiveType::Pkg,
+        ArchiveType::Msix,
+        ArchiveType::Appx,
+    ] {
+        assert!(!archive_type.supports_source_build());
+    }
 }
 
 #[test]
