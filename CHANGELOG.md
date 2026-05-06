@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.15.0](https://github.com/spiritledsoftware/crosspack/compare/v0.14.2...v0.15.0) (2026-05-06)
+
+
+### Features
+
+* add shell init metadata projection ([#128](https://github.com/spiritledsoftware/crosspack/issues/128)) ([5a276db](https://github.com/spiritledsoftware/crosspack/commit/5a276db81d4c32c3cb41a2651f0d66382976f369))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to 5187e4dadf69e029a721f3d1a89dbc9a35474e84 ([2ff2aa3](https://github.com/spiritledsoftware/crosspack/commit/2ff2aa37ebf467f8450a8c1e5b57e7f078daa0de))
+* **registry:** bump submodule to 888f69428de42116257df756a0e4869f4c5d96b0 ([47d079a](https://github.com/spiritledsoftware/crosspack/commit/47d079a674068b43e21b5e0806feb1d03b612907))
+* **registry:** bump submodule to ae7c79a345464f306f226989763c0c25ca144de6 ([b8fc6c4](https://github.com/spiritledsoftware/crosspack/commit/b8fc6c4d8dea2fdfa048d2e078b9a28b8a6c3060))
+* **registry:** bump submodule to cf9a1a852665aebe34a6cd9897a847c5266a1d51 ([d325ea1](https://github.com/spiritledsoftware/crosspack/commit/d325ea19efbddf5eea082c77b70bced75f10481d))
+* **registry:** bump submodule to e0f23a5210dd167411377734b2a7ded5f49973e1 ([0a87c63](https://github.com/spiritledsoftware/crosspack/commit/0a87c63894c4e31ada8ffd677b7ea299e555ac95))
+* **registry:** bump submodule to ea7b258d6aebf8177dbfba1a58e49f7be2449d54 ([ef8e8c5](https://github.com/spiritledsoftware/crosspack/commit/ef8e8c574a4d94338daab27785f95f3ea72a29d2))
+
 ## [0.14.2](https://github.com/spiritledsoftware/crosspack/compare/v0.14.1...v0.14.2) (2026-05-06)
 
 
