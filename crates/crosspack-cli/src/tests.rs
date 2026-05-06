@@ -6895,6 +6895,41 @@ requirement = "^14"
     }
 
     #[test]
+    fn init_shell_snippet_loads_package_shell_init_after_path_and_completions() {
+        let layout = PrefixLayout::new(build_test_layout_path(current_unix_nanos()).join("with spaces"));
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        for shell in [
+            CliCompletionShell::Bash,
+            CliCompletionShell::Zsh,
+            CliCompletionShell::Fish,
+            CliCompletionShell::Powershell,
+        ] {
+            let rendered = init_shell_snippet(&layout, shell);
+            let completion_marker = layout
+                .completions_dir()
+                .display()
+                .to_string();
+            let shell_init_marker = layout
+                .shell_init_shell_dir(shell.package_completion_shell())
+                .display()
+                .to_string();
+            assert!(rendered.contains(&completion_marker));
+            assert!(rendered.contains(&shell_init_marker));
+            assert!(
+                rendered.find(&completion_marker) < rendered.find(&shell_init_marker),
+                "shell init loader should follow completion loader for {shell:?}"
+            );
+            assert!(
+                rendered.contains("sort") || rendered.contains("Sort-Object FullName"),
+                "shell init loader should be deterministic for {shell:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn generate_completions_outputs_non_empty_script_for_each_shell() {
         let shells = [
             CliCompletionShell::Bash,
@@ -7796,6 +7831,7 @@ description = "   \n\t"
             source_build: None,
             services: Vec::new(),
             integrations: Vec::new(),
+            shell_init: Vec::new(),
         };
 
         assert_eq!(
@@ -7824,6 +7860,7 @@ description = "   \n\t"
             source_build: None,
             services: Vec::new(),
             integrations: Vec::new(),
+            shell_init: Vec::new(),
         };
 
         let lines = format_info_lines_for_style(OutputStyle::Rich, "ripgrep", &[manifest]);
@@ -10371,6 +10408,7 @@ old-cc = "<2.0.0"
             &identity,
             &install_root,
             std::slice::from_ref(&integration),
+            &[],
         )
         .expect("must sync integrations");
 
@@ -10414,10 +10452,65 @@ old-cc = "<2.0.0"
             &test_installed_identity("other-compose"),
             &install_root,
             std::slice::from_ref(&integration),
+            &[],
         )
         .expect_err("other package ownership should block projection");
 
         assert!(err.to_string().contains("already owned by package 'docker-compose'"));
+    }
+
+    #[test]
+    fn integration_projection_sync_projects_shell_init_and_rejects_foreign_owner() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        let install_root = layout.package_dir("starship", "1.0.0");
+        fs::create_dir_all(&install_root).expect("must create install root");
+        let identity = test_installed_identity("starship");
+        let shell_init = crosspack_core::PackageShellInit {
+            name: "starship".to_string(),
+            binary: "starship".to_string(),
+            strategy: crosspack_core::ShellInitStrategy::EvalStdout,
+            bash: Some(vec!["init".to_string(), "bash".to_string()]),
+            zsh: None,
+            fish: None,
+            powershell: None,
+        };
+
+        let projected_integrations = sync_integration_projection_state(
+            &layout,
+            "starship",
+            &identity,
+            &install_root,
+            &[],
+            std::slice::from_ref(&shell_init),
+        )
+        .expect("must sync shell init");
+
+        assert!(projected_integrations.is_empty());
+        let projected_shell_init =
+            read_shell_init_state(&layout, "starship").expect("must read shell init state");
+        assert_eq!(projected_shell_init.len(), 1);
+        assert_eq!(
+            projected_shell_init[0].rel_path,
+            "shell/init/bash/starship/starship.sh"
+        );
+        assert!(layout
+            .share_dir()
+            .join(&projected_shell_init[0].rel_path)
+            .exists());
+
+        write_shell_init_state(&layout, "other-starship", &projected_shell_init)
+            .expect("must seed foreign owner");
+        let err = sync_integration_projection_state(
+            &layout,
+            "starship",
+            &identity,
+            &install_root,
+            &[],
+            std::slice::from_ref(&shell_init),
+        )
+        .expect_err("foreign shell init owner should block projection");
+        assert!(err.to_string().contains("already owned by package"));
     }
 
     #[test]

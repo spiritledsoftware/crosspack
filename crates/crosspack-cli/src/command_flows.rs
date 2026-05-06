@@ -2698,6 +2698,14 @@ fn snapshot_integration_path(snapshot_root: &Path, integration_storage_rel_path:
     snapshot_integration_root(snapshot_root).join(integration_storage_rel_path)
 }
 
+fn snapshot_shell_init_root(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join("shell-init")
+}
+
+fn snapshot_shell_init_path(snapshot_root: &Path, shell_init_storage_rel_path: &str) -> PathBuf {
+    snapshot_shell_init_root(snapshot_root).join(shell_init_storage_rel_path)
+}
+
 fn snapshot_native_sidecar_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root.join("native").join("sidecar.state")
 }
@@ -2734,6 +2742,7 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
                 completions: Vec::new(),
                 gui_assets: Vec::new(),
                 integrations: Vec::new(),
+                shell_init: Vec::new(),
                 native_sidecar_exists: false,
                 declared_services_sidecar_exists: false,
             });
@@ -2751,6 +2760,7 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
         completions: Vec::new(),
         gui_assets: Vec::new(),
         integrations: Vec::new(),
+        shell_init: Vec::new(),
         native_sidecar_exists: false,
         declared_services_sidecar_exists: false,
     };
@@ -2781,6 +2791,14 @@ fn read_snapshot_manifest(snapshot_root: &Path) -> Result<PackageSnapshotManifes
             };
             manifest.integrations.push(IntegrationProjection {
                 kind: kind.to_string(),
+                key: key.to_string(),
+                rel_path: rel_path.to_string(),
+            });
+        } else if let Some(shell_init) = line.strip_prefix("shell_init=") {
+            let Some((key, rel_path)) = shell_init.split_once('\t') else {
+                return Err(anyhow!("invalid snapshot manifest shell_init row"));
+            };
+            manifest.shell_init.push(ShellInitProjection {
                 key: key.to_string(),
                 rel_path: rel_path.to_string(),
             });
@@ -2818,6 +2836,12 @@ fn write_snapshot_manifest(snapshot_root: &Path, manifest: &PackageSnapshotManif
         lines.push(format!(
             "integration={}\t{}\t{}",
             integration.kind, integration.key, integration.rel_path
+        ));
+    }
+    for shell_init in &manifest.shell_init {
+        lines.push(format!(
+            "shell_init={}\t{}",
+            shell_init.key, shell_init.rel_path
         ));
     }
     lines.push(format!(
@@ -2950,6 +2974,12 @@ fn capture_package_state_snapshot(
             snapshot_integration_root(&snapshot_root).display()
         )
     })?;
+    std::fs::create_dir_all(snapshot_shell_init_root(&snapshot_root)).with_context(|| {
+        format!(
+            "failed creating rollback snapshot shell init dir: {}",
+            snapshot_shell_init_root(&snapshot_root).display()
+        )
+    })?;
     std::fs::create_dir_all(snapshot_identity_pkgs_root(&snapshot_root)).with_context(|| {
         format!(
             "failed creating rollback snapshot identity package dir: {}",
@@ -2996,6 +3026,7 @@ fn capture_package_state_snapshot(
         completions: Vec::new(),
         gui_assets: Vec::new(),
         integrations: Vec::new(),
+        shell_init: Vec::new(),
         native_sidecar_exists: false,
         declared_services_sidecar_exists: false,
     };
@@ -3069,6 +3100,17 @@ fn capture_package_state_snapshot(
             copy_tree(
                 &source,
                 &snapshot_integration_path(&snapshot_root, &integration.rel_path),
+            )?;
+        }
+    }
+
+    manifest.shell_init = read_shell_init_state(layout, package_name)?;
+    for shell_init in &manifest.shell_init {
+        let source = layout.share_dir().join(&shell_init.rel_path);
+        if source.exists() {
+            copy_tree(
+                &source,
+                &snapshot_shell_init_path(&snapshot_root, &shell_init.rel_path),
             )?;
         }
     }
@@ -3303,6 +3345,12 @@ fn restore_package_state_snapshot(
     }
     write_integration_state(layout, package_name, &[])?;
 
+    let existing_shell_init = read_shell_init_state(layout, package_name)?;
+    for shell_init in &existing_shell_init {
+        remove_exposed_shell_init(layout, shell_init)?;
+    }
+    write_shell_init_state(layout, package_name, &[])?;
+
     if package_root.exists() {
         std::fs::remove_dir_all(&package_root).with_context(|| {
             format!("failed to remove package path: {}", package_root.display())
@@ -3325,6 +3373,7 @@ fn restore_package_state_snapshot(
         remove_file_if_exists(&layout.identity_gui_native_state_path(&state.identity))?;
         remove_file_if_exists(&layout.identity_declared_services_state_path(&state.identity))?;
         remove_file_if_exists(&layout.identity_integration_state_path(&state.identity))?;
+        remove_file_if_exists(&layout.identity_shell_init_state_path(&state.identity))?;
         remove_file_if_exists(&layout.identity_pin_path(&state.identity))?;
     }
 
@@ -3343,6 +3392,7 @@ fn restore_package_state_snapshot(
         completions,
         gui_assets,
         integrations,
+        shell_init,
         native_sidecar_exists,
         declared_services_sidecar_exists,
     } = read_snapshot_manifest(snapshot_root)?;
@@ -3432,6 +3482,22 @@ fn restore_package_state_snapshot(
         }
     }
     write_integration_state(layout, package_name, &integrations)?;
+
+    for shell_init in &shell_init {
+        let dst = layout.share_dir().join(&shell_init.rel_path);
+        remove_file_if_exists(&dst)?;
+        let src = snapshot_shell_init_path(snapshot_root, &shell_init.rel_path);
+        if src.exists() {
+            copy_tree(&src, &dst).with_context(|| {
+                format!(
+                    "failed restoring shell init '{}' from {}",
+                    shell_init.key,
+                    src.display()
+                )
+            })?;
+        }
+    }
+    write_shell_init_state(layout, package_name, &shell_init)?;
     restore_activation_state_snapshot(layout, package_name, Some(snapshot_root))?;
 
     if native_sidecar_exists {

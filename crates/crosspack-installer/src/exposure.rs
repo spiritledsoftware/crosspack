@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use crosspack_core::{ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration};
+use crosspack_core::{
+    ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration, PackageShellInit,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -8,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::fs_utils::remove_file_if_exists;
 use crate::{
     GuiExposureAsset, HostPlatform, InstalledPackageIdentity, IntegrationProjection, PrefixLayout,
+    ShellInitProjection,
 };
 
 const INTEGRATION_STATE_VERSION: u32 = 1;
@@ -130,6 +133,157 @@ pub fn clear_integration_state(layout: &PrefixLayout, package_name: &str) -> Res
     let path = layout.integration_state_path(package_name);
     remove_file_if_exists(&path)?;
     Ok(())
+}
+
+pub fn write_shell_init_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+    projections: &[ShellInitProjection],
+) -> Result<PathBuf> {
+    write_shell_init_state_path(&layout.shell_init_state_path(package_name), projections)
+}
+
+pub fn write_identity_shell_init_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+    projections: &[ShellInitProjection],
+) -> Result<PathBuf> {
+    write_shell_init_state_path(
+        &layout.identity_shell_init_state_path(identity),
+        projections,
+    )
+}
+
+fn write_shell_init_state_path(
+    path: &Path,
+    projections: &[ShellInitProjection],
+) -> Result<PathBuf> {
+    if projections.is_empty() {
+        let _ = remove_file_if_exists(path);
+        return Ok(path.to_path_buf());
+    }
+
+    let mut payload = String::new();
+    payload.push_str(&format!("version={INTEGRATION_STATE_VERSION}\n"));
+    for projection in projections {
+        if projection.key.contains(['\t', '\n']) || projection.rel_path.contains(['\t', '\n']) {
+            return Err(anyhow!(
+                "shell init state values must not contain tabs or newlines"
+            ));
+        }
+        validated_relative_integration_storage_path(&projection.rel_path)?;
+        payload.push_str(&format!(
+            "shell_init={}\t{}\n",
+            projection.key, projection.rel_path
+        ));
+    }
+
+    fs::write(path, payload.as_bytes())
+        .with_context(|| format!("failed to write shell init state: {}", path.display()))?;
+    Ok(path.to_path_buf())
+}
+
+pub fn read_shell_init_state(
+    layout: &PrefixLayout,
+    package_name: &str,
+) -> Result<Vec<ShellInitProjection>> {
+    read_shell_init_state_path(&layout.shell_init_state_path(package_name))
+}
+
+pub fn read_identity_shell_init_state(
+    layout: &PrefixLayout,
+    identity: &InstalledPackageIdentity,
+) -> Result<Vec<ShellInitProjection>> {
+    read_shell_init_state_path(&layout.identity_shell_init_state_path(identity))
+}
+
+fn read_shell_init_state_path(path: &Path) -> Result<Vec<ShellInitProjection>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read shell init state: {}", path.display()))?;
+    parse_shell_init_state(&raw)
+        .with_context(|| format!("failed to parse shell init state: {}", path.display()))
+}
+
+pub fn read_all_shell_init_states(
+    layout: &PrefixLayout,
+) -> Result<BTreeMap<String, Vec<ShellInitProjection>>> {
+    let dir = layout.installed_state_dir();
+    if !dir.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut states = BTreeMap::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read install state directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".shell-init"))
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read shell init state: {}", path.display()))?;
+        let projections = parse_shell_init_state(&raw)
+            .with_context(|| format!("failed to parse shell init state: {}", path.display()))?;
+        states.insert(stem.to_string(), projections);
+    }
+    Ok(states)
+}
+
+pub fn clear_shell_init_state(layout: &PrefixLayout, package_name: &str) -> Result<()> {
+    remove_file_if_exists(&layout.shell_init_state_path(package_name))?;
+    Ok(())
+}
+
+fn parse_shell_init_state(raw: &str) -> Result<Vec<ShellInitProjection>> {
+    let mut version = None;
+    let mut projections = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("invalid shell init state row format"));
+        };
+        match key {
+            "version" => {
+                version = Some(
+                    value
+                        .parse::<u32>()
+                        .context("invalid shell init state version")?,
+                )
+            }
+            "shell_init" => {
+                let fields = value.split('\t').collect::<Vec<_>>();
+                if fields.len() != 2 {
+                    return Err(anyhow!("invalid shell init state row format"));
+                }
+                if fields[0].trim().is_empty() {
+                    return Err(anyhow!("shell init state key must not be empty"));
+                }
+                validated_relative_integration_storage_path(fields[1])?;
+                projections.push(ShellInitProjection {
+                    key: fields[0].to_string(),
+                    rel_path: fields[1].to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if version.unwrap_or(INTEGRATION_STATE_VERSION) != INTEGRATION_STATE_VERSION {
+        return Err(anyhow!("unsupported shell init state version"));
+    }
+    Ok(projections)
 }
 
 fn parse_integration_state(raw: &str) -> Result<Vec<IntegrationProjection>> {
@@ -561,6 +715,78 @@ pub fn remove_exposed_integration(
     Ok(())
 }
 
+pub fn remove_exposed_shell_init(
+    layout: &PrefixLayout,
+    projection: &ShellInitProjection,
+) -> Result<()> {
+    let path = shell_init_path(layout, &projection.rel_path)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path)
+        .with_context(|| format!("failed to remove exposed shell init: {}", path.display()))?;
+    prune_empty_shell_init_dirs(layout, path.parent())?;
+    Ok(())
+}
+
+pub fn expose_shell_init(
+    layout: &PrefixLayout,
+    package_name: &str,
+    shell_init: &PackageShellInit,
+) -> Result<Vec<ShellInitProjection>> {
+    let projections = projected_shell_init(package_name, shell_init)?;
+    for projection in &projections {
+        let path = shell_init_path(layout, &projection.rel_path)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create shell init dir: {}", parent.display())
+            })?;
+        }
+        fs::write(
+            &path,
+            render_shell_init(layout, shell_init, projection)?.as_bytes(),
+        )
+        .with_context(|| format!("failed writing shell init snippet: {}", path.display()))?;
+    }
+    Ok(projections)
+}
+
+pub fn projected_shell_init(
+    package_name: &str,
+    shell_init: &PackageShellInit,
+) -> Result<Vec<ShellInitProjection>> {
+    let mut projections = Vec::new();
+    let normalized_name = normalize_integration_token(&shell_init.name);
+    let normalized_package = normalize_integration_token(package_name);
+    for shell in [
+        ArtifactCompletionShell::Bash,
+        ArtifactCompletionShell::Zsh,
+        ArtifactCompletionShell::Fish,
+        ArtifactCompletionShell::Powershell,
+    ] {
+        if shell_init.args_for_shell(shell).is_none() {
+            continue;
+        }
+        let ext = match shell {
+            ArtifactCompletionShell::Bash => "sh",
+            ArtifactCompletionShell::Zsh => "zsh",
+            ArtifactCompletionShell::Fish => "fish",
+            ArtifactCompletionShell::Powershell => "ps1",
+        };
+        projections.push(ShellInitProjection {
+            key: format!("shell_init:{}:{}", shell.as_str(), shell_init.name),
+            rel_path: format!(
+                "shell/init/{}/{}/{}.{}",
+                shell.as_str(),
+                normalized_name,
+                normalized_package,
+                ext
+            ),
+        });
+    }
+    validate_shell_init_projections(projections)
+}
+
 pub fn projected_integration(
     package_name: &str,
     integration: &PackageIntegration,
@@ -731,9 +957,81 @@ fn validate_integration_projections(
     Ok(projections)
 }
 
+fn validate_shell_init_projections(
+    projections: Vec<ShellInitProjection>,
+) -> Result<Vec<ShellInitProjection>> {
+    if projections.is_empty() {
+        return Err(anyhow!("shell init must declare at least one shell"));
+    }
+    for projection in &projections {
+        validated_relative_integration_storage_path(&projection.rel_path)?;
+    }
+    Ok(projections)
+}
+
 fn integration_path(layout: &PrefixLayout, rel_path: &str) -> Result<PathBuf> {
     let relative = validated_relative_integration_storage_path(rel_path)?;
     Ok(layout.integrations_dir().join(relative))
+}
+
+fn shell_init_path(layout: &PrefixLayout, rel_path: &str) -> Result<PathBuf> {
+    let relative = validated_relative_integration_storage_path(rel_path)?;
+    Ok(layout.share_dir().join(relative))
+}
+
+fn render_shell_init(
+    layout: &PrefixLayout,
+    shell_init: &PackageShellInit,
+    projection: &ShellInitProjection,
+) -> Result<String> {
+    let shell = shell_init_shell_from_projection(projection)?;
+    let bin = bin_path(layout, &shell_init.binary);
+    let args = shell_init
+        .args_for_shell(shell)
+        .ok_or_else(|| anyhow!("missing shell init args for {}", shell.as_str()))?;
+    let rendered_args = args
+        .iter()
+        .map(|arg| quote_shell_word(arg, shell))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rendered_bin = quote_shell_word(&bin.display().to_string(), shell);
+    let line = match shell {
+        ArtifactCompletionShell::Bash | ArtifactCompletionShell::Zsh => {
+            format!("eval \"$({rendered_bin} {rendered_args})\"")
+        }
+        ArtifactCompletionShell::Fish => format!("{rendered_bin} {rendered_args} | source"),
+        ArtifactCompletionShell::Powershell => {
+            format!("Invoke-Expression (& {rendered_bin} {rendered_args})")
+        }
+    };
+    Ok(format!("{line}\n"))
+}
+
+fn shell_init_shell_from_projection(
+    projection: &ShellInitProjection,
+) -> Result<ArtifactCompletionShell> {
+    let mut components = projection.rel_path.split('/');
+    match (components.next(), components.next(), components.next()) {
+        (Some("shell"), Some("init"), Some("bash")) => Ok(ArtifactCompletionShell::Bash),
+        (Some("shell"), Some("init"), Some("zsh")) => Ok(ArtifactCompletionShell::Zsh),
+        (Some("shell"), Some("init"), Some("fish")) => Ok(ArtifactCompletionShell::Fish),
+        (Some("shell"), Some("init"), Some("powershell")) => {
+            Ok(ArtifactCompletionShell::Powershell)
+        }
+        _ => Err(anyhow!(
+            "invalid shell init projection path '{}'",
+            projection.rel_path
+        )),
+    }
+}
+
+fn quote_shell_word(value: &str, shell: ArtifactCompletionShell) -> String {
+    match shell {
+        ArtifactCompletionShell::Powershell => {
+            format!("'{}'", value.replace('\'', "''"))
+        }
+        _ => format!("'{}'", value.replace('\'', "'\"'\"'")),
+    }
 }
 
 pub fn gui_asset_path(layout: &PrefixLayout, gui_storage_rel_path: &str) -> Result<PathBuf> {
@@ -1222,6 +1520,36 @@ fn prune_empty_integration_dirs(layout: &PrefixLayout, start: Option<&Path>) -> 
 
         fs::remove_dir(&dir)
             .with_context(|| format!("failed pruning integration dir: {}", dir.display()))?;
+        current = dir.parent().map(PathBuf::from);
+    }
+    Ok(())
+}
+
+fn prune_empty_shell_init_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
+    let mut current = start.map(PathBuf::from);
+    let shell_init_root = layout.shell_init_dir();
+    while let Some(dir) = current {
+        if !dir.starts_with(&shell_init_root) || dir == shell_init_root {
+            break;
+        }
+
+        let mut entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                current = dir.parent().map(PathBuf::from);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed reading shell init dir: {}", dir.display()));
+            }
+        };
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&dir)
+            .with_context(|| format!("failed pruning shell init dir: {}", dir.display()))?;
         current = dir.parent().map(PathBuf::from);
     }
     Ok(())

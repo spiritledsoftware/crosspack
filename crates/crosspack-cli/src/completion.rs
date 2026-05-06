@@ -144,45 +144,71 @@ fn resolve_init_shell(
 }
 
 fn print_init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) {
+    print!("{}", init_shell_snippet(layout, shell));
+}
+
+fn init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) -> String {
     let bin = layout.bin_dir();
     let completion_path = crosspack_completion_script_path(layout, shell);
+    let shell_init_dir = layout.shell_init_shell_dir(shell.package_completion_shell());
+    let mut output = String::new();
     match shell {
         CliCompletionShell::Bash | CliCompletionShell::Zsh => {
             let escaped_completion =
                 escape_single_quote_shell(&completion_path.display().to_string());
-            println!("export PATH=\"{}:$PATH\"", bin.display());
-            println!("if [ -f '{escaped_completion}' ]; then");
-            println!("  . '{escaped_completion}'");
-            println!("fi");
+            let escaped_shell_init =
+                escape_single_quote_shell(&shell_init_dir.display().to_string());
+            output.push_str(&format!("export PATH=\"{}:$PATH\"\n", bin.display()));
+            output.push_str(&format!("if [ -f '{escaped_completion}' ]; then\n"));
+            output.push_str(&format!("  . '{escaped_completion}'\n"));
+            output.push_str("fi\n");
+            output.push_str(&format!("if [ -d '{escaped_shell_init}' ]; then\n"));
+            output.push_str(&format!("  find '{escaped_shell_init}' -mindepth 1 -type f -print 2>/dev/null \\\n"));
+            output.push_str("    | LC_ALL=C sort \\\n");
+            output.push_str("    | while IFS= read -r _crosspack_shell_init_path; do\n");
+            output.push_str("        . \"${_crosspack_shell_init_path}\"\n");
+            output.push_str("      done\n");
+            output.push_str("  unset _crosspack_shell_init_path\n");
+            output.push_str("fi\n");
         }
         CliCompletionShell::Fish => {
             let escaped_bin = escape_single_quote_shell(&bin.display().to_string());
             let escaped_completion =
                 escape_single_quote_shell(&completion_path.display().to_string());
-            println!("if test -d '{escaped_bin}'");
-            println!("    if not contains -- '{escaped_bin}' $PATH");
-            println!("        set -gx PATH '{escaped_bin}' $PATH");
-            println!("    end");
-            println!("end");
-            println!("if test -f '{escaped_completion}'");
-            println!("    source '{escaped_completion}'");
-            println!("end");
+            let escaped_shell_init =
+                escape_single_quote_shell(&shell_init_dir.display().to_string());
+            output.push_str(&format!("if test -d '{escaped_bin}'\n"));
+            output.push_str(&format!("    if not contains -- '{escaped_bin}' $PATH\n"));
+            output.push_str(&format!("        set -gx PATH '{escaped_bin}' $PATH\n"));
+            output.push_str("    end\nend\n");
+            output.push_str(&format!("if test -f '{escaped_completion}'\n"));
+            output.push_str(&format!("    source '{escaped_completion}'\n"));
+            output.push_str("end\n");
+            output.push_str(&format!("if test -d '{escaped_shell_init}'\n"));
+            output.push_str(&format!("    for _crosspack_shell_init_path in (find '{escaped_shell_init}' -mindepth 1 -type f -print 2>/dev/null | sort)\n"));
+            output.push_str("        source \"$_crosspack_shell_init_path\"\n");
+            output.push_str("    end\nend\nset -e _crosspack_shell_init_path\n");
         }
         CliCompletionShell::Powershell => {
             let escaped_bin = escape_ps_single_quote(&bin.display().to_string());
             let escaped_completion = escape_ps_single_quote(&completion_path.display().to_string());
-            println!("if (Test-Path '{escaped_bin}') {{");
-            println!(
-                "  if (-not ($env:PATH -split ';' | Where-Object {{ $_ -eq '{escaped_bin}' }})) {{"
-            );
-            println!("    $env:PATH = '{escaped_bin};' + $env:PATH");
-            println!("  }}");
-            println!("}}");
-            println!("if (Test-Path '{escaped_completion}') {{");
-            println!("  . '{escaped_completion}'");
-            println!("}}");
+            let escaped_shell_init = escape_ps_single_quote(&shell_init_dir.display().to_string());
+            output.push_str(&format!("if (Test-Path '{escaped_bin}') {{\n"));
+            output.push_str(&format!("  if (-not ($env:PATH -split ';' | Where-Object {{ $_ -eq '{escaped_bin}' }})) {{\n"));
+            output.push_str(&format!("    $env:PATH = '{escaped_bin};' + $env:PATH\n"));
+            output.push_str("  }\n}\n");
+            output.push_str(&format!("if (Test-Path '{escaped_completion}') {{\n"));
+            output.push_str(&format!("  . '{escaped_completion}'\n"));
+            output.push_str("}\n");
+            output.push_str(&format!("$crosspackShellInitDir = '{escaped_shell_init}'\n"));
+            output.push_str("if (Test-Path $crosspackShellInitDir) {\n");
+            output.push_str("  Get-ChildItem -Path $crosspackShellInitDir -Recurse -File | Sort-Object FullName | ForEach-Object {\n");
+            output.push_str("    . $_.FullName\n");
+            output.push_str("  }\n}\n");
+            output.push_str("Remove-Variable crosspackShellInitDir -ErrorAction SilentlyContinue\n");
         }
     }
+    output
 }
 
 fn registry_state_root(layout: &PrefixLayout) -> PathBuf {

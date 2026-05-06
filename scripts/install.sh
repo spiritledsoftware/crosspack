@@ -94,8 +94,8 @@ sha256_of() {
 
 print_manual_shell_setup_hints() {
   echo "Manual shell setup:"
-  echo "  ${BIN_DIR}/crosspack completions <bash|zsh|fish> > ${PREFIX}/share/completions/crosspack.<shell>"
-  echo "  add ${BIN_DIR} to PATH in your shell profile"
+  echo "  eval \"\$(${BIN_DIR}/crosspack init-shell --shell <bash|zsh>)\""
+  echo "  ${BIN_DIR}/crosspack init-shell --shell fish | source"
 }
 
 upsert_profile_block() {
@@ -201,11 +201,8 @@ configure_shell_setup() {
     bash|zsh)
       cat > "${block_path}" <<EOF
 ${SHELL_SETUP_BEGIN}
-if [ -d "${BIN_DIR}" ] && [ ":\$PATH:" != *":${BIN_DIR}:"* ]; then
-  export PATH="${BIN_DIR}:\$PATH"
-fi
-if [ -f "${completion_path}" ]; then
-  . "${completion_path}"
+if [ -x "${BIN_DIR}/crosspack" ]; then
+  eval "\$("${BIN_DIR}/crosspack" init-shell --shell "${shell_name}")"
 fi
 ${SHELL_SETUP_END}
 EOF
@@ -213,13 +210,8 @@ EOF
     fish)
       cat > "${block_path}" <<EOF
 ${SHELL_SETUP_BEGIN}
-if test -d "${BIN_DIR}"
-    if not contains -- "${BIN_DIR}" \$PATH
-        set -gx PATH "${BIN_DIR}" \$PATH
-    end
-end
-if test -f "${completion_path}"
-    source "${completion_path}"
+if test -x "${BIN_DIR}/crosspack"
+    "${BIN_DIR}/crosspack" init-shell --shell "${shell_name}" | source
 end
 ${SHELL_SETUP_END}
 EOF

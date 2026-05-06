@@ -509,6 +509,7 @@ struct PackageSnapshotManifest {
     completions: Vec<String>,
     gui_assets: Vec<GuiExposureAsset>,
     integrations: Vec<IntegrationProjection>,
+    shell_init: Vec<ShellInitProjection>,
     native_sidecar_exists: bool,
     declared_services_sidecar_exists: bool,
 }
@@ -1801,8 +1802,10 @@ fn sync_integration_projection_state(
     identity: &InstalledPackageIdentity,
     install_root: &Path,
     integrations: &[PackageIntegration],
+    shell_init: &[crosspack_core::PackageShellInit],
 ) -> Result<Vec<IntegrationProjection>> {
     let previous_projections = read_identity_integration_state(layout, identity)?;
+    let previous_shell_init_projections = read_identity_shell_init_state(layout, identity)?;
     let host_platform = current_host_platform();
     let desired_projections = integrations
         .iter()
@@ -1817,6 +1820,13 @@ fn sync_integration_projection_state(
                     .collect::<Vec<_>>()
             })
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let desired_shell_init_projections = shell_init
+        .iter()
+        .map(|entry| projected_shell_init(package_name, entry))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
@@ -1839,8 +1849,27 @@ fn sync_integration_projection_state(
             }
         }
     }
+    let all_shell_init_states = read_all_shell_init_states(layout)?;
+    for desired in &desired_shell_init_projections {
+        for (owner, projections) in &all_shell_init_states {
+            if owner == &identity.state_key() || owner == package_name {
+                continue;
+            }
+            if projections
+                .iter()
+                .any(|projection| projection.rel_path == desired.rel_path)
+            {
+                return Err(anyhow!(
+                    "shell init projection '{}' is already owned by package '{}'",
+                    desired.rel_path,
+                    owner
+                ));
+            }
+        }
+    }
 
     let mut current_projections = Vec::new();
+    let mut current_shell_init_projections = Vec::new();
     for integration in integrations {
         current_projections.extend(expose_integrations_for_host_platform(
             layout,
@@ -1850,6 +1879,9 @@ fn sync_integration_projection_state(
             host_platform,
         )?);
     }
+    for shell_init in shell_init {
+        current_shell_init_projections.extend(expose_shell_init(layout, package_name, shell_init)?);
+    }
 
     for stale_projection in previous_projections.iter().filter(|old| {
         !current_projections
@@ -1858,8 +1890,17 @@ fn sync_integration_projection_state(
     }) {
         remove_exposed_integration(layout, stale_projection)?;
     }
+    for stale_projection in previous_shell_init_projections.iter().filter(|old| {
+        !current_shell_init_projections
+            .iter()
+            .any(|current| current.rel_path == old.rel_path)
+    }) {
+        remove_exposed_shell_init(layout, stale_projection)?;
+    }
     write_identity_integration_state(layout, identity, &current_projections)?;
     write_integration_state(layout, package_name, &current_projections)?;
+    write_identity_shell_init_state(layout, identity, &current_shell_init_projections)?;
+    write_shell_init_state(layout, package_name, &current_shell_init_projections)?;
     Ok(current_projections)
 }
 
@@ -2315,6 +2356,7 @@ fn install_resolved(
         &identity,
         &install_root,
         &resolved.manifest.integrations,
+        &resolved.manifest.shell_init,
     )?;
     let host = current_host_activation_context(layout)?;
     activate_enabled_services_for_install(

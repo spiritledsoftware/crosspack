@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::anyhow;
 use crosspack_core::{
-    ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration, ServiceDeclaration,
+    ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration, PackageShellInit,
+    ServiceDeclaration, ShellInitStrategy,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -5681,6 +5682,74 @@ fn expose_path_plugin_integration_round_trip() {
 }
 
 #[test]
+fn expose_shell_init_projects_sorted_shell_snippets_and_removes_them() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let shell_init = PackageShellInit {
+        name: "starship".to_string(),
+        binary: "starship".to_string(),
+        strategy: ShellInitStrategy::EvalStdout,
+        bash: Some(vec!["init".to_string(), "bash".to_string()]),
+        zsh: Some(vec!["init".to_string(), "zsh".to_string()]),
+        fish: Some(vec!["init".to_string(), "fish".to_string()]),
+        powershell: Some(vec!["init".to_string(), "powershell".to_string()]),
+    };
+
+    let projected = expose_shell_init(&layout, "starship", &shell_init)
+        .expect("must expose shell init snippets");
+
+    assert_eq!(projected.len(), 4);
+    assert_eq!(
+        projected
+            .iter()
+            .map(|projection| projection.rel_path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "shell/init/bash/starship/starship.sh",
+            "shell/init/zsh/starship/starship.zsh",
+            "shell/init/fish/starship/starship.fish",
+            "shell/init/powershell/starship/starship.ps1",
+        ]
+    );
+    let bash_path = layout.share_dir().join(&projected[0].rel_path);
+    let bash = fs::read_to_string(&bash_path).expect("must read bash snippet");
+    assert_eq!(
+        bash,
+        format!(
+            "eval \"$('{}' 'init' 'bash')\"\n",
+            bin_path(&layout, "starship").display()
+        )
+    );
+
+    let fish = fs::read_to_string(
+        layout
+            .share_dir()
+            .join("shell/init/fish/starship/starship.fish"),
+    )
+    .expect("must read fish snippet");
+    assert_eq!(
+        fish,
+        format!(
+            "'{}' 'init' 'fish' | source\n",
+            bin_path(&layout, "starship").display()
+        )
+    );
+
+    write_shell_init_state(&layout, "starship", &projected).expect("must write owner state");
+    assert_eq!(
+        read_shell_init_state(&layout, "starship").expect("must read owner state"),
+        projected
+    );
+
+    for projection in &projected {
+        remove_exposed_shell_init(&layout, projection).expect("must remove shell init");
+        assert!(!layout.share_dir().join(&projection.rel_path).exists());
+    }
+
+    let _ = fs::remove_dir_all(layout.prefix());
+}
+
+#[test]
 fn expose_service_integration_state_round_trip() {
     let layout = test_layout();
     layout.ensure_base_dirs().expect("must create dirs");
@@ -7894,6 +7963,25 @@ fn uninstall_removes_package_dir_and_receipt() {
     )
     .expect("must create completion parent dir");
     fs::write(&completion_path, b"# demo completion\n").expect("must create completion file");
+    let shell_init_projection = ShellInitProjection {
+        key: "shell_init:bash:demo".to_string(),
+        rel_path: "shell/init/bash/demo/demo.sh".to_string(),
+    };
+    let shell_init_path = layout.share_dir().join(&shell_init_projection.rel_path);
+    fs::create_dir_all(
+        shell_init_path
+            .parent()
+            .expect("shell init path must have parent"),
+    )
+    .expect("must create shell init parent dir");
+    fs::write(&shell_init_path, b"eval \"$(demo init bash)\"\n")
+        .expect("must create shell init file");
+    write_shell_init_state(
+        &layout,
+        "demo",
+        std::slice::from_ref(&shell_init_projection),
+    )
+    .expect("must write shell init state");
     let gui_rel_path = "launchers/demo--demo.command".to_string();
     let gui_path = gui_asset_path(&layout, &gui_rel_path).expect("must resolve gui path");
     fs::create_dir_all(gui_path.parent().expect("gui path must have parent"))
@@ -7962,6 +8050,8 @@ fn uninstall_removes_package_dir_and_receipt() {
     assert!(!legacy_state_path.exists());
     assert!(!package_dir.exists());
     assert!(!completion_path.exists());
+    assert!(!shell_init_path.exists());
+    assert!(!layout.shell_init_state_path("demo").exists());
     assert!(!gui_path.exists());
     assert!(!native_launcher.exists());
     assert!(!layout.gui_state_path("demo").exists());

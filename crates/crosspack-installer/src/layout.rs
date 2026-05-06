@@ -52,6 +52,14 @@ impl PrefixLayout {
         self.package_completions_dir().join(shell.as_str())
     }
 
+    pub fn shell_init_dir(&self) -> PathBuf {
+        self.share_dir().join("shell").join("init")
+    }
+
+    pub fn shell_init_shell_dir(&self, shell: ArtifactCompletionShell) -> PathBuf {
+        self.shell_init_dir().join(shell.as_str())
+    }
+
     pub fn gui_dir(&self) -> PathBuf {
         self.share_dir().join("gui")
     }
@@ -185,6 +193,16 @@ impl PrefixLayout {
             .join(format!("{}.integrations", identity.state_key()))
     }
 
+    pub fn shell_init_state_path(&self, name: &str) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{name}.shell-init"))
+    }
+
+    pub fn identity_shell_init_state_path(&self, identity: &InstalledPackageIdentity) -> PathBuf {
+        self.installed_state_dir()
+            .join(format!("{}.shell-init", identity.state_key()))
+    }
+
     pub fn integration_activation_state_path(&self) -> PathBuf {
         self.installed_state_dir().join("integrations.activation")
     }
@@ -237,6 +255,7 @@ impl PrefixLayout {
             self.share_dir(),
             self.completions_dir(),
             self.package_completions_dir(),
+            self.shell_init_dir(),
             self.gui_dir(),
             self.gui_launchers_dir(),
             self.gui_handlers_dir(),
