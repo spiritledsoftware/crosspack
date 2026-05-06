@@ -7,6 +7,7 @@ fn write_completions_script<W: Write>(
     let generator: Shell = shell.into();
     let mut generated = Vec::new();
     clap_complete::generate(generator, &mut command, "crosspack", &mut generated);
+    clap_complete::generate(generator, &mut command, "cpk", &mut generated);
 
     if shell == CliCompletionShell::Zsh {
         writer
