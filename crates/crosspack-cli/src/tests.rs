@@ -11036,6 +11036,59 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn services_status_uses_resolved_projection_activation_key() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("syncthing", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "syncthing",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "systemd-user:service:syncthing".to_string(),
+                rel_path: "services/syncthing/syncthing.service".to_string(),
+            }],
+        )
+        .expect("must seed service projection state");
+        write_integration_activation_state(
+            &layout,
+            &[IntegrationActivationRecord {
+                package_state_key: "default--x86_64-unknown-linux-gnu--core--syncthing"
+                    .to_string(),
+                package: "syncthing".to_string(),
+                integration_key: "systemd-user:service:syncthing".to_string(),
+                kind: "service".to_string(),
+                adapter: IntegrationAdapterKind::SystemdUser,
+                scope: IntegrationActivationScope::User,
+                desired_state: IntegrationDesiredState::Running,
+                applied_state: IntegrationAppliedState::Running,
+                host_path: Some("systemd-user:syncthing.service".to_string()),
+                reason_code: IntegrationReasonCode::Ok,
+            }],
+        )
+        .expect("must seed activation state");
+
+        let line = service_status_line_for_package(&layout, "syncthing", "syncthing", |plan| {
+            assert_eq!(plan.integration_key, "systemd-user:service:syncthing");
+            ActivationAdapterOutcome {
+                reason_code: IntegrationReasonCode::Ok,
+                applied_state: IntegrationAppliedState::Running,
+                rollback: Vec::new(),
+            }
+        })
+        .expect("status should resolve activation by projection key");
+
+        assert_eq!(
+            line,
+            "service package=syncthing name=syncthing state=running adapter=systemd-user scope=user applied=true reason=ok"
+        );
+    }
+
+    #[test]
     fn services_list_includes_projected_services_without_duplicating_legacy_services() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -11085,7 +11138,7 @@ old-cc = "<2.0.0"
         assert_eq!(
             rendered,
             vec![
-                "service package=caddy name=caddy state=stopped adapter=none scope=user applied=false reason=not-enabled",
+                "service package=caddy name=caddy state=projected adapter=none scope=user applied=false reason=not-enabled",
                 "service package=syncthing name=syncthing state=projected adapter=none scope=user applied=false reason=not-enabled",
             ]
         );
@@ -11129,7 +11182,7 @@ old-cc = "<2.0.0"
             "syncthing",
             NativeServiceAction::Start,
             |plan, source| {
-                assert_eq!(source, ServiceActionPlanSource::ProjectedStart);
+                assert_eq!(source, ServiceActionPlanSource::ProjectedActivation);
                 assert_eq!(plan.kind, "service");
                 assert_eq!(plan.integration_key, "service:syncthing");
                 assert_eq!(plan.adapter, expected_adapter);
@@ -11141,6 +11194,71 @@ old-cc = "<2.0.0"
             },
         )
         .expect("start should activate projected service");
+
+        assert_eq!(
+            line,
+            format!(
+                "service package=syncthing name=syncthing state=running adapter={} scope=user applied=true reason=ok",
+                expected_adapter.as_str()
+            )
+        );
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].integration_key, "service:syncthing");
+        assert_eq!(records[0].desired_state, IntegrationDesiredState::Running);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn services_restart_projected_service_persists_running_activation() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("syncthing", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        let (rel_path, expected_adapter) = if cfg!(target_os = "macos") {
+            (
+                "services/syncthing/syncthing.launchd.plist",
+                IntegrationAdapterKind::LaunchdUser,
+            )
+        } else {
+            (
+                "services/syncthing/syncthing.service",
+                IntegrationAdapterKind::SystemdUser,
+            )
+        };
+        write_integration_state(
+            &layout,
+            "syncthing",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "service:syncthing".to_string(),
+                rel_path: rel_path.to_string(),
+            }],
+        )
+        .expect("must seed service projection state");
+
+        let line = service_action_line_for_package(
+            &layout,
+            "syncthing",
+            "syncthing",
+            NativeServiceAction::Restart,
+            |plan, source| {
+                assert_eq!(source, ServiceActionPlanSource::ProjectedActivation);
+                assert_eq!(plan.kind, "service");
+                assert_eq!(plan.integration_key, "service:syncthing");
+                assert_eq!(plan.adapter, expected_adapter);
+                ActivationAdapterOutcome {
+                    reason_code: IntegrationReasonCode::Ok,
+                    applied_state: IntegrationAppliedState::Running,
+                    rollback: Vec::new(),
+                }
+            },
+        )
+        .expect("restart should activate projected service");
 
         assert_eq!(
             line,
@@ -11323,6 +11441,88 @@ old-cc = "<2.0.0"
         let records = read_integration_activation_state(&layout).expect("must read activation state");
         assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
         assert_eq!(records[0].desired_state, IntegrationDesiredState::Running);
+    }
+
+    #[test]
+    fn service_action_journals_adapter_rollback_payload() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("caddy", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        write_declared_services_state(
+            &layout,
+            "caddy",
+            &[ServiceDeclaration {
+                name: "caddy".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must write service declaration");
+        write_integration_activation_state(
+            &layout,
+            &[IntegrationActivationRecord {
+                package_state_key: "default--x86_64-unknown-linux-gnu--core--caddy".to_string(),
+                package: "caddy".to_string(),
+                integration_key: "service:caddy".to_string(),
+                kind: "service".to_string(),
+                adapter: IntegrationAdapterKind::SystemdUser,
+                scope: IntegrationActivationScope::User,
+                desired_state: IntegrationDesiredState::Running,
+                applied_state: IntegrationAppliedState::Running,
+                host_path: Some("systemd-user:caddy.service".to_string()),
+                reason_code: IntegrationReasonCode::Ok,
+            }],
+        )
+        .expect("must seed activation state");
+        let rollback = ActivationRollbackEntry {
+            operation: ActivationRollbackOperation::RemoveCreatedServiceMetadata,
+            path: "systemd-user:caddy.service".to_string(),
+            previous_symlink_target: None,
+            previous_shim_target: None,
+            previous_owner: None,
+            created_symlink_target: None,
+            created_shim_target: None,
+            created_owner: None,
+            expected_current_symlink_target: None,
+            expected_current_shim_target: None,
+            expected_current_owner: None,
+            expected_current_absent: false,
+            created_parent_dirs: Vec::new(),
+        };
+        let mut txid = String::new();
+
+        execute_with_transaction(&layout, "services", None, |tx| {
+            txid = tx.txid.clone();
+            let line = service_action_line_for_package_with_tx(
+                &layout,
+                Some(tx),
+                "caddy",
+                "caddy",
+                NativeServiceAction::Stop,
+                |_, source| {
+                    assert_eq!(source, ServiceActionPlanSource::ExistingActivation);
+                    ActivationAdapterOutcome {
+                        reason_code: IntegrationReasonCode::Ok,
+                        applied_state: IntegrationAppliedState::Stopped,
+                        rollback: vec![rollback.clone()],
+                    }
+                },
+            )?;
+            assert_eq!(
+                line,
+                "service package=caddy name=caddy state=stopped adapter=systemd-user scope=user applied=true reason=ok"
+            );
+            Ok(())
+        })
+        .expect("transactional service action should succeed");
+
+        let journal = std::fs::read_to_string(layout.transaction_journal_path(&txid))
+            .expect("must read service action journal");
+        assert!(journal.contains("integration_activation_rollback"));
+        assert!(journal.contains("RemoveCreatedServiceMetadata"));
     }
 
     #[test]

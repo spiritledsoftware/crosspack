@@ -251,7 +251,7 @@ enum ServiceResolution {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ServiceActionPlanSource {
     ExistingActivation,
-    ProjectedStart,
+    ProjectedActivation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,6 +508,28 @@ fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServ
     let declared = collect_declared_services(layout)?;
     let activation_records = read_integration_activation_state(layout)?;
     let mut rows_by_key = BTreeMap::<(String, String), ManagedServiceRow>::new();
+    for receipt in receipts {
+        for projection in service_projections_for_package(layout, &receipt.name)? {
+            let service = projected_integration_short_name(&projection.key).to_string();
+            let key = (receipt.name.clone(), service.clone());
+            let activation = activation_records
+                .iter()
+                .find(|activation| {
+                    activation.package == receipt.name && activation.integration_key == projection.key
+                })
+                .cloned();
+            rows_by_key.insert(
+                key,
+                ManagedServiceRow {
+                    package: receipt.name.clone(),
+                    name: service,
+                    state: ManagedServiceState::Projected,
+                    activation,
+                },
+            );
+        }
+    }
+
     for (name, record) in declared {
         let integration_key = format!("service:{name}");
         let activation = activation_records
@@ -517,36 +539,17 @@ fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServ
                     && activation.integration_key == integration_key
             })
             .cloned();
-        rows_by_key.insert(
-            (record.package.clone(), name.clone()),
-            ManagedServiceRow {
-                package: record.package,
-                name: name.clone(),
-                state: read_managed_service_state(layout, &name)?,
-                activation,
-            },
-        );
-    }
-
-    for receipt in receipts {
-        for projection in service_projections_for_package(layout, &receipt.name)? {
-            let service = projected_integration_short_name(&projection.key).to_string();
-            let key = (receipt.name.clone(), service.clone());
-            rows_by_key.entry(key).or_insert_with(|| {
-                let activation = activation_records
-                    .iter()
-                    .find(|activation| {
-                        activation.package == receipt.name
-                            && activation.integration_key == projection.key
-                    })
-                    .cloned();
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            rows_by_key.entry((record.package.clone(), name.clone()))
+        {
+            entry.insert(
                 ManagedServiceRow {
-                    package: receipt.name.clone(),
-                    name: service,
-                    state: ManagedServiceState::Projected,
+                    package: record.package,
+                    name: name.clone(),
+                    state: read_managed_service_state(layout, &name)?,
                     activation,
-                }
-            });
+                },
+            );
         }
     }
 
@@ -578,8 +581,8 @@ fn service_status_line_for_package(
     service: &str,
     mut run_status: impl FnMut(&IntegrationActivationPlan) -> ActivationAdapterOutcome,
 ) -> Result<String> {
-    resolve_service_for_package_service(layout, package, service)?;
-    match service_activation_record(layout, package, service)? {
+    let resolution = resolve_service_for_package_service(layout, package, service)?;
+    match service_activation_record_for_resolution(layout, package, service, &resolution)? {
         Some(mut activation) => {
             let plan = activation_plan_from_record(&activation)?;
             let outcome = run_status(&plan);
@@ -627,21 +630,45 @@ fn run_service_action_for_package_command(
 ) -> Result<()> {
     ensure_no_active_transaction_for(layout, "services")?;
     let mut executor = SystemActivationCommandExecutor;
-    let line =
-        service_action_line_for_package(layout, package, service, action, |plan, source| {
-            match source {
+    let mut line = None;
+    execute_with_transaction(layout, "services", None, |tx| {
+        line = Some(service_action_line_for_package_with_tx(
+            layout,
+            Some(tx),
+            package,
+            service,
+            action,
+            |plan, source| match source {
                 ServiceActionPlanSource::ExistingActivation => {
                     run_service_action_plan(&mut executor, plan, action)
                 }
-                ServiceActionPlanSource::ProjectedStart => apply_service_plan(&mut executor, plan),
-            }
-        })?;
+                ServiceActionPlanSource::ProjectedActivation => apply_service_plan(&mut executor, plan),
+            },
+        )?);
+        Ok(())
+    })?;
+    let line = line.ok_or_else(|| anyhow!("service action did not produce output"))?;
     println!("{line}");
     Ok(())
 }
 
+#[cfg(test)]
 fn service_action_line_for_package(
     layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+    action: NativeServiceAction,
+    run_action: impl FnMut(
+        &IntegrationActivationPlan,
+        ServiceActionPlanSource,
+    ) -> ActivationAdapterOutcome,
+) -> Result<String> {
+    service_action_line_for_package_with_tx(layout, None, package, service, action, run_action)
+}
+
+fn service_action_line_for_package_with_tx(
+    layout: &PrefixLayout,
+    tx: Option<&TransactionMetadata>,
     package: &str,
     service: &str,
     action: NativeServiceAction,
@@ -651,13 +678,16 @@ fn service_action_line_for_package(
     ) -> ActivationAdapterOutcome,
 ) -> Result<String> {
     let resolution = resolve_service_for_package_service(layout, package, service)?;
-    let Some(mut activation) = service_activation_record(layout, package, service)? else {
-        if action == NativeServiceAction::Start {
+    let Some(mut activation) =
+        service_activation_record_for_resolution(layout, package, service, &resolution)?
+    else {
+        if matches!(action, NativeServiceAction::Start | NativeServiceAction::Restart) {
             if let ServiceResolution::Projection(projection) = resolution {
                 let host = current_host_activation_context(layout)?;
                 let mut plan = plan_activation_for_projection(&host, package, &projection)?;
                 plan.package_state_key = package_state_key_for_cli(layout, package)?;
-                let outcome = run_action(&plan, ServiceActionPlanSource::ProjectedStart);
+                let outcome = run_action(&plan, ServiceActionPlanSource::ProjectedActivation);
+                journal_activation_rollback_payloads(layout, tx, &outcome.rollback)?;
                 let activation = IntegrationActivationRecord {
                     package_state_key: plan.package_state_key.clone(),
                     package: package.to_string(),
@@ -698,6 +728,7 @@ fn service_action_line_for_package(
     };
     let plan = activation_plan_from_record(&activation)?;
     let outcome = run_action(&plan, ServiceActionPlanSource::ExistingActivation);
+    journal_activation_rollback_payloads(layout, tx, &outcome.rollback)?;
     activation.applied_state = outcome.applied_state;
     activation.reason_code = outcome.reason_code;
     activation.desired_state = match action {
@@ -878,6 +909,31 @@ fn service_activation_record(
         ));
     }
     Ok(matches.into_iter().next())
+}
+
+fn service_activation_record_for_resolution(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+    resolution: &ServiceResolution,
+) -> Result<Option<IntegrationActivationRecord>> {
+    let ServiceResolution::Projection(projection) = resolution else {
+        return service_activation_record(layout, package, service);
+    };
+    let mut matches = read_integration_activation_state(layout)?
+        .into_iter()
+        .filter(|record| record.package == package && record.integration_key == projection.key)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(anyhow!(
+            "ambiguous service activation state: package={package} integration_key={}",
+            projection.key
+        ));
+    }
+    if let Some(record) = matches.pop() {
+        return Ok(Some(record));
+    }
+    service_activation_record(layout, package, service)
 }
 
 fn run_services_command(layout: &PrefixLayout, command: ServicesCommands) -> Result<()> {
@@ -1347,6 +1403,29 @@ fn journal_integration_activation_rollback_payload(
         },
     )
     .map(|_| ())
+}
+
+fn journal_activation_rollback_payloads(
+    layout: &PrefixLayout,
+    tx: Option<&TransactionMetadata>,
+    rollback: &[ActivationRollbackEntry],
+) -> Result<()> {
+    let Some(tx) = tx else {
+        return Ok(());
+    };
+    for (index, rollback) in rollback.iter().enumerate() {
+        append_transaction_journal_entry(
+            layout,
+            &tx.txid,
+            &TransactionJournalEntry {
+                seq: (index + 1) as u64,
+                step: "integration_activation_rollback".to_string(),
+                state: "planned".to_string(),
+                path: Some(serde_json::to_string(rollback)?),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn preview_integration_activation_rollback(
