@@ -2,10 +2,11 @@ use semver::VersionReq;
 
 use super::*;
 
-fn all_archive_types() -> [ArchiveType; 11] {
+fn all_archive_types() -> [ArchiveType; 12] {
     [
         ArchiveType::Zip,
         ArchiveType::TarGz,
+        ArchiveType::TarXz,
         ArchiveType::TarZst,
         ArchiveType::Bin,
         ArchiveType::Msi,
@@ -916,6 +917,7 @@ ripgrep = "*"
 fn archive_type_from_manifest_value() {
     assert_eq!(ArchiveType::parse("zip"), Some(ArchiveType::Zip));
     assert_eq!(ArchiveType::parse("tgz"), Some(ArchiveType::TarGz));
+    assert_eq!(ArchiveType::parse("txz"), Some(ArchiveType::TarXz));
     assert_eq!(ArchiveType::parse("tar.zst"), Some(ArchiveType::TarZst));
     assert_eq!(ArchiveType::parse("bin"), Some(ArchiveType::Bin));
     assert_eq!(ArchiveType::parse("msi"), Some(ArchiveType::Msi));
@@ -963,6 +965,10 @@ fn archive_type_from_url() {
     assert_eq!(
         ArchiveType::infer_from_url("https://example.test/pkg.tzst"),
         Some(ArchiveType::TarZst)
+    );
+    assert_eq!(
+        ArchiveType::infer_from_url("https://example.test/pkg.tar.xz"),
+        Some(ArchiveType::TarXz)
     );
     assert_eq!(
         ArchiveType::infer_from_url("https://example.test/pkg.bin"),

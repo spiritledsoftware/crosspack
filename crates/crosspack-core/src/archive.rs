@@ -2,6 +2,7 @@
 pub enum ArchiveType {
     Zip,
     TarGz,
+    TarXz,
     TarZst,
     Bin,
     Msi,
@@ -18,6 +19,7 @@ impl ArchiveType {
         match self {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
+            Self::TarXz => "tar.xz",
             Self::TarZst => "tar.zst",
             Self::Bin => "bin",
             Self::Msi => "msi",
@@ -34,6 +36,7 @@ impl ArchiveType {
         match self {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
+            Self::TarXz => "tar.xz",
             Self::TarZst => "tar.zst",
             Self::Bin => "bin",
             Self::Msi => "msi",
@@ -50,6 +53,7 @@ impl ArchiveType {
         match input.trim().to_ascii_lowercase().as_str() {
             "zip" => Some(Self::Zip),
             "tar.gz" | "tgz" => Some(Self::TarGz),
+            "tar.xz" | "txz" => Some(Self::TarXz),
             "tar.zst" | "tzst" => Some(Self::TarZst),
             "bin" => Some(Self::Bin),
             "msi" => Some(Self::Msi),
@@ -70,6 +74,9 @@ impl ArchiveType {
         }
         if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
             return Some(Self::TarGz);
+        }
+        if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+            return Some(Self::TarXz);
         }
         if lower.ends_with(".tar.zst") || lower.ends_with(".tzst") {
             return Some(Self::TarZst);

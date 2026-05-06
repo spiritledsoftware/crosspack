@@ -5001,6 +5001,7 @@ ripgrep-legacy = "*"
         for archive_type in [
             ArchiveType::Zip,
             ArchiveType::TarGz,
+            ArchiveType::TarXz,
             ArchiveType::TarZst,
             ArchiveType::Bin,
             ArchiveType::Dmg,

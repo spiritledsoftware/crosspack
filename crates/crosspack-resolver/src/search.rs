@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use crosspack_core::PackageManifest;
 use semver::VersionReq;
 
-use crate::constraints::selected_satisfies_constraints;
+use crate::constraints::{req_matches_manifest_version, selected_satisfies_constraints};
 
 pub(crate) fn search<F>(
     constraints: &mut BTreeMap<String, Vec<VersionReq>>,
@@ -108,11 +108,11 @@ where
         .filter(|manifest| {
             package_reqs
                 .iter()
-                .all(|req| req.matches(&manifest.version))
+                .all(|req| req_matches_manifest_version(req, manifest))
         })
         .filter(|manifest| {
             pin_req
-                .map(|pin| pin.matches(&manifest.version))
+                .map(|pin| req_matches_manifest_version(pin, manifest))
                 .unwrap_or(true)
         })
         .cloned()

@@ -59,7 +59,7 @@ impl Artifact {
         if let Some(archive) = &self.archive {
             return ArchiveType::parse(archive).ok_or_else(|| {
                 anyhow!(
-                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.zst, bin, msi, dmg, appimage, exe, pkg, msix, appx",
+                    "unsupported archive type '{archive}' for target '{}'; supported: zip, tar.gz, tar.xz, tar.zst, bin, msi, dmg, appimage, exe, pkg, msix, appx",
                     self.target
                 )
             });

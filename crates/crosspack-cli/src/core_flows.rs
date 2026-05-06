@@ -1094,7 +1094,7 @@ fn validate_source_build_plan(
     })?;
     if !matches!(
         archive_type,
-        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarZst
+        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarXz | ArchiveType::TarZst
     ) {
         return Err(anyhow!(
             "invalid source_build metadata for {} {} on target {}: archive type '{}' is not supported for source builds",
