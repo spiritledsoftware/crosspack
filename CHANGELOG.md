@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/spiritledsoftware/crosspack/compare/v0.15.2...v0.16.0) (2026-05-06)
+
+
+### Features
+
+* add typed manpage integrations ([#135](https://github.com/spiritledsoftware/crosspack/issues/135)) ([16a795d](https://github.com/spiritledsoftware/crosspack/commit/16a795d83a0f1afb362b5c0220b041dace338a23))
+
+
+### Continuous Integration
+
+* optimize GitHub workflows ([#134](https://github.com/spiritledsoftware/crosspack/issues/134)) ([e69a689](https://github.com/spiritledsoftware/crosspack/commit/e69a689eb0b576d58179f843bdc0dddaafebdfc9))
+
 ## [0.15.2](https://github.com/spiritledsoftware/crosspack/compare/v0.15.1...v0.15.2) (2026-05-06)
 
 
