@@ -8,6 +8,9 @@ fn write_completions_script<W: Write>(
     let mut generated = Vec::new();
     clap_complete::generate(generator, &mut command, "crosspack", &mut generated);
     clap_complete::generate(generator, &mut command, "cpk", &mut generated);
+    if shell == CliCompletionShell::Powershell {
+        generated = normalize_powershell_completion_script(&generated)?;
+    }
 
     if shell == CliCompletionShell::Zsh {
         writer
@@ -32,6 +35,33 @@ fn write_completions_script<W: Write>(
     }
 
     Ok(())
+}
+
+fn normalize_powershell_completion_script(generated: &[u8]) -> Result<Vec<u8>> {
+    let rendered = std::str::from_utf8(generated)
+        .with_context(|| "generated PowerShell completion script was not utf-8")?;
+    let normalized = rendered
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("using namespace "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(
+            "[CompletionResult]::",
+            "[System.Management.Automation.CompletionResult]::",
+        )
+        .replace(
+            "[CompletionResultType]::",
+            "[System.Management.Automation.CompletionResultType]::",
+        )
+        .replace(
+            "[StringConstantExpressionAst]",
+            "[System.Management.Automation.Language.StringConstantExpressionAst]",
+        )
+        .replace(
+            "[StringConstantType]::",
+            "[System.Management.Automation.Language.StringConstantType]::",
+        );
+    Ok(normalized.into_bytes())
 }
 
 fn crosspack_completion_script_path(layout: &PrefixLayout, shell: CliCompletionShell) -> PathBuf {
