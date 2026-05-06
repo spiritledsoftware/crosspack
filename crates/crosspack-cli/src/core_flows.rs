@@ -1810,7 +1810,7 @@ fn sync_integration_projection_state(
     let desired_projections = integrations
         .iter()
         .map(|integration| {
-            projected_integrations(package_name, integration).map(|projections| {
+            projected_integrations_for_install_root(package_name, install_root, integration, host_platform).map(|projections| {
                 projections
                     .into_iter()
                     .filter(|projection| {

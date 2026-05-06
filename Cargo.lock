@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-cli"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-core"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "semver",
@@ -312,17 +312,18 @@ dependencies = [
 
 [[package]]
 name = "crosspack-installer"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "crosspack-core",
+ "globset",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "crosspack-registry"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -336,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-resolver"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "crosspack-core",
@@ -345,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "crosspack-security"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -629,6 +630,19 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

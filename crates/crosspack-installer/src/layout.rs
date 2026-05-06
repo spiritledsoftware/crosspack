@@ -60,6 +60,10 @@ impl PrefixLayout {
         self.shell_init_dir().join(shell.as_str())
     }
 
+    pub fn man_dir(&self) -> PathBuf {
+        self.share_dir().join("man")
+    }
+
     pub fn gui_dir(&self) -> PathBuf {
         self.share_dir().join("gui")
     }
@@ -256,6 +260,7 @@ impl PrefixLayout {
             self.completions_dir(),
             self.package_completions_dir(),
             self.shell_init_dir(),
+            self.man_dir(),
             self.gui_dir(),
             self.gui_launchers_dir(),
             self.gui_handlers_dir(),

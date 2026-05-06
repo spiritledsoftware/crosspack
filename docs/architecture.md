@@ -84,7 +84,7 @@ Default user prefixes:
 - `depends <name>`, `uses <name>`, and `why <name>` provide deterministic dependency introspection from installed receipts.
 - `bundle export` writes deterministic root+pin environment bundles; `bundle apply` replays bundle roots through standard resolve/install flows.
 - `services list|status|start|stop|restart` resolves service names from manifest-declared service state persisted under `<prefix>/state/installed/<name>.services` and tracks deterministic state files under `<prefix>/state/services/`.
-- `integrations list|status|enable|disable` resolves typed Docker CLI plugin, PATH plugin, and service integration projections from installed package state. Docker CLI and PATH plugin install only project payloads under the prefix; host activation is explicit and persisted in `<prefix>/state/installed/integrations.activation`.
+- `integrations list|status|enable|disable` resolves typed Docker CLI plugin, PATH plugin, man page, and service integration projections from installed package state. Docker CLI and PATH plugin install only project payloads under the prefix; host activation is explicit and persisted in `<prefix>/state/installed/integrations.activation`. Man page integrations project files under `<prefix>/share/man/` and are exposed by `init-shell` through `MANPATH` on Unix shells.
 - Service integrations are explicit-only in shipped install behavior. `enable = true` in metadata fails closed before host mutation and does not persist activation state.
 - Service actions integrate host-native adapters (`systemd` on Linux, `launchctl` on macOS, `sc` on Windows) with deterministic reason-coded fallback (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) when native actions are unavailable or fail.
 - `upgrade` upgrades one package (`upgrade <name[@constraint]>`) or all installed root packages (`upgrade`) while honoring pins.
@@ -119,7 +119,7 @@ Default user prefixes:
 - `uninstall <name>` accepts `--target`, `--profile`, and `--source` selectors, plus compact `name@target#profile` syntax, to target one installed identity.
 - `list` reads hydrated installed package state from `<prefix>/state/installed/` and prints the same `name version` rows by default; `list --identity` exposes target/profile/source fields for automation.
 - `completions <bash|zsh|fish|powershell>` prints shell completion scripts for the canonical `crosspack` binary name and includes a loader block for package-declared completions.
-- `init-shell [--shell <bash|zsh|fish|powershell>]` prints shell setup snippets for PATH + completion loading; without `--shell`, shell is auto-detected (with deterministic fallback).
+- `init-shell [--shell <bash|zsh|fish|powershell>]` prints shell setup snippets for PATH, Unix MANPATH, completion loading, and package shell-init snippets; without `--shell`, shell is auto-detected (with deterministic fallback).
 - Install scripts attempt best-effort shell setup by generating completion files under `<prefix>/share/completions/` and upserting one managed profile block; failures warn and do not abort install.
 
 ## Scope Statement

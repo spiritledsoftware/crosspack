@@ -6930,6 +6930,28 @@ requirement = "^14"
     }
 
     #[test]
+    fn init_shell_snippet_exposes_manpath_for_unix_shells_only() {
+        let layout = PrefixLayout::new(build_test_layout_path(current_unix_nanos()).join("with spaces"));
+        layout.ensure_base_dirs().expect("must create dirs");
+
+        for shell in [
+            CliCompletionShell::Bash,
+            CliCompletionShell::Zsh,
+            CliCompletionShell::Fish,
+        ] {
+            let rendered = init_shell_snippet(&layout, shell);
+            let man_marker = layout.man_dir().display().to_string();
+            assert!(rendered.contains(&man_marker));
+            assert!(rendered.contains("MANPATH"));
+        }
+
+        let powershell = init_shell_snippet(&layout, CliCompletionShell::Powershell);
+        assert!(!powershell.contains("MANPATH"));
+
+        let _ = std::fs::remove_dir_all(layout.prefix());
+    }
+
+    #[test]
     fn generate_completions_outputs_non_empty_script_for_each_shell() {
         let shells = [
             CliCompletionShell::Bash,
@@ -10817,6 +10839,61 @@ old-cc = "<2.0.0"
 
         assert!(line.contains("state=enabled adapter=path-plugin-bin reason=ok"));
         assert!(line.contains("path=/prefix/bin/kubectl-ctx"));
+    }
+
+    #[test]
+    fn integration_list_reports_man_page_projection_and_enable_is_unsupported() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &InstallReceipt {
+                name: "delta".to_string(),
+                version: "0.18.2".to_string(),
+                dependencies: Vec::new(),
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                artifact_url: None,
+                artifact_sha256: None,
+                cache_path: None,
+                exposed_bins: Vec::new(),
+                exposed_completions: Vec::new(),
+                snapshot_id: None,
+                install_mode: InstallMode::Managed,
+                install_reason: InstallReason::Root,
+                install_status: "installed".to_string(),
+                installed_at_unix: 1,
+            },
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "delta",
+            &[IntegrationProjection {
+                kind: "man_page".to_string(),
+                key: "man_page:1:delta".to_string(),
+                rel_path: "man/man1/delta.1".to_string(),
+            }],
+        )
+        .expect("must seed integration state");
+
+        let rows = collect_projected_integration_rows(&layout).expect("must collect integrations");
+        assert_eq!(
+            format_projected_integration_lines(&rows),
+            vec!["integration package=delta name=delta key=man_page:1:delta kind=man_page state=projected adapter=none reason=not-enabled path=man/man1/delta.1"],
+        );
+
+        let err = run_integration_activation_command(&layout, "delta", "delta", true)
+            .expect_err("man page activation should be unsupported");
+        assert!(
+            err.to_string()
+                .contains("integration activation is not supported for kind 'man_page'")
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty(),
+            "unsupported man page activation must not persist activation state"
+        );
     }
 
     #[test]

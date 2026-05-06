@@ -41,14 +41,14 @@ pub use exposure::{
     expose_binary, expose_completion, expose_gui_app, expose_integration, expose_integrations,
     expose_integrations_for_host_platform, expose_shell_init, exposed_completion_path,
     gui_asset_path, projected_exposed_completion_path, projected_gui_assets, projected_integration,
-    projected_integrations, projected_shell_init, read_all_gui_exposure_states,
-    read_all_integration_states, read_all_shell_init_states, read_gui_exposure_state,
-    read_identity_integration_state, read_identity_shell_init_state, read_integration_state,
-    read_shell_init_state, remove_exposed_binary, remove_exposed_completion,
-    remove_exposed_gui_asset, remove_exposed_integration, remove_exposed_shell_init,
-    service_projection_matches_host, write_gui_exposure_state, write_identity_gui_exposure_state,
-    write_identity_integration_state, write_identity_shell_init_state, write_integration_state,
-    write_shell_init_state,
+    projected_integrations, projected_integrations_for_install_root, projected_shell_init,
+    read_all_gui_exposure_states, read_all_integration_states, read_all_shell_init_states,
+    read_gui_exposure_state, read_identity_integration_state, read_identity_shell_init_state,
+    read_integration_state, read_shell_init_state, remove_exposed_binary,
+    remove_exposed_completion, remove_exposed_gui_asset, remove_exposed_integration,
+    remove_exposed_shell_init, service_projection_matches_host, write_gui_exposure_state,
+    write_identity_gui_exposure_state, write_identity_integration_state,
+    write_identity_shell_init_state, write_integration_state, write_shell_init_state,
 };
 pub use fs_utils::remove_file_if_exists;
 pub use identity::{InstalledPackageIdentity, InstalledPackageSelector};

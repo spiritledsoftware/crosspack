@@ -57,7 +57,7 @@
 19. Register native GUI integrations as best-effort adapters; failures emit warning lines and do not fail successful install.
     - macOS `.app` registration uses bundle-copy deployment and tries `/Applications/<App>.app` before `~/Applications/<App>.app`.
     - Existing unmanaged app bundles at either macOS destination are not overwritten; registration emits warnings and continues.
-20. Project typed Docker CLI, PATH plugin, and service integration payloads under `<prefix>/integrations/`.
+20. Project typed Docker CLI, PATH plugin, man page, and service integration payloads under the Crosspack prefix.
 21. Reject service `enable = true` before host mutation; Docker CLI, PATH plugin, and service host activation remain explicit.
 22. Remove stale previously-owned binaries, completion files, GUI assets, native GUI registrations, and integration projections no longer declared for that package.
 23. Persist declared manifest services to identity-keyed service state for service-command lookup.
@@ -159,7 +159,7 @@ Current behavior includes provider capability selection (`provides`), conflict g
 - `state/installed/<name>.gui` sidecar (optional): GUI asset ownership keys and storage paths for uninstall/upgrade cleanup.
 - `state/installed/<name>.gui-native` sidecar (optional): native uninstall action records (`key`, `kind`, `path`) for deterministic uninstall/rollback cleanup.
 - `state/installed/<name>.services` sidecar (optional): declared service records (`name`, optional `native_id`) for deterministic service command routing.
-- `state/installed/<name>.integrations` sidecar (optional): declared Docker CLI, PATH plugin, and service projection records for deterministic status, activation, and cleanup.
+- `state/installed/<name>.integrations` sidecar (optional): declared Docker CLI, PATH plugin, man page, and service projection records for deterministic status, activation, and cleanup.
 - `state/installed/integrations.activation` state file (optional): versioned activation records with package identity, integration key, adapter, desired/applied state, host path, and reason code.
 - `identity_profile`, `identity_target`, `identity_source_namespace`, `identity_source_provenance`, and `identity_package` (identity-keyed receipts)
 - `state/installed/default--<target-or-host>--default--<name>.state.json` document (optional current format): versioned hydrated package state including identity, receipt, GUI/native/service/integration projections; legacy `<name>.state.json` and previous three-part identity-key documents remain readable.
@@ -183,7 +183,7 @@ Current behavior includes provider capability selection (`provides`), conflict g
 - GUI asset collision: install fails if a projected GUI ownership key is already owned by another package or a projected GUI asset path already exists unmanaged.
 - Native GUI registration failures (including macOS destination prepare/write failures and unmanaged overwrite protection): install/upgrade/uninstall emit warnings and continue when package payload install/removal succeeded.
 - Service install-time activation for `enable = true` is not shipped; manifests that request it fail closed before host mutation and do not persist activation state.
-- Explicit `crosspack integrations enable|disable` records success/failure in the activation state file and never treats Docker CLI or PATH plugin projection alone as host activation.
+- Explicit `crosspack integrations enable|disable` records success/failure in the activation state file and never treats Docker CLI or PATH plugin projection alone as host activation. Man page projections are exposed through `init-shell` MANPATH snippets instead of activation records.
 - Native service adapter failures for `services status|start|stop|restart`: commands return deterministic fallback reason codes (`unsupported-host`, `adapter-tool-missing`, `native-command-failed`) while preserving deterministic plain output shape.
 - Global solve downgrade requirement during `upgrade`: operation fails with an explicit downgrade message and command hint.
 - Completion asset refresh failure: install/upgrade/uninstall warns but does not fail.
@@ -223,11 +223,11 @@ Current behavior includes provider capability selection (`provides`), conflict g
 
 - `crosspack completions <bash|zsh|fish|powershell>` prints completion scripts to stdout.
 - Completion generation targets the canonical `crosspack` command name and appends package completion loader logic for `<prefix>/share/completions/packages/<shell>/`.
-- `crosspack init-shell [--shell <bash|zsh|fish|powershell>]` prints PATH + completion setup snippet; when `--shell` is omitted it auto-detects from `$SHELL` (Unix) and falls back to `bash` on Unix / `powershell` on Windows.
+- `crosspack init-shell [--shell <bash|zsh|fish|powershell>]` prints PATH + Unix MANPATH + completion setup snippet; when `--shell` is omitted it auto-detects from `$SHELL` (Unix) and falls back to `bash` on Unix / `powershell` on Windows.
 - Unix installer (`scripts/install.sh`) auto-detects shell from `$SHELL` (`bash`, `zsh`, or `fish`) and, by default:
   - writes completion scripts to `<prefix>/share/completions/crosspack.<shell>`,
   - creates or updates a single managed profile block in `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`,
-  - evaluates `crosspack init-shell --shell <shell>` so PATH, completions, and package shell-init snippets stay in sync.
+  - evaluates `crosspack init-shell --shell <shell>` so PATH, MANPATH, completions, and package shell-init snippets stay in sync.
 - Windows installer (`scripts/install.ps1`) writes PowerShell completion script to `<prefix>\share\completions\crosspack.ps1` and updates `$PROFILE.CurrentUserCurrentHost` with one managed block for PATH + completion sourcing.
 - Installers resolve the default `core` fingerprint at runtime by downloading `registry.pub` from `https://github.com/spiritledsoftware/crosspack-registry` and hashing it (SHA-256).
 - Installers fail closed on fetch/hash/validation errors.
