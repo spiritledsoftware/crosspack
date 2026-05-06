@@ -204,6 +204,7 @@ fn find_dependency_path_from_roots(
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ManagedServiceState {
+    Projected,
     Stopped,
     Running,
 }
@@ -211,6 +212,7 @@ enum ManagedServiceState {
 impl ManagedServiceState {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Projected => "projected",
             Self::Stopped => "stopped",
             Self::Running => "running",
         }
@@ -238,6 +240,18 @@ struct DeclaredServiceRecord {
     package_state_key: String,
     package: String,
     service: ServiceDeclaration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServiceResolution {
+    Projection(IntegrationProjection),
+    Declaration,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ServiceActionPlanSource {
+    ExistingActivation,
+    ProjectedStart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +320,82 @@ fn declared_service_for_package_service(
         package: package.to_string(),
         service: declared,
     })
+}
+
+fn resolve_service_for_package_service(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<ServiceResolution> {
+    validate_service_name(service)?;
+    ensure_installed_name_unambiguous(layout, package)?;
+    if let Some(projection) = service_projection_for_package_service(layout, package, service)? {
+        return Ok(ServiceResolution::Projection(projection));
+    }
+    declared_service_for_package_service(layout, package, service).map(|_| ServiceResolution::Declaration)
+}
+
+fn service_projection_for_package_service(
+    layout: &PrefixLayout,
+    package: &str,
+    service: &str,
+) -> Result<Option<IntegrationProjection>> {
+    let service_key = format!("service:{service}");
+    let mut matches = read_integration_state(layout, package)?
+        .into_iter()
+        .filter(|projection| {
+            projection.kind == "service"
+                && (projection.key == service_key
+                    || projected_integration_short_name(&projection.key) == service)
+        })
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() > 1 {
+        let first_key = matches[0].key.clone();
+        if matches.iter().all(|projection| projection.key == first_key) {
+            return Ok(select_host_service_projection(
+                &mut matches,
+                current_host_platform(),
+            ));
+        }
+        return Err(anyhow!(
+            "ambiguous service projection: package={package} service={service}; use full service key"
+        ));
+    }
+
+    Ok(matches.pop())
+}
+
+fn service_projections_for_package(
+    layout: &PrefixLayout,
+    package: &str,
+) -> Result<Vec<IntegrationProjection>> {
+    let mut grouped = BTreeMap::<String, Vec<IntegrationProjection>>::new();
+    for projection in read_integration_state(layout, package)? {
+        if projection.kind == "service" {
+            grouped
+                .entry(projection.key.clone())
+                .or_default()
+                .push(projection);
+        }
+    }
+
+    let mut projections = grouped
+        .into_values()
+        .filter_map(|mut candidates| {
+            select_host_service_projection(&mut candidates, current_host_platform())
+        })
+        .collect::<Vec<_>>();
+    projections.sort_by(|left, right| {
+        projected_integration_short_name(&left.key)
+            .cmp(projected_integration_short_name(&right.key))
+            .then_with(|| left.key.cmp(&right.key))
+            .then_with(|| left.rel_path.cmp(&right.rel_path))
+    });
+    Ok(projections)
 }
 
 fn collect_declared_services(
@@ -414,9 +504,10 @@ fn write_managed_service_state(
 }
 
 fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServiceRow>> {
+    let receipts = read_install_receipts(layout)?;
     let declared = collect_declared_services(layout)?;
     let activation_records = read_integration_activation_state(layout)?;
-    let mut rows = Vec::new();
+    let mut rows_by_key = BTreeMap::<(String, String), ManagedServiceRow>::new();
     for (name, record) in declared {
         let integration_key = format!("service:{name}");
         let activation = activation_records
@@ -426,14 +517,40 @@ fn collect_managed_service_rows(layout: &PrefixLayout) -> Result<Vec<ManagedServ
                     && activation.integration_key == integration_key
             })
             .cloned();
-        rows.push(ManagedServiceRow {
-            package: record.package,
-            name: name.clone(),
-            state: read_managed_service_state(layout, &name)?,
-            activation,
-        });
+        rows_by_key.insert(
+            (record.package.clone(), name.clone()),
+            ManagedServiceRow {
+                package: record.package,
+                name: name.clone(),
+                state: read_managed_service_state(layout, &name)?,
+                activation,
+            },
+        );
     }
 
+    for receipt in receipts {
+        for projection in service_projections_for_package(layout, &receipt.name)? {
+            let service = projected_integration_short_name(&projection.key).to_string();
+            let key = (receipt.name.clone(), service.clone());
+            rows_by_key.entry(key).or_insert_with(|| {
+                let activation = activation_records
+                    .iter()
+                    .find(|activation| {
+                        activation.package == receipt.name
+                            && activation.integration_key == projection.key
+                    })
+                    .cloned();
+                ManagedServiceRow {
+                    package: receipt.name.clone(),
+                    name: service,
+                    state: ManagedServiceState::Projected,
+                    activation,
+                }
+            });
+        }
+    }
+
+    let mut rows = rows_by_key.into_values().collect::<Vec<_>>();
     rows.sort_by(|left, right| {
         left.package
             .cmp(&right.package)
@@ -461,7 +578,7 @@ fn service_status_line_for_package(
     service: &str,
     mut run_status: impl FnMut(&IntegrationActivationPlan) -> ActivationAdapterOutcome,
 ) -> Result<String> {
-    declared_service_for_package_service(layout, package, service)?;
+    resolve_service_for_package_service(layout, package, service)?;
     match service_activation_record(layout, package, service)? {
         Some(mut activation) => {
             let plan = activation_plan_from_record(&activation)?;
@@ -510,9 +627,15 @@ fn run_service_action_for_package_command(
 ) -> Result<()> {
     ensure_no_active_transaction_for(layout, "services")?;
     let mut executor = SystemActivationCommandExecutor;
-    let line = service_action_line_for_package(layout, package, service, action, |plan| {
-        run_service_action_plan(&mut executor, plan, action)
-    })?;
+    let line =
+        service_action_line_for_package(layout, package, service, action, |plan, source| {
+            match source {
+                ServiceActionPlanSource::ExistingActivation => {
+                    run_service_action_plan(&mut executor, plan, action)
+                }
+                ServiceActionPlanSource::ProjectedStart => apply_service_plan(&mut executor, plan),
+            }
+        })?;
     println!("{line}");
     Ok(())
 }
@@ -522,10 +645,43 @@ fn service_action_line_for_package(
     package: &str,
     service: &str,
     action: NativeServiceAction,
-    mut run_action: impl FnMut(&IntegrationActivationPlan) -> ActivationAdapterOutcome,
+    mut run_action: impl FnMut(
+        &IntegrationActivationPlan,
+        ServiceActionPlanSource,
+    ) -> ActivationAdapterOutcome,
 ) -> Result<String> {
-    declared_service_for_package_service(layout, package, service)?;
+    let resolution = resolve_service_for_package_service(layout, package, service)?;
     let Some(mut activation) = service_activation_record(layout, package, service)? else {
+        if action == NativeServiceAction::Start {
+            if let ServiceResolution::Projection(projection) = resolution {
+                let host = current_host_activation_context(layout)?;
+                let mut plan = plan_activation_for_projection(&host, package, &projection)?;
+                plan.package_state_key = package_state_key_for_cli(layout, package)?;
+                let outcome = run_action(&plan, ServiceActionPlanSource::ProjectedStart);
+                let activation = IntegrationActivationRecord {
+                    package_state_key: plan.package_state_key.clone(),
+                    package: package.to_string(),
+                    integration_key: projection.key,
+                    kind: projection.kind,
+                    adapter: plan.adapter,
+                    scope: plan.scope,
+                    desired_state: IntegrationDesiredState::Running,
+                    applied_state: outcome.applied_state,
+                    host_path: Some(plan.host_path),
+                    reason_code: outcome.reason_code,
+                };
+                upsert_activation_record(layout, activation.clone())?;
+                return Ok(format_service_activation_line(
+                    package,
+                    service,
+                    &activation,
+                    service_activation_applied(&activation),
+                ));
+            }
+        }
+        if let ServiceResolution::Projection(_) = resolution {
+            return Ok(format_projected_service_line(package, service));
+        }
         let activation = IntegrationActivationRecord {
             package_state_key: package.to_string(),
             package: package.to_string(),
@@ -541,7 +697,7 @@ fn service_action_line_for_package(
         return Ok(format_service_activation_line(package, service, &activation, false));
     };
     let plan = activation_plan_from_record(&activation)?;
-    let outcome = run_action(&plan);
+    let outcome = run_action(&plan, ServiceActionPlanSource::ExistingActivation);
     activation.applied_state = outcome.applied_state;
     activation.reason_code = outcome.reason_code;
     activation.desired_state = match action {
@@ -1719,7 +1875,7 @@ fn collect_cache_files_recursive(
 }
 
 fn should_render_progress(total_steps: u64) -> bool {
-    total_steps > 0
+    total_steps > 1
 }
 
 fn set_progress(progress: &mut Option<TerminalProgress>, current: u64) {
@@ -3857,42 +4013,16 @@ fn run_self_update_command(
     ensure_no_active_transaction_for(layout, "self-update")?;
 
     renderer.print_section("Self-update");
-    let total_steps = if registry_root.is_none() { 2 } else { 1 };
-    let mut completed_steps = 0_u64;
-
     if registry_root.is_none() {
         renderer.print_status("step", "self-update: refreshing source snapshots");
         let source_state_root = registry_state_root(layout);
         let store = RegistrySourceStore::new(&source_state_root);
         run_update_command(&store, &[])?;
-        completed_steps = 1;
     }
-
-    let mut progress = should_render_progress(total_steps)
-        .then(|| renderer.start_progress("self-update", total_steps));
-    set_progress(&mut progress, completed_steps);
 
     let args = build_self_update_install_args(registry_root, dry_run, force_redownload, escalation);
-    print_status_with_progress(
-        renderer,
-        progress.as_ref(),
-        "step",
-        "self-update: installing latest crosspack",
-    );
-    let result = run_current_exe_command(&args, "self-update install");
-    match result {
-        Ok(()) => {
-            set_progress(&mut progress, total_steps);
-            finish_progress(progress);
-            Ok(())
-        }
-        Err(err) => {
-            if let Some(active_progress) = progress {
-                active_progress.finish_abandon();
-            }
-            Err(err)
-        }
-    }
+    renderer.print_status("step", "self-update: installing latest crosspack");
+    run_current_exe_command(&args, "self-update install")
 }
 
 fn build_self_update_install_args(

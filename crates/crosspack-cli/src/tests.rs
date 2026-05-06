@@ -9704,7 +9704,8 @@ old-cc = "<2.0.0"
     #[test]
     fn update_output_progress_guard_skips_zero_work_totals() {
         assert!(!should_render_progress(0));
-        assert!(should_render_progress(1));
+        assert!(!should_render_progress(1));
+        assert!(should_render_progress(2));
     }
 
     #[test]
@@ -9722,7 +9723,25 @@ old-cc = "<2.0.0"
     }
 
     #[test]
-    fn plan_update_output_enables_progress_for_non_empty_report() {
+    fn plan_update_output_disables_progress_for_single_source_report() {
+        let report = UpdateReport {
+            lines: vec!["core: up-to-date".to_string()],
+            updated: 0,
+            up_to_date: 1,
+            failed: 0,
+        };
+
+        let plan = plan_update_output(&report, OutputStyle::Plain);
+
+        assert!(!plan.render_progress);
+        assert_eq!(
+            plan.summary_line,
+            "update summary: updated=0 up-to-date=1 failed=0"
+        );
+    }
+
+    #[test]
+    fn plan_update_output_enables_progress_for_multi_source_report() {
         let report = sample_update_report();
 
         let plan = plan_update_output(&report, OutputStyle::Plain);
@@ -10988,6 +11007,182 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    fn services_status_resolves_projected_service_without_declared_sidecar() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("syncthing", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "syncthing",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "service:syncthing".to_string(),
+                rel_path: "services/syncthing/syncthing.service".to_string(),
+            }],
+        )
+        .expect("must seed service projection state");
+
+        let line = service_status_line_for_package_from_state(&layout, "syncthing", "syncthing")
+            .expect("status should resolve service projection");
+
+        assert_eq!(
+            line,
+            "service package=syncthing name=syncthing state=projected adapter=none scope=user applied=false reason=not-enabled"
+        );
+    }
+
+    #[test]
+    fn services_list_includes_projected_services_without_duplicating_legacy_services() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        for name in ["caddy", "syncthing"] {
+            write_install_receipt(
+                &layout,
+                &install_receipt(name, "1.0.0", InstallReason::Root, &[]),
+            )
+            .expect("must write receipt");
+        }
+        write_declared_services_state(
+            &layout,
+            "caddy",
+            &[ServiceDeclaration {
+                name: "caddy".to_string(),
+                native_id: None,
+            }],
+        )
+        .expect("must seed legacy service declaration");
+        write_integration_state(
+            &layout,
+            "caddy",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "service:caddy".to_string(),
+                rel_path: "services/caddy/caddy.service".to_string(),
+            }],
+        )
+        .expect("must seed duplicate service projection");
+        write_integration_state(
+            &layout,
+            "syncthing",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "service:syncthing".to_string(),
+                rel_path: "services/syncthing/syncthing.service".to_string(),
+            }],
+        )
+        .expect("must seed projection-only service");
+
+        let rows = collect_managed_service_rows(&layout).expect("must collect services");
+        let rendered = rows
+            .iter()
+            .map(format_managed_service_row)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "service package=caddy name=caddy state=stopped adapter=none scope=user applied=false reason=not-enabled",
+                "service package=syncthing name=syncthing state=projected adapter=none scope=user applied=false reason=not-enabled",
+            ]
+        );
+    }
+
+    #[test]
+    fn services_start_projected_service_persists_running_activation() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("syncthing", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "syncthing",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "service:syncthing".to_string(),
+                rel_path: "services/syncthing/syncthing.service".to_string(),
+            }],
+        )
+        .expect("must seed service projection state");
+
+        let line = service_action_line_for_package(
+            &layout,
+            "syncthing",
+            "syncthing",
+            NativeServiceAction::Start,
+            |plan, source| {
+                assert_eq!(source, ServiceActionPlanSource::ProjectedStart);
+                assert_eq!(plan.kind, "service");
+                assert_eq!(plan.integration_key, "service:syncthing");
+                assert_eq!(plan.adapter, IntegrationAdapterKind::SystemdUser);
+                ActivationAdapterOutcome {
+                    reason_code: IntegrationReasonCode::Ok,
+                    applied_state: IntegrationAppliedState::Running,
+                    rollback: Vec::new(),
+                }
+            },
+        )
+        .expect("start should activate projected service");
+
+        assert_eq!(
+            line,
+            "service package=syncthing name=syncthing state=running adapter=systemd-user scope=user applied=true reason=ok"
+        );
+        let records = read_integration_activation_state(&layout).expect("must read activation state");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].integration_key, "service:syncthing");
+        assert_eq!(records[0].desired_state, IntegrationDesiredState::Running);
+        assert_eq!(records[0].applied_state, IntegrationAppliedState::Running);
+    }
+
+    #[test]
+    fn services_stop_projected_service_without_activation_does_not_persist_state() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        write_install_receipt(
+            &layout,
+            &install_receipt("syncthing", "1.0.0", InstallReason::Root, &[]),
+        )
+        .expect("must write receipt");
+        write_integration_state(
+            &layout,
+            "syncthing",
+            &[IntegrationProjection {
+                kind: "service".to_string(),
+                key: "service:syncthing".to_string(),
+                rel_path: "services/syncthing/syncthing.service".to_string(),
+            }],
+        )
+        .expect("must seed service projection state");
+
+        let line = service_action_line_for_package(
+            &layout,
+            "syncthing",
+            "syncthing",
+            NativeServiceAction::Stop,
+            |_, _| panic!("stop without activation should not call adapter"),
+        )
+        .expect("stop should render projected service state");
+
+        assert_eq!(
+            line,
+            "service package=syncthing name=syncthing state=projected adapter=none scope=user applied=false reason=not-enabled"
+        );
+        assert!(
+            read_integration_activation_state(&layout)
+                .expect("must read activation state")
+                .is_empty(),
+            "stop of projected service must not create activation state"
+        );
+    }
+
+    #[test]
     fn service_start_without_activation_record_reports_non_ok_and_does_not_noop() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -11026,7 +11221,7 @@ old-cc = "<2.0.0"
             "caddy",
             "caddy",
             NativeServiceAction::Start,
-            |_| ActivationAdapterOutcome {
+            |_, _| ActivationAdapterOutcome {
                 reason_code: IntegrationReasonCode::StateMissing,
                 applied_state: IntegrationAppliedState::Unsupported,
                 rollback: Vec::new(),
@@ -11095,10 +11290,13 @@ old-cc = "<2.0.0"
             "caddy",
             "caddy",
             NativeServiceAction::Start,
-            |_| ActivationAdapterOutcome {
+            |_, source| {
+                assert_eq!(source, ServiceActionPlanSource::ExistingActivation);
+                ActivationAdapterOutcome {
                 reason_code: IntegrationReasonCode::Ok,
                 applied_state: IntegrationAppliedState::Running,
                 rollback: Vec::new(),
+                }
             },
         )
         .expect("service start should render updated line");
