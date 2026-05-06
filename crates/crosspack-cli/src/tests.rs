@@ -11092,6 +11092,7 @@ old-cc = "<2.0.0"
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn services_start_projected_service_persists_running_activation() {
         let layout = test_layout();
         layout.ensure_base_dirs().expect("must create dirs");
@@ -11100,13 +11101,24 @@ old-cc = "<2.0.0"
             &install_receipt("syncthing", "1.0.0", InstallReason::Root, &[]),
         )
         .expect("must write receipt");
+        let (rel_path, expected_adapter) = if cfg!(target_os = "macos") {
+            (
+                "services/syncthing/syncthing.launchd.plist",
+                IntegrationAdapterKind::LaunchdUser,
+            )
+        } else {
+            (
+                "services/syncthing/syncthing.service",
+                IntegrationAdapterKind::SystemdUser,
+            )
+        };
         write_integration_state(
             &layout,
             "syncthing",
             &[IntegrationProjection {
                 kind: "service".to_string(),
                 key: "service:syncthing".to_string(),
-                rel_path: "services/syncthing/syncthing.service".to_string(),
+                rel_path: rel_path.to_string(),
             }],
         )
         .expect("must seed service projection state");
@@ -11120,7 +11132,7 @@ old-cc = "<2.0.0"
                 assert_eq!(source, ServiceActionPlanSource::ProjectedStart);
                 assert_eq!(plan.kind, "service");
                 assert_eq!(plan.integration_key, "service:syncthing");
-                assert_eq!(plan.adapter, IntegrationAdapterKind::SystemdUser);
+                assert_eq!(plan.adapter, expected_adapter);
                 ActivationAdapterOutcome {
                     reason_code: IntegrationReasonCode::Ok,
                     applied_state: IntegrationAppliedState::Running,
@@ -11132,7 +11144,10 @@ old-cc = "<2.0.0"
 
         assert_eq!(
             line,
-            "service package=syncthing name=syncthing state=running adapter=systemd-user scope=user applied=true reason=ok"
+            format!(
+                "service package=syncthing name=syncthing state=running adapter={} scope=user applied=true reason=ok",
+                expected_adapter.as_str()
+            )
         );
         let records = read_integration_activation_state(&layout).expect("must read activation state");
         assert_eq!(records.len(), 1);
