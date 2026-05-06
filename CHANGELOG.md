@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.17.0](https://github.com/spiritledsoftware/crosspack/compare/v0.16.0...v0.17.0) (2026-05-06)
+
+
+### Features
+
+* add tar.xz support and wildcard package resolution ([#139](https://github.com/spiritledsoftware/crosspack/issues/139)) ([d1966eb](https://github.com/spiritledsoftware/crosspack/commit/d1966ebf551ae52a11ddb710542a26d8d1af187b))
+
+
+### Bug Fixes
+
+* **cli:** make PowerShell completions profile-safe ([#137](https://github.com/spiritledsoftware/crosspack/issues/137)) ([e723948](https://github.com/spiritledsoftware/crosspack/commit/e7239480595f78e24e7e7a8e71be4ec1b8c7630b))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to 963e2d4a0778c20b36dd04c3a5e63873858e12f5 ([a3d953f](https://github.com/spiritledsoftware/crosspack/commit/a3d953f1d4c3a5aad473a15b02c6876743cd3a6d))
+* **registry:** bump submodule to b80d483c824477c75cb13bcf6cc50014a270979b ([6cf5704](https://github.com/spiritledsoftware/crosspack/commit/6cf5704dcf5dd4dd14c842af8c53a4b2cb253214))
+* **registry:** bump submodule to da8cfea275dd89cb70636eb79a9ec69cee0b1e42 ([f842441](https://github.com/spiritledsoftware/crosspack/commit/f8424410bd7230aa275f17c737d44998cd75151f))
+
 ## [0.16.0](https://github.com/spiritledsoftware/crosspack/compare/v0.15.2...v0.16.0) (2026-05-06)
 
 
