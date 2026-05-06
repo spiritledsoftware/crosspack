@@ -11148,6 +11148,7 @@ old-cc = "<2.0.0"
     #[cfg(not(target_os = "windows"))]
     fn services_start_projected_service_persists_running_activation() {
         let layout = test_layout();
+        let _cleanup = TestLayoutCleanup::new(&layout);
         layout.ensure_base_dirs().expect("must create dirs");
         write_install_receipt(
             &layout,
@@ -11213,6 +11214,7 @@ old-cc = "<2.0.0"
     #[cfg(not(target_os = "windows"))]
     fn services_restart_projected_service_persists_running_activation() {
         let layout = test_layout();
+        let _cleanup = TestLayoutCleanup::new(&layout);
         layout.ensure_base_dirs().expect("must create dirs");
         write_install_receipt(
             &layout,
@@ -11277,6 +11279,7 @@ old-cc = "<2.0.0"
     #[test]
     fn services_stop_projected_service_without_activation_does_not_persist_state() {
         let layout = test_layout();
+        let _cleanup = TestLayoutCleanup::new(&layout);
         layout.ensure_base_dirs().expect("must create dirs");
         write_install_receipt(
             &layout,
@@ -12929,6 +12932,24 @@ sha256 = "abc"
             .expect("system time")
             .as_nanos();
         PrefixLayout::new(build_test_layout_path(nanos))
+    }
+
+    struct TestLayoutCleanup {
+        prefix: PathBuf,
+    }
+
+    impl TestLayoutCleanup {
+        fn new(layout: &PrefixLayout) -> Self {
+            Self {
+                prefix: layout.prefix().to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for TestLayoutCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.prefix);
+        }
     }
 
     fn test_registry_source_dir(name: &str, with_registry_pub: bool) -> PathBuf {
