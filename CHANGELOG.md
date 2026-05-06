@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.2](https://github.com/spiritledsoftware/crosspack/compare/v0.15.1...v0.15.2) (2026-05-06)
+
+
+### Bug Fixes
+
+* **cli:** initialize zsh compinit before compdef ([#132](https://github.com/spiritledsoftware/crosspack/issues/132)) ([ac71c41](https://github.com/spiritledsoftware/crosspack/commit/ac71c4182fb7769d6a77c356670366c42a232484))
+
+
+### Miscellaneous Chores
+
+* **registry:** bump submodule to c4d0e9cb28fe9c9b923c14c3a5670f39bd292153 ([af205fc](https://github.com/spiritledsoftware/crosspack/commit/af205fc2593eefdb7400e07ec1800bfbf71a9ba5))
+
 ## [0.15.1](https://github.com/spiritledsoftware/crosspack/compare/v0.15.0...v0.15.1) (2026-05-06)
 
 
