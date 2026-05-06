@@ -16,6 +16,9 @@ concurrency:
   group: release-artifacts-${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
   CHECKOUT_REF: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.release_tag) }}

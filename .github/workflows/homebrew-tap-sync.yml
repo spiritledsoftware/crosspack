@@ -1,9 +1,11 @@
 name: Sync Homebrew Tap
 
 on:
-  release:
+  workflow_run:
+    workflows:
+      - Release Artifacts
     types:
-      - published
+      - completed
   workflow_dispatch:
     inputs:
       release_tag:
@@ -12,7 +14,7 @@ on:
         type: string
 
 concurrency:
-  group: homebrew-tap-sync-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  group: homebrew-tap-sync-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 permissions:
@@ -21,7 +23,7 @@ permissions:
 jobs:
   bump-formula:
     name: bump-formula
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v') && !contains(github.event.workflow_run.head_branch, '-rc.')) }}
     runs-on: macos-latest
 
     steps:
@@ -45,7 +47,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             release_tag="${{ inputs.release_tag }}"
           else
-            release_tag="${{ github.event.release.tag_name }}"
+            release_tag="${{ github.event.workflow_run.head_branch }}"
           fi
 
           if [[ "$release_tag" == *"-rc."* ]]; then
