@@ -4,9 +4,10 @@ use std::fs;
 use std::path::{Component, PathBuf};
 
 use crate::exposure::{
-    clear_gui_exposure_state, clear_integration_state, read_gui_exposure_state,
-    read_integration_state, remove_exposed_binary, remove_exposed_completion,
-    remove_exposed_gui_asset, remove_exposed_integration,
+    clear_gui_exposure_state, clear_integration_state, clear_shell_init_state,
+    read_gui_exposure_state, read_identity_shell_init_state, read_integration_state,
+    read_shell_init_state, remove_exposed_binary, remove_exposed_completion,
+    remove_exposed_gui_asset, remove_exposed_integration, remove_exposed_shell_init,
 };
 use crate::fs_utils::remove_file_if_exists;
 use crate::native::{
@@ -190,6 +191,9 @@ fn remove_identity_artifacts(
             remove_exposed_integration(layout, projection)?;
         }
     }
+    for projection in read_identity_shell_init_state(layout, identity)? {
+        remove_exposed_shell_init(layout, &projection)?;
+    }
 
     remove_file_if_exists(&layout.identity_receipt_path(identity)).with_context(|| {
         format!(
@@ -211,6 +215,7 @@ fn remove_identity_artifacts(
     remove_file_if_exists(&layout.identity_gui_native_state_path(identity))?;
     remove_file_if_exists(&layout.identity_declared_services_state_path(identity))?;
     remove_file_if_exists(&layout.identity_integration_state_path(identity))?;
+    remove_file_if_exists(&layout.identity_shell_init_state_path(identity))?;
 
     Ok(if package_existed {
         UninstallStatus::Uninstalled
@@ -541,6 +546,10 @@ fn remove_receipt_artifacts(
         remove_exposed_integration(layout, projection)?;
     }
     clear_integration_state(layout, &receipt.name)?;
+    for projection in read_shell_init_state(layout, &receipt.name)? {
+        remove_exposed_shell_init(layout, &projection)?;
+    }
+    clear_shell_init_state(layout, &receipt.name)?;
     if receipt.install_mode != InstallMode::Native {
         let _native_gui_warnings =
             remove_package_native_gui_registrations_best_effort(layout, &receipt.name)?;

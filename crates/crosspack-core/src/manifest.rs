@@ -6,6 +6,7 @@ use semver::{Version, VersionReq};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::artifact::Artifact;
+use crate::ArtifactCompletionShell;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageManifest {
@@ -31,6 +32,8 @@ pub struct PackageManifest {
     pub services: Vec<ServiceDeclaration>,
     #[serde(default)]
     pub integrations: Vec<PackageIntegration>,
+    #[serde(default)]
+    pub shell_init: Vec<PackageShellInit>,
 }
 
 fn deserialize_manifest_version<'de, D>(deserializer: D) -> Result<Version, D::Error>
@@ -193,6 +196,76 @@ impl PackageIntegration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PackageShellInit {
+    pub name: String,
+    pub binary: String,
+    pub strategy: ShellInitStrategy,
+    #[serde(default)]
+    pub bash: Option<Vec<String>>,
+    #[serde(default)]
+    pub zsh: Option<Vec<String>>,
+    #[serde(default)]
+    pub fish: Option<Vec<String>>,
+    #[serde(default)]
+    pub powershell: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellInitStrategy {
+    EvalStdout,
+}
+
+impl PackageShellInit {
+    pub fn args_for_shell(&self, shell: ArtifactCompletionShell) -> Option<&[String]> {
+        match shell {
+            ArtifactCompletionShell::Bash => self.bash.as_deref(),
+            ArtifactCompletionShell::Zsh => self.zsh.as_deref(),
+            ArtifactCompletionShell::Fish => self.fish.as_deref(),
+            ArtifactCompletionShell::Powershell => self.powershell.as_deref(),
+        }
+    }
+
+    fn ownership_key(&self) -> String {
+        format!("shell_init:{}", self.name)
+    }
+
+    fn validate(&self, declared_binaries: &HashSet<String>) -> anyhow::Result<()> {
+        validate_service_token("shell init name", &self.name, false)?;
+        validate_service_token("shell init binary", &self.binary, false)?;
+        if !declared_binaries.contains(&self.binary) {
+            return Err(anyhow!(
+                "shell init '{}' references undeclared artifact binary '{}'",
+                self.name,
+                self.binary
+            ));
+        }
+        if self.bash.is_none()
+            && self.zsh.is_none()
+            && self.fish.is_none()
+            && self.powershell.is_none()
+        {
+            return Err(anyhow!(
+                "shell init '{}' must declare at least one shell args field",
+                self.name
+            ));
+        }
+        for (field, args) in [
+            ("bash", &self.bash),
+            ("zsh", &self.zsh),
+            ("fish", &self.fish),
+            ("powershell", &self.powershell),
+        ] {
+            if let Some(args) = args {
+                validate_shell_init_args(&self.name, field, args)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceDeclaration {
     pub name: String,
@@ -272,6 +345,37 @@ impl PackageManifest {
             if !seen_integration_keys.insert(key.clone()) {
                 return Err(anyhow!(
                     "duplicate integration declaration '{}' in manifest '{}'",
+                    key,
+                    manifest.name
+                ));
+            }
+        }
+        let declared_binaries = manifest
+            .artifacts
+            .iter()
+            .flat_map(|artifact| artifact.binaries.iter().map(|binary| binary.name.clone()))
+            .collect::<HashSet<_>>();
+        let mut seen_shell_init_keys = HashSet::new();
+        for shell_init in &manifest.shell_init {
+            shell_init.validate(&declared_binaries)?;
+            for artifact in &manifest.artifacts {
+                if !artifact
+                    .binaries
+                    .iter()
+                    .any(|binary| binary.name == shell_init.binary)
+                {
+                    return Err(anyhow!(
+                        "shell init '{}' references binary '{}' missing from artifact target '{}'",
+                        shell_init.name,
+                        shell_init.binary,
+                        artifact.target
+                    ));
+                }
+            }
+            let key = shell_init.ownership_key();
+            if !seen_shell_init_keys.insert(key.clone()) {
+                return Err(anyhow!(
+                    "duplicate shell init declaration '{}' in manifest '{}'",
                     key,
                     manifest.name
                 ));
@@ -360,6 +464,26 @@ fn validate_service_token(kind: &str, value: &str, allow_at: bool) -> anyhow::Re
         ));
     }
 
+    Ok(())
+}
+
+fn validate_shell_init_args(name: &str, field: &str, args: &[String]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        return Err(anyhow!(
+            "shell init '{name}' {field} args must not be empty"
+        ));
+    }
+    for arg in args {
+        if arg.is_empty()
+            || arg.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            || arg.contains('/')
+            || arg.contains('\\')
+        {
+            return Err(anyhow!(
+                "shell init '{name}' {field} args contain unsafe value: {arg:?}"
+            ));
+        }
+    }
     Ok(())
 }
 

@@ -227,7 +227,7 @@ Current behavior includes provider capability selection (`provides`), conflict g
 - Unix installer (`scripts/install.sh`) auto-detects shell from `$SHELL` (`bash`, `zsh`, or `fish`) and, by default:
   - writes completion scripts to `<prefix>/share/completions/crosspack.<shell>`,
   - creates or updates a single managed profile block in `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`,
-  - ensures PATH setup and completion sourcing are idempotent.
+  - evaluates `crosspack init-shell --shell <shell>` so PATH, completions, and package shell-init snippets stay in sync.
 - Windows installer (`scripts/install.ps1`) writes PowerShell completion script to `<prefix>\share\completions\crosspack.ps1` and updates `$PROFILE.CurrentUserCurrentHost` with one managed block for PATH + completion sourcing.
 - Installers resolve the default `core` fingerprint at runtime by downloading `registry.pub` from `https://github.com/spiritledsoftware/crosspack-registry` and hashing it (SHA-256).
 - Installers fail closed on fetch/hash/validation errors.

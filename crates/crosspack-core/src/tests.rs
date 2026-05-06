@@ -167,6 +167,133 @@ enable = false
     assert_eq!(parsed.integrations[2].kind(), "service");
 }
 
+fn shell_init_manifest(package: &str, args: &str) -> String {
+    format!(
+        r#"
+name = "{package}"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/{package}.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.binaries]]
+name = "{package}"
+path = "{package}"
+
+[[shell_init]]
+name = "{package}"
+binary = "{package}"
+strategy = "eval_stdout"
+bash = {args}
+zsh = {args}
+fish = {args}
+powershell = {args}
+"#
+    )
+}
+
+#[test]
+fn shell_init_manifest_accepts_common_eval_stdout_tools() {
+    for (package, args) in [
+        ("starship", r#"["init", "bash"]"#),
+        ("direnv", r#"["hook", "bash"]"#),
+        ("mise", r#"["activate", "bash"]"#),
+        ("zoxide", r#"["init", "bash"]"#),
+        ("atuin", r#"["init", "bash"]"#),
+    ] {
+        let parsed = PackageManifest::from_toml_str(&shell_init_manifest(package, args))
+            .expect("shell init manifest should parse");
+        assert_eq!(parsed.shell_init.len(), 1);
+        assert_eq!(parsed.shell_init[0].strategy, ShellInitStrategy::EvalStdout);
+        assert_eq!(parsed.shell_init[0].binary, package);
+    }
+}
+
+#[test]
+fn shell_init_manifest_rejects_raw_script_like_fields() {
+    let content = shell_init_manifest("starship", r#"["init", "bash"]"#).replace(
+        r#"powershell = ["init", "bash"]"#,
+        "script = \"eval $(starship init bash)\"",
+    );
+    PackageManifest::from_toml_str(&content).expect_err("unknown raw script field must fail");
+}
+
+#[test]
+fn shell_init_manifest_rejects_missing_binary_unknown_strategy_and_unsafe_args() {
+    let missing_binary = shell_init_manifest("starship", r#"["init", "bash"]"#)
+        .replace("binary = \"starship\"", "binary = \"missing\"");
+    PackageManifest::from_toml_str(&missing_binary).expect_err("undeclared binary must fail");
+
+    let unknown_strategy = shell_init_manifest("starship", r#"["init", "bash"]"#)
+        .replace("strategy = \"eval_stdout\"", "strategy = \"raw_script\"");
+    PackageManifest::from_toml_str(&unknown_strategy).expect_err("unknown strategy must fail");
+
+    let unsafe_args = shell_init_manifest("starship", r#"["init/bash"]"#);
+    PackageManifest::from_toml_str(&unsafe_args).expect_err("unsafe args must fail");
+
+    let whitespace_args = shell_init_manifest("starship", r#"["init", "ba sh"]"#);
+    PackageManifest::from_toml_str(&whitespace_args).expect_err("whitespace args must fail");
+}
+
+#[test]
+fn shell_init_manifest_rejects_missing_shell_fields() {
+    let content = r#"
+name = "starship"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/starship.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.binaries]]
+name = "starship"
+path = "starship"
+
+[[shell_init]]
+name = "starship"
+binary = "starship"
+strategy = "eval_stdout"
+"#;
+    PackageManifest::from_toml_str(content).expect_err("missing shell fields must fail");
+}
+
+#[test]
+fn shell_init_manifest_rejects_binary_missing_from_any_artifact() {
+    let content = r#"
+name = "starship"
+version = "1.0.0"
+
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/starship-linux.tar.gz"
+sha256 = "abc123"
+
+[[artifacts.binaries]]
+name = "starship"
+path = "starship"
+
+[[artifacts]]
+target = "aarch64-apple-darwin"
+url = "https://example.test/starship-macos.tar.gz"
+sha256 = "def456"
+
+[[artifacts.binaries]]
+name = "starship-alt"
+path = "starship"
+
+[[shell_init]]
+name = "starship"
+binary = "starship"
+strategy = "eval_stdout"
+bash = ["init", "bash"]
+"#;
+    PackageManifest::from_toml_str(content)
+        .expect_err("shell init binary must exist in every artifact");
+}
+
 #[test]
 fn integration_service_platform_sources_accepts_fields() {
     let content = r#"

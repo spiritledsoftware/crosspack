@@ -2,7 +2,7 @@
 
 **Status:** roadmap, non-GA
 **Related plans:** `.agents/plans/2026-04-27-typed-host-integrations-design.md`
-**Last updated:** 2026-05-04
+**Last updated:** 2026-05-06
 
 ## Problem
 
@@ -19,6 +19,7 @@ Crosspack needs typed, previewable, reversible adapters for Docker CLI plugins, 
 - Keep all integration effects previewable, reversible, idempotent, and owned by Crosspack state.
 - Preserve deterministic uninstall and rollback cleanup.
 - Keep plain/non-interactive output stable and machine-oriented.
+- Support metadata-driven shell init snippets through `crosspack init-shell` without treating shell setup as an activation lifecycle.
 
 ## Non-Goals
 
@@ -28,6 +29,7 @@ Crosspack needs typed, previewable, reversible adapters for Docker CLI plugins, 
 - Do not manage unrelated services not declared by installed packages.
 - Do not implement system-level service activation in the first activation slice.
 - Do not silently fall back from failed host activation to a successful install when the manifest requested install-time service activation.
+- Do not add a `shell_hook` integration kind or execute shell init during install.
 
 ## Current State
 
@@ -37,6 +39,7 @@ Crosspack needs typed, previewable, reversible adapters for Docker CLI plugins, 
 - `crosspack integrations list` and `crosspack integrations status <package> <integration>` report projected state.
 - `service.enable` exists in `crosspack-core`, but shipped install behavior rejects `enable = true` before host mutation. Docker and PATH integrations do not have `enable` fields.
 - Existing service commands have partial native adapter plumbing, but the integration activation state model is not complete enough for cross-platform lifecycle management.
+- Package shell init metadata is separate from `[[integrations]]`; generated snippets live under `share/shell/init/<shell>/` and load only from `crosspack init-shell`.
 
 ## Target Behavior
 
@@ -85,6 +88,19 @@ name = "caddy"
 source = "services/caddy.service"
 ```
 
+Shell init metadata is package-level, not an integration:
+
+```toml
+[[shell_init]]
+name = "starship"
+binary = "starship"
+strategy = "eval_stdout"
+bash = ["init", "bash"]
+zsh = ["init", "zsh"]
+fish = ["init", "fish"]
+powershell = ["init", "powershell"]
+```
+
 Service source metadata is platform-specific and must be explicit. A service integration may either point to one portable metadata file with platform sections, or use platform-qualified source fields once the schema grows. The first implementation should use the existing `source` field as the Linux systemd unit source and reject macOS/Windows activation for that package unless validated metadata for those platforms is present.
 
 Future cross-platform service metadata shape:
@@ -108,6 +124,7 @@ Rules:
 - Docker/PATH install-time activation requires a future manifest field with clearer semantics, not overloading `enable`.
 - Services default to `scope = user`. The state model must include scope so `scope = system` can be introduced later.
 - Cross-platform service activation requires platform-appropriate service metadata. Linux systemd unit files, macOS LaunchAgent plists, and Windows service descriptors are not interchangeable.
+- `[[shell_init]]` supports only `strategy = "eval_stdout"` initially. `binary` must match a declared artifact binary. Shell args are arrays, not raw scripts, and are projected as deterministic Crosspack-owned snippets for `init-shell`.
 
 ## Adapter Matrix
 

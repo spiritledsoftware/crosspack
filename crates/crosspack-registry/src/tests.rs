@@ -2633,6 +2633,46 @@ windows_service = "etc/windows-service/syncthing.xml"
     assert_eq!(toml_str(path_integration, "name"), Some("ctx"));
     assert_eq!(toml_str(path_integration, "source"), Some("kubectx"));
 
+    let cargo_binstall: toml::Value = toml::from_str(
+        r#"name = "cargo-binstall"
+
+[[integrations]]
+kind = "path_plugin"
+host = "cargo"
+name = "binstall"
+source = "cargo-binstall"
+"#,
+    )
+    .expect("cargo-binstall typed integration fixture must parse");
+    let cargo_binstall_integration = integration_with_kind(&cargo_binstall, "path_plugin")
+        .expect("cargo-binstall must declare cargo PATH plugin integration");
+    assert_eq!(toml_str(cargo_binstall_integration, "host"), Some("cargo"));
+    assert_eq!(
+        toml_str(cargo_binstall_integration, "name"),
+        Some("binstall")
+    );
+    assert_eq!(
+        toml_str(cargo_binstall_integration, "source"),
+        Some("cargo-binstall")
+    );
+
+    let kubecolor: toml::Value = toml::from_str(
+        r#"name = "kubecolor"
+
+[[integrations]]
+kind = "path_plugin"
+host = "kubectl"
+name = "color"
+source = "kubecolor"
+"#,
+    )
+    .expect("kubecolor typed integration fixture must parse");
+    let kubecolor_integration = integration_with_kind(&kubecolor, "path_plugin")
+        .expect("kubecolor must declare kubectl PATH plugin integration");
+    assert_eq!(toml_str(kubecolor_integration, "host"), Some("kubectl"));
+    assert_eq!(toml_str(kubecolor_integration, "name"), Some("color"));
+    assert_eq!(toml_str(kubecolor_integration, "source"), Some("kubecolor"));
+
     let service_integration = integration_with_kind(&syncthing, "service")
         .expect("syncthing must declare service integration");
     assert_eq!(toml_str(service_integration, "name"), Some("syncthing"));
@@ -2649,6 +2689,35 @@ windows_service = "etc/windows-service/syncthing.xml"
         toml_str(service_integration, "windows_service"),
         Some("etc/windows-service/syncthing.xml")
     );
+
+    for (package, command) in [
+        ("starship", "init"),
+        ("direnv", "hook"),
+        ("mise", "activate"),
+        ("zoxide", "init"),
+        ("atuin", "init"),
+    ] {
+        let manifest: toml::Value = toml::from_str(&format!(
+            r#"name = "{package}"
+
+[[shell_init]]
+name = "{package}"
+binary = "{package}"
+strategy = "eval_stdout"
+bash = ["{command}", "bash"]
+"#
+        ))
+        .expect("shell init fixture must parse");
+        let shell_init = manifest
+            .get("shell_init")
+            .and_then(toml::Value::as_array)
+            .and_then(|items| items.first())
+            .expect("package must declare shell init metadata");
+        assert_eq!(toml_str(shell_init, "name"), Some(package));
+        assert_eq!(toml_str(shell_init, "binary"), Some(package));
+        assert_eq!(toml_str(shell_init, "strategy"), Some("eval_stdout"));
+        assert_eq!(toml_array_strs(shell_init, "bash"), vec![command, "bash"]);
+    }
 }
 
 fn write_signed_manifest(package_dir: &std::path::Path, signing_key: &SigningKey, version: &str) {
@@ -2731,6 +2800,20 @@ fn toml_str<'a>(value: &'a toml::Value, field: &str) -> Option<&'a str> {
 
 fn toml_bool(value: &toml::Value, field: &str) -> Option<bool> {
     value.get(field)?.as_bool()
+}
+
+fn toml_array_strs<'a>(value: &'a toml::Value, field: &str) -> Vec<&'a str> {
+    value
+        .get(field)
+        .unwrap_or_else(|| panic!("{field} must exist"))
+        .as_array()
+        .unwrap_or_else(|| panic!("{field} must be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{field} entries must be strings"))
+        })
+        .collect()
 }
 
 fn release_toml(version: &str) -> String {
