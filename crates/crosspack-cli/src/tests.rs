@@ -7051,6 +7051,42 @@ requirement = "^14"
     }
 
     #[test]
+    fn zsh_completion_script_initializes_compinit_without_package_completion_dir() {
+        let layout = test_layout();
+        layout.ensure_base_dirs().expect("must create dirs");
+        assert!(
+            !layout
+                .package_completions_shell_dir(ArtifactCompletionShell::Zsh)
+                .exists(),
+            "fresh test prefix should not have a zsh package completion dir"
+        );
+
+        let mut output = Vec::new();
+        write_completions_script(CliCompletionShell::Zsh, &layout, &mut output)
+            .expect("completion script generation should succeed");
+        let rendered = String::from_utf8(output).expect("completion script should be utf-8");
+
+        let compinit_index = rendered
+            .find("compinit -i")
+            .expect("zsh script should initialize compinit");
+        let package_dir_check_index = rendered
+            .find("if [ -d '")
+            .expect("zsh script should conditionally register package completion dir");
+        let compdef_index = rendered
+            .find("compdef _crosspack crosspack")
+            .expect("zsh script should register crosspack completion function");
+
+        assert!(
+            compinit_index < package_dir_check_index,
+            "zsh script must initialize completion system even without package completions"
+        );
+        assert!(
+            compinit_index < compdef_index,
+            "zsh script must initialize completion system before compdef registration"
+        );
+    }
+
+    #[test]
     fn parse_provider_overrides_rejects_invalid_shape() {
         let err = parse_provider_overrides(&["missing-equals".to_string()])
             .expect_err("override must require capability=package shape");
