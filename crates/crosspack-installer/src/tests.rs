@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::anyhow;
 use crosspack_core::{
-    ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration, PackageShellInit,
-    ServiceDeclaration, ShellInitStrategy,
+    ArchiveType, ArtifactCompletionShell, ArtifactGuiApp, IntegrationHostPlatform,
+    PackageIntegration, PackageShellInit, ServiceDeclaration, ShellInitStrategy,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -5679,6 +5679,102 @@ fn expose_path_plugin_integration_round_trip() {
     assert_eq!(projected.kind, "path_plugin");
     assert_eq!(projected.rel_path, "path-plugins/kubectl/kubectl-ctx");
     assert!(layout.integrations_dir().join(&projected.rel_path).exists());
+}
+
+#[test]
+fn expose_man_page_integrations_project_to_share_man_and_remove() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("delta", "0.18.2");
+    fs::create_dir_all(package_dir.join("man")).expect("must create man dir");
+    fs::write(package_dir.join("man/delta.1"), b".TH DELTA 1\n").expect("must write man page");
+    fs::write(package_dir.join("man/delta.5.gz"), b"gzip bytes\n")
+        .expect("must write gzipped man page");
+
+    let section_one = PackageIntegration::ManPage {
+        name: None,
+        section: "1".to_string(),
+        source: "man/*.1".to_string(),
+        platforms: Vec::new(),
+    };
+    let section_five = PackageIntegration::ManPage {
+        name: None,
+        section: "5".to_string(),
+        source: "man/*.5.gz".to_string(),
+        platforms: Vec::new(),
+    };
+    let mut projected = expose_integrations(&layout, &package_dir, "delta", &section_one)
+        .expect("must expose section 1 man page integrations");
+    projected.extend(
+        expose_integrations(&layout, &package_dir, "delta", &section_five)
+            .expect("must expose section 5 man page integrations"),
+    );
+
+    assert_eq!(projected[0].kind, "man_page");
+    assert_eq!(projected[0].key, "man_page:1:delta");
+    assert_eq!(projected[0].rel_path, "man/man1/delta.1");
+    assert_eq!(projected[1].key, "man_page:5:delta");
+    assert_eq!(projected[1].rel_path, "man/man5/delta.5.gz");
+    assert!(layout.man_dir().join("man1/delta.1").exists());
+    assert!(layout.man_dir().join("man5/delta.5.gz").exists());
+
+    for projection in &projected {
+        remove_exposed_integration(&layout, projection).expect("must remove man projection");
+        assert!(!layout.share_dir().join(&projection.rel_path).exists());
+    }
+}
+
+#[test]
+fn man_page_integrations_derive_names_filter_hosts_and_reject_duplicate_projections() {
+    let layout = test_layout();
+    layout.ensure_base_dirs().expect("must create dirs");
+    let package_dir = layout.package_dir("demo", "1.0.0");
+    fs::create_dir_all(package_dir.join("share/man/man1")).expect("must create man dir");
+    fs::create_dir_all(package_dir.join("alt/man/man1")).expect("must create alt man dir");
+    fs::write(package_dir.join("share/man/man1/demo.1"), b".TH DEMO 1\n")
+        .expect("must write man page");
+    fs::write(package_dir.join("alt/man/man1/demo.1"), b".TH DEMO 1\n")
+        .expect("must write duplicate man page");
+
+    let single = PackageIntegration::ManPage {
+        name: None,
+        section: "1".to_string(),
+        source: "share/man/man1/demo.1".to_string(),
+        platforms: vec![IntegrationHostPlatform::Linux],
+    };
+    let projected = expose_integrations_for_host_platform(
+        &layout,
+        &package_dir,
+        "demo",
+        &single,
+        HostPlatform::Linux,
+    )
+    .expect("must expose unnamed single-file man page");
+    assert_eq!(projected[0].key, "man_page:1:demo");
+    assert_eq!(projected[0].rel_path, "man/man1/demo.1");
+
+    let skipped = expose_integrations_for_host_platform(
+        &layout,
+        &package_dir,
+        "demo",
+        &single,
+        HostPlatform::Windows,
+    )
+    .expect("unsupported host should skip man page projection");
+    assert!(skipped.is_empty());
+
+    let duplicate_glob = PackageIntegration::ManPage {
+        name: None,
+        section: "1".to_string(),
+        source: "*/man/man1/*.1".to_string(),
+        platforms: Vec::new(),
+    };
+    let err = expose_integrations(&layout, &package_dir, "demo", &duplicate_glob)
+        .expect_err("duplicate derived names should fail");
+    assert!(
+        err.to_string().contains("duplicate integration projection"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]

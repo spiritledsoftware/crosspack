@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use crosspack_core::{
-    ArtifactCompletionShell, ArtifactGuiApp, PackageIntegration, PackageShellInit,
+    ArtifactCompletionShell, ArtifactGuiApp, IntegrationHostPlatform, PackageIntegration,
+    PackageShellInit,
 };
+use globset::GlobBuilder;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -609,7 +611,8 @@ pub fn expose_integrations(
     package_name: &str,
     integration: &PackageIntegration,
 ) -> Result<Vec<IntegrationProjection>> {
-    let sources = projected_integration_sources(package_name, integration)?;
+    let sources =
+        projected_integration_sources_for_install_root(package_name, install_root, integration)?;
     let mut preflighted = Vec::with_capacity(sources.len());
     for (source, projection) in &sources {
         let source_path = preflight_integration_source(install_root, source)?;
@@ -630,8 +633,12 @@ pub fn expose_integrations_for_host_platform(
     integration: &PackageIntegration,
     platform: HostPlatform,
 ) -> Result<Vec<IntegrationProjection>> {
-    let sources =
-        projected_integration_sources_for_host_platform(package_name, integration, platform)?;
+    let sources = projected_integration_sources_for_host_platform(
+        package_name,
+        install_root,
+        integration,
+        platform,
+    )?;
     let mut projections = Vec::new();
     for (source, projection) in &sources {
         let source_path = preflight_integration_source(install_root, source)?;
@@ -711,7 +718,11 @@ pub fn remove_exposed_integration(
     }
     fs::remove_file(&path)
         .with_context(|| format!("failed to remove exposed integration: {}", path.display()))?;
-    prune_empty_integration_dirs(layout, path.parent())?;
+    if projection.rel_path.starts_with("man/") {
+        prune_empty_man_dirs(layout, path.parent())?;
+    } else {
+        prune_empty_integration_dirs(layout, path.parent())?;
+    }
     Ok(())
 }
 
@@ -825,6 +836,29 @@ pub fn projected_integrations(
                 normalize_integration_token(name)
             ),
         },
+        PackageIntegration::ManPage {
+            name,
+            section,
+            source,
+            ..
+        } => {
+            let derived_name;
+            let name = if let Some(name) = name.as_deref() {
+                name
+            } else {
+                derived_name = man_page_name_from_source(source, section);
+                &derived_name
+            };
+            IntegrationProjection {
+                kind: integration.kind().to_string(),
+                key: format!("man_page:{section}:{name}"),
+                rel_path: format!(
+                    "man/man{}/{}",
+                    normalize_integration_token(section),
+                    man_page_file_name(name, section, source)?
+                ),
+            }
+        }
         PackageIntegration::Service {
             name,
             linux_systemd_user,
@@ -873,6 +907,24 @@ fn projected_integration_sources(
             source.clone(),
             projected_integration(package_name, integration)?,
         )]),
+        PackageIntegration::ManPage {
+            name,
+            section,
+            source,
+            ..
+        } => {
+            let derived_name;
+            let name = if let Some(name) = name.as_deref() {
+                name
+            } else {
+                derived_name = man_page_name_from_source(source, section);
+                &derived_name
+            };
+            Ok(vec![(
+                source.clone(),
+                man_page_projection(integration.kind(), name, section, source)?,
+            )])
+        }
         PackageIntegration::Service {
             linux_systemd_user,
             macos_launch_agent,
@@ -891,11 +943,69 @@ fn projected_integration_sources(
     }
 }
 
+pub fn projected_integrations_for_install_root(
+    package_name: &str,
+    install_root: &Path,
+    integration: &PackageIntegration,
+    platform: HostPlatform,
+) -> Result<Vec<IntegrationProjection>> {
+    if !integration_projection_matches_host(integration, platform) {
+        return Ok(Vec::new());
+    }
+    match integration {
+        PackageIntegration::ManPage {
+            name,
+            section,
+            source,
+            ..
+        } if source_contains_glob(source) => expand_man_page_glob(
+            install_root,
+            integration.kind(),
+            name.as_deref(),
+            section,
+            source,
+        )
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|(_, projection)| projection)
+                .collect()
+        }),
+        _ => projected_integrations(package_name, integration),
+    }
+}
+
+fn projected_integration_sources_for_install_root(
+    package_name: &str,
+    install_root: &Path,
+    integration: &PackageIntegration,
+) -> Result<Vec<(String, IntegrationProjection)>> {
+    match integration {
+        PackageIntegration::ManPage {
+            name,
+            section,
+            source,
+            ..
+        } if source_contains_glob(source) => expand_man_page_glob(
+            install_root,
+            integration.kind(),
+            name.as_deref(),
+            section,
+            source,
+        ),
+        _ => projected_integration_sources(package_name, integration),
+    }
+}
+
 fn projected_integration_sources_for_host_platform(
     package_name: &str,
+    install_root: &Path,
     integration: &PackageIntegration,
     platform: HostPlatform,
 ) -> Result<Vec<(String, IntegrationProjection)>> {
+    if !integration_projection_matches_host(integration, platform) {
+        return Ok(Vec::new());
+    }
     match integration {
         PackageIntegration::Service { .. } => {
             projected_integration_sources(package_name, integration).map(|sources| {
@@ -905,10 +1015,158 @@ fn projected_integration_sources_for_host_platform(
                     .collect()
             })
         }
-        PackageIntegration::DockerCliPlugin { .. } | PackageIntegration::PathPlugin { .. } => {
-            projected_integration_sources(package_name, integration)
+        PackageIntegration::DockerCliPlugin { .. }
+        | PackageIntegration::PathPlugin { .. }
+        | PackageIntegration::ManPage { .. } => {
+            projected_integration_sources_for_install_root(package_name, install_root, integration)
         }
     }
+}
+
+fn integration_projection_matches_host(
+    integration: &PackageIntegration,
+    platform: HostPlatform,
+) -> bool {
+    match integration {
+        PackageIntegration::ManPage { platforms, .. } if !platforms.is_empty() => {
+            platforms.iter().any(|declared| {
+                matches!(
+                    (declared, platform),
+                    (IntegrationHostPlatform::Linux, HostPlatform::Linux)
+                        | (IntegrationHostPlatform::Macos, HostPlatform::Macos)
+                        | (IntegrationHostPlatform::Windows, HostPlatform::Windows)
+                )
+            })
+        }
+        _ => true,
+    }
+}
+
+fn man_page_file_name(name: &str, section: &str, source: &str) -> Result<String> {
+    let suffix = if source.ends_with(".gz") {
+        format!(".{section}.gz")
+    } else {
+        format!(".{section}")
+    };
+    if !source.ends_with(&suffix) {
+        return Err(anyhow!(
+            "man page source '{}' must match declared section '{}'",
+            source,
+            section
+        ));
+    }
+    Ok(format!("{}{}", normalize_integration_token(name), suffix))
+}
+
+fn man_page_projection(
+    kind: &str,
+    name: &str,
+    section: &str,
+    source: &str,
+) -> Result<IntegrationProjection> {
+    Ok(IntegrationProjection {
+        kind: kind.to_string(),
+        key: format!("man_page:{section}:{name}"),
+        rel_path: format!(
+            "man/man{}/{}",
+            normalize_integration_token(section),
+            man_page_file_name(name, section, source)?
+        ),
+    })
+}
+
+fn source_contains_glob(source: &str) -> bool {
+    source.contains(['*', '?', '['])
+}
+
+fn expand_man_page_glob(
+    install_root: &Path,
+    kind: &str,
+    declared_name: Option<&str>,
+    section: &str,
+    source_pattern: &str,
+) -> Result<Vec<(String, IntegrationProjection)>> {
+    let _ = validated_relative_integration_source_path(source_pattern)?;
+    let matcher = GlobBuilder::new(source_pattern)
+        .literal_separator(true)
+        .backslash_escape(false)
+        .build()
+        .with_context(|| format!("invalid man page glob pattern '{}'", source_pattern))?
+        .compile_matcher();
+    let mut files = Vec::new();
+    collect_files(install_root, install_root, &mut files)?;
+    let mut matches = files
+        .into_iter()
+        .filter(|source| matcher.is_match(source))
+        .filter(|source| {
+            source.ends_with(&format!(".{section}")) || source.ends_with(&format!(".{section}.gz"))
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    if matches.is_empty() {
+        return Err(anyhow!(
+            "man page glob '{}' did not match any section '{}' files in install root: {}",
+            source_pattern,
+            section,
+            install_root.display()
+        ));
+    }
+    let mut projections = Vec::with_capacity(matches.len());
+    for source in matches {
+        let name = declared_name
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| man_page_name_from_source(&source, section));
+        projections.push((
+            source.clone(),
+            man_page_projection(kind, &name, section, &source)?,
+        ));
+    }
+    let mut seen_paths = HashSet::new();
+    for (_, projection) in &projections {
+        if !seen_paths.insert(&projection.rel_path) {
+            return Err(anyhow!(
+                "duplicate integration projection path '{}'",
+                projection.rel_path
+            ));
+        }
+    }
+    Ok(projections)
+}
+
+fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.is_dir() {
+            collect_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let rel = path.strip_prefix(root).with_context(|| {
+                format!(
+                    "failed to derive relative path for {} under {}",
+                    path.display(),
+                    root.display()
+                )
+            })?;
+            files.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(())
+}
+
+fn man_page_name_from_source(source: &str, section: &str) -> String {
+    let mut file_name = source.rsplit('/').next().unwrap_or(source).to_string();
+    if file_name.ends_with(".gz") {
+        file_name.truncate(file_name.len() - 3);
+    }
+    let suffix = format!(".{section}");
+    if file_name.ends_with(&suffix) {
+        file_name.truncate(file_name.len() - suffix.len());
+    }
+    file_name
 }
 
 fn push_service_projection(
@@ -951,8 +1209,15 @@ fn validate_integration_projections(
     if projections.is_empty() {
         return Err(anyhow!("integration must declare at least one source"));
     }
+    let mut seen_paths = HashSet::new();
     for projection in &projections {
         validated_relative_integration_storage_path(&projection.rel_path)?;
+        if !seen_paths.insert(&projection.rel_path) {
+            return Err(anyhow!(
+                "duplicate integration projection path '{}'",
+                projection.rel_path
+            ));
+        }
     }
     Ok(projections)
 }
@@ -971,6 +1236,9 @@ fn validate_shell_init_projections(
 
 fn integration_path(layout: &PrefixLayout, rel_path: &str) -> Result<PathBuf> {
     let relative = validated_relative_integration_storage_path(rel_path)?;
+    if let Ok(man_relative) = relative.strip_prefix("man") {
+        return Ok(layout.man_dir().join(man_relative));
+    }
     Ok(layout.integrations_dir().join(relative))
 }
 
@@ -1520,6 +1788,36 @@ fn prune_empty_integration_dirs(layout: &PrefixLayout, start: Option<&Path>) -> 
 
         fs::remove_dir(&dir)
             .with_context(|| format!("failed pruning integration dir: {}", dir.display()))?;
+        current = dir.parent().map(PathBuf::from);
+    }
+    Ok(())
+}
+
+fn prune_empty_man_dirs(layout: &PrefixLayout, start: Option<&Path>) -> Result<()> {
+    let mut current = start.map(PathBuf::from);
+    let man_root = layout.man_dir();
+    while let Some(dir) = current {
+        if !dir.starts_with(&man_root) || dir == man_root {
+            break;
+        }
+
+        let mut entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                current = dir.parent().map(PathBuf::from);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed reading man dir: {}", dir.display()));
+            }
+        };
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&dir)
+            .with_context(|| format!("failed pruning man dir: {}", dir.display()))?;
         current = dir.parent().map(PathBuf::from);
     }
     Ok(())

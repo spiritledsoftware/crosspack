@@ -153,14 +153,14 @@ cargo run -p crosspack-cli --bin crosspack -- completions bash
 Tip: `completions` targets the canonical `crosspack` binary name.
 Tip: generated Crosspack scripts include loader logic for package-declared completion files under `<prefix>/share/completions/packages/<shell>/`.
 
-### 6) Optional: print shell setup snippet (PATH + completion/init loader)
+### 6) Optional: print shell setup snippet (PATH + MANPATH + completion/init loader)
 
 ```bash
 cargo run -p crosspack-cli --bin crosspack -- init-shell --shell zsh
 ```
 
 Tip: `init-shell` auto-detects shell when `--shell` is omitted; fallback is `bash` on Unix and `powershell` on Windows.
-Tip: `init-shell` also loads package-declared shell init snippets from `<prefix>/share/shell/init/<shell>/`; `completions` remains completion-only.
+Tip: `init-shell` also configures Unix `MANPATH` for package-declared man pages and loads package-declared shell init snippets from `<prefix>/share/shell/init/<shell>/`; `completions` remains completion-only.
 
 ## Legacy `--registry-root` mode
 
@@ -193,7 +193,7 @@ cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry 
 | `services start <package> <service>` | Set managed service state to `running` for an installed package. |
 | `services stop <package> <service>` | Set managed service state to `stopped` for an installed package. |
 | `services restart <package> <service>` | Set managed service state to `running` for an installed package. |
-| `integrations list` | List projected Docker CLI, PATH plugin, and service integrations for installed packages. |
+| `integrations list` | List projected Docker CLI, PATH plugin, man page, and service integrations for installed packages. |
 | `integrations status <package> <integration>` | Show projection and activation state for matching integrations. |
 | `integrations enable <package> <integration>` | Explicitly activate a Docker CLI plugin, PATH plugin, or service integration on the host. |
 | `integrations disable <package> <integration>` | Explicitly remove owned host activation while preserving package projection state. |
@@ -210,7 +210,7 @@ cargo run -p crosspack-cli --bin crosspack -- --registry-root /path/to/registry 
 | `doctor` | Show prefix paths and transaction health. |
 | `version` / `--version` | Print the Crosspack CLI version. |
 | `completions <bash\|zsh\|fish\|powershell>` | Print shell completion script for the canonical `crosspack` binary, including package completion loader block. |
-| `init-shell [--shell <bash\|zsh\|fish\|powershell>]` | Print shell setup snippet that adds Crosspack bin directory to `PATH`, loads Crosspack/package completion scripts, and sources package shell init snippets. |
+| `init-shell [--shell <bash\|zsh\|fish\|powershell>]` | Print shell setup snippet that adds Crosspack bin directory to `PATH`, configures Unix `MANPATH`, loads Crosspack/package completion scripts, and sources package shell init snippets. |
 
 Output contract notes:
 - Human-facing lifecycle commands automatically use an enhanced interactive terminal presentation on TTYs (section framing, semantic color, and progress indicators).
@@ -234,6 +234,7 @@ Crosspack verifies both metadata and artifacts:
 Registry metadata can declare typed integrations without maintainer scripts:
 
 - Docker CLI plugins and PATH plugins are projected into the Crosspack prefix during install. Host activation is explicit through `crosspack integrations enable` and reversible through `crosspack integrations disable`.
+- Man pages are projected under `<prefix>/share/man/` during install. `crosspack init-shell` exposes the managed man root through `MANPATH` on bash, zsh, and fish without mutating system man directories.
 - Services may declare Linux systemd-user, macOS launch-agent, and Windows service source metadata. Service host activation is explicit-only today; manifests should not set `enable = true`, and install fails closed before host mutation if they do.
 - Packages may declare metadata-driven shell init commands for `init-shell`. Crosspack writes deterministic snippets under `<prefix>/share/shell/init/<shell>/`; install never edits dotfiles and never executes those commands.
 - Service uninstall preserves activation records when host cleanup cannot be verified; it does not claim service disable/remove support.

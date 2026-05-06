@@ -114,6 +114,14 @@ pub enum PackageIntegration {
         name: String,
         source: String,
     },
+    ManPage {
+        #[serde(default)]
+        name: Option<String>,
+        section: String,
+        source: String,
+        #[serde(default)]
+        platforms: Vec<IntegrationHostPlatform>,
+    },
     Service {
         name: String,
         #[serde(default, alias = "source")]
@@ -127,18 +135,29 @@ pub enum PackageIntegration {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum IntegrationHostPlatform {
+    Linux,
+    Macos,
+    Windows,
+}
+
 impl PackageIntegration {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::DockerCliPlugin { .. } => "docker_cli_plugin",
             Self::PathPlugin { .. } => "path_plugin",
+            Self::ManPage { .. } => "man_page",
             Self::Service { .. } => "service",
         }
     }
 
     pub fn source(&self) -> &str {
         match self {
-            Self::DockerCliPlugin { source, .. } | Self::PathPlugin { source, .. } => source,
+            Self::DockerCliPlugin { source, .. }
+            | Self::PathPlugin { source, .. }
+            | Self::ManPage { source, .. } => source,
             Self::Service {
                 linux_systemd_user, ..
             } => linux_systemd_user.as_deref().unwrap_or(""),
@@ -149,6 +168,15 @@ impl PackageIntegration {
         match self {
             Self::DockerCliPlugin { name, .. } => format!("docker_cli_plugin:{name}"),
             Self::PathPlugin { host, name, .. } => format!("path_plugin:{host}:{name}"),
+            Self::ManPage {
+                section,
+                name,
+                source,
+                ..
+            } => format!(
+                "man_page:{section}:{}",
+                name.as_deref().unwrap_or(source.as_str())
+            ),
             Self::Service { name, .. } => format!("service:{name}"),
         }
     }
@@ -191,7 +219,59 @@ impl PackageIntegration {
                 validate_service_token("integration host", host, false)?;
                 validate_service_token("integration name", name, false)
             }
+            Self::ManPage {
+                name,
+                section,
+                source,
+                ..
+            } => {
+                validate_integration_source_path(source)?;
+                if let Some(name) = name {
+                    validate_service_token("integration name", name, false)?;
+                }
+                validate_man_page_section(section)?;
+                validate_man_page_source_matches_section(source, section)?;
+                if source_contains_glob(source) && name.is_some() {
+                    return Err(anyhow!(
+                        "man page glob integrations must derive names from matched files"
+                    ));
+                }
+                Ok(())
+            }
         }
+    }
+}
+
+fn source_contains_glob(source: &str) -> bool {
+    source.contains(['*', '?', '['])
+}
+
+fn validate_man_page_section(section: &str) -> anyhow::Result<()> {
+    if matches!(section, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") {
+        Ok(())
+    } else {
+        Err(anyhow!("man page section must be one of 1 through 9"))
+    }
+}
+
+fn validate_man_page_source_matches_section(source: &str, section: &str) -> anyhow::Result<()> {
+    let plain_suffix = format!(".{section}");
+    let gzip_suffix = format!(".{section}.gz");
+    let glob_plain_suffix = format!(".*{section}");
+    let glob_gzip_suffix = format!(".*{section}.gz");
+    if source.ends_with(&plain_suffix)
+        || source.ends_with(&gzip_suffix)
+        || source.ends_with(&glob_plain_suffix)
+        || source.ends_with(&glob_gzip_suffix)
+    {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "man page source '{}' must end with '.{}' or '.{}.gz'",
+            source,
+            section,
+            section
+        ))
     }
 }
 

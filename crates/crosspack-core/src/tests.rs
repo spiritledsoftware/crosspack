@@ -167,6 +167,78 @@ enable = false
     assert_eq!(parsed.integrations[2].kind(), "service");
 }
 
+#[test]
+fn parse_manifest_with_man_page_glob_integration() {
+    let content = r#"
+name = "delta"
+version = "0.18.2"
+
+[[integrations]]
+kind = "man_page"
+section = "1"
+source = "share/man/man1/*.1"
+platforms = ["linux", "macos"]
+
+[[integrations]]
+kind = "man_page"
+name = "delta"
+section = "5"
+source = "man/delta.5.gz"
+"#;
+
+    let parsed = PackageManifest::from_toml_str(content).expect("manifest should parse");
+    assert_eq!(parsed.integrations.len(), 2);
+    assert_eq!(parsed.integrations[0].kind(), "man_page");
+    assert_eq!(parsed.integrations[0].source(), "share/man/man1/*.1");
+    assert_eq!(parsed.integrations[1].kind(), "man_page");
+    assert_eq!(parsed.integrations[1].source(), "man/delta.5.gz");
+}
+
+#[test]
+fn man_page_integration_rejects_invalid_sections_enable_and_mismatched_source() {
+    for (name, snippet) in [
+        (
+            "invalid section",
+            r#"
+[[integrations]]
+kind = "man_page"
+name = "delta"
+section = "10"
+source = "man/delta.10"
+"#,
+        ),
+        (
+            "glob with explicit name",
+            r#"
+[[integrations]]
+kind = "man_page"
+name = "delta"
+section = "1"
+source = "man/*.1"
+"#,
+        ),
+        (
+            "mismatched source",
+            r#"
+[[integrations]]
+kind = "man_page"
+name = "delta"
+section = "1"
+source = "man/delta.5"
+"#,
+        ),
+    ] {
+        let content = format!(
+            r#"
+name = "delta"
+version = "0.18.2"
+{snippet}
+"#
+        );
+        PackageManifest::from_toml_str(&content).expect_err(name);
+    }
+}
+
 fn shell_init_manifest(package: &str, args: &str) -> String {
     format!(
         r#"

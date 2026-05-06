@@ -94,6 +94,7 @@ Typed integrations describe host-visible activation targets without arbitrary sc
 
 - `kind = "docker_cli_plugin"`: requires `name` and `source`. Install projects the plugin payload under the Crosspack prefix; host activation is explicit through `crosspack integrations enable`.
 - `kind = "path_plugin"`: requires `host`, `name`, and `source`. Install projects the plugin payload under the Crosspack prefix; host activation is explicit through `crosspack integrations enable`.
+- `kind = "man_page"`: requires `section` and `source`, with optional `name` for single-file declarations and optional `platforms = ["linux", "macos", "windows"]` host filtering. Install projects matching man pages under `<prefix>/share/man/man<section>/`; `crosspack init-shell` exposes the managed man root through `MANPATH` on Unix shells. Sections `1` through `9` are supported. `source` may be a single artifact-relative file such as `share/man/man1/tool.1` or a glob such as `share/man/man1/*.1`; matched files must end with `.<section>` or `.<section>.gz`.
 - `kind = "service"`: requires `name` and at least one service source. `source` is accepted as a legacy alias for `linux_systemd_user`; platform-specific fields are `linux_systemd_user`, `macos_launch_agent`, and `windows_service`.
 
 Service host activation is explicit-only in the current shipped behavior. Manifests should not set `enable = true`; if they do, install fails closed before host mutation and does not persist activation state.

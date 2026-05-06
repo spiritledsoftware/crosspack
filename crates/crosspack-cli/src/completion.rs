@@ -150,16 +150,21 @@ fn print_init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) {
 
 fn init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) -> String {
     let bin = layout.bin_dir();
+    let man = layout.man_dir();
     let completion_path = crosspack_completion_script_path(layout, shell);
     let shell_init_dir = layout.shell_init_shell_dir(shell.package_completion_shell());
     let mut output = String::new();
     match shell {
         CliCompletionShell::Bash | CliCompletionShell::Zsh => {
+            let escaped_man = escape_single_quote_shell(&man.display().to_string());
             let escaped_completion =
                 escape_single_quote_shell(&completion_path.display().to_string());
             let escaped_shell_init =
                 escape_single_quote_shell(&shell_init_dir.display().to_string());
             output.push_str(&format!("export PATH=\"{}:$PATH\"\n", bin.display()));
+            output.push_str(&format!("if [ -d '{escaped_man}' ]; then\n"));
+            output.push_str(&format!("  export MANPATH=\"{escaped_man}:${{MANPATH:-}}\"\n"));
+            output.push_str("fi\n");
             output.push_str(&format!("if [ -f '{escaped_completion}' ]; then\n"));
             output.push_str(&format!("  . '{escaped_completion}'\n"));
             output.push_str("fi\n");
@@ -174,6 +179,7 @@ fn init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) -> Strin
         }
         CliCompletionShell::Fish => {
             let escaped_bin = escape_single_quote_shell(&bin.display().to_string());
+            let escaped_man = escape_single_quote_shell(&man.display().to_string());
             let escaped_completion =
                 escape_single_quote_shell(&completion_path.display().to_string());
             let escaped_shell_init =
@@ -182,6 +188,9 @@ fn init_shell_snippet(layout: &PrefixLayout, shell: CliCompletionShell) -> Strin
             output.push_str(&format!("    if not contains -- '{escaped_bin}' $PATH\n"));
             output.push_str(&format!("        set -gx PATH '{escaped_bin}' $PATH\n"));
             output.push_str("    end\nend\n");
+            output.push_str(&format!("if test -d '{escaped_man}'\n"));
+            output.push_str(&format!("    set -gx MANPATH '{escaped_man}' $MANPATH\n"));
+            output.push_str("end\n");
             output.push_str(&format!("if test -f '{escaped_completion}'\n"));
             output.push_str(&format!("    source '{escaped_completion}'\n"));
             output.push_str("end\n");
