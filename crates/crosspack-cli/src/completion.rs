@@ -53,7 +53,7 @@ fn package_completion_loader_snippet(layout: &PrefixLayout, shell: CliCompletion
             let escaped_dir =
                 escape_single_quote_shell(&package_completion_dir.display().to_string());
             format!(
-                "# crosspack package completions\nif [ -d '{escaped_dir}' ]; then\n  if (( ${{fpath[(Ie)'{escaped_dir}']}} == 0 )); then\n    fpath=('{escaped_dir}' $fpath)\n  fi\n  autoload -Uz compinit\n  compinit -i >/dev/null 2>&1 || true\nfi\n"
+                "# crosspack package completions\nautoload -Uz compinit\ncompinit -i >/dev/null 2>&1 || true\nif [ -d '{escaped_dir}' ]; then\n  if (( ${{fpath[(Ie)'{escaped_dir}']}} == 0 )); then\n    fpath=('{escaped_dir}' $fpath)\n  fi\nfi\n"
             )
         }
         CliCompletionShell::Fish => {
