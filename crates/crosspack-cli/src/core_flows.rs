@@ -1092,10 +1092,7 @@ fn validate_source_build_plan(
             url
         )
     })?;
-    if !matches!(
-        archive_type,
-        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarZst
-    ) {
+    if !archive_type.supports_source_build() {
         return Err(anyhow!(
             "invalid source_build metadata for {} {} on target {}: archive type '{}' is not supported for source builds",
             manifest.name,

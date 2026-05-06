@@ -166,6 +166,7 @@ fn install_mode_for_archive_type(archive_type: ArchiveType) -> InstallMode {
     match archive_type {
         ArchiveType::Zip
         | ArchiveType::TarGz
+        | ArchiveType::TarXz
         | ArchiveType::TarZst
         | ArchiveType::Bin
         | ArchiveType::Dmg

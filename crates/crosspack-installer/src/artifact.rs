@@ -98,12 +98,9 @@ pub fn install_from_source_archive_to_dir(
     build_commands: &[String],
     install_commands: &[String],
 ) -> Result<PathBuf> {
-    if !matches!(
-        source_archive_type,
-        ArchiveType::Zip | ArchiveType::TarGz | ArchiveType::TarZst
-    ) {
+    if !source_archive_type.supports_source_build() {
         return Err(anyhow!(
-            "unsupported source build archive type '{}': expected one of zip, tar.gz, tar.zst",
+            "unsupported source build archive type '{}': expected one of zip, tar.gz, tar.xz, tar.zst",
             source_archive_type.as_str()
         ));
     }
@@ -261,7 +258,9 @@ fn stage_artifact_payload(
 
     match artifact_type {
         ArchiveType::Zip => extract_zip(artifact_path, raw_dir),
-        ArchiveType::TarGz | ArchiveType::TarZst => extract_tar(artifact_path, raw_dir),
+        ArchiveType::TarGz | ArchiveType::TarXz | ArchiveType::TarZst => {
+            extract_tar(artifact_path, raw_dir)
+        }
         ArchiveType::Bin => {
             stage_bin_payload(artifact_path, raw_dir, strip_components, artifact_root)
         }

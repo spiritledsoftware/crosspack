@@ -11,12 +11,15 @@ pub(crate) fn selected_satisfies_constraints(
 ) -> bool {
     for (name, manifest) in selected {
         if let Some(reqs) = constraints.get(name) {
-            if !reqs.iter().all(|req| req.matches(&manifest.version)) {
+            if !reqs
+                .iter()
+                .all(|req| req_matches_manifest_version(req, manifest))
+            {
                 return false;
             }
         }
         if let Some(pin) = pins.get(name) {
-            if !pin.matches(&manifest.version) {
+            if !req_matches_manifest_version(pin, manifest) {
                 return false;
             }
         }
@@ -48,11 +51,15 @@ pub(crate) fn selected_satisfies_constraints(
 fn manifests_conflict(left: &PackageManifest, right: &PackageManifest) -> bool {
     left.conflicts
         .get(&right.name)
-        .map(|req| req.matches(&right.version))
+        .map(|req| req_matches_manifest_version(req, right))
         .unwrap_or(false)
         || right
             .conflicts
             .get(&left.name)
-            .map(|req| req.matches(&left.version))
+            .map(|req| req_matches_manifest_version(req, left))
             .unwrap_or(false)
+}
+
+pub(crate) fn req_matches_manifest_version(req: &VersionReq, manifest: &PackageManifest) -> bool {
+    req.matches(&manifest.version) || *req == VersionReq::STAR
 }

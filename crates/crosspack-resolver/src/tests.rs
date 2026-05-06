@@ -79,6 +79,35 @@ sha256 = "def"
 }
 
 #[test]
+fn wildcard_request_selects_registry_revision_versions() {
+    let xpack_clang = manifest(
+        r#"
+name = "clang"
+version = "21.1.8-1"
+[[artifacts]]
+target = "x86_64-unknown-linux-gnu"
+url = "https://example.test/xpack-clang-21.1.8-1.tar.gz"
+sha256 = "abc"
+"#,
+    );
+
+    let roots = vec![RootRequirement {
+        name: "clang".to_string(),
+        requirement: VersionReq::STAR,
+    }];
+    let graph = resolve_dependency_graph(&roots, &BTreeMap::new(), |name| {
+        if name == "clang" {
+            Ok(vec![xpack_clang.clone()])
+        } else {
+            Ok(Vec::new())
+        }
+    })
+    .expect("wildcard should resolve registry revision version");
+
+    assert_eq!(graph.manifests["clang"].version.to_string(), "21.1.8-1");
+}
+
+#[test]
 fn resolves_transitive_dependencies_in_dependency_first_order() {
     let mut available = BTreeMap::new();
     available.insert(
