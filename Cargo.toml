@@ -9,7 +9,7 @@ version = "0.17.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
-assert_cmd = "2.0"
+assert_cmd = "2.2"
 anstyle = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 clap_complete = "4.6"
