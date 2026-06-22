@@ -36,7 +36,7 @@ jobs:
             ${{ vars.CROSSPACK_REGISTRY_REPOSITORY_NAME || 'crosspack-registry' }}
 
       - name: Checkout crosspack repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           token: ${{ steps.app-token.outputs.token }}
 
